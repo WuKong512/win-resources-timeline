@@ -1,0 +1,32 @@
+# JavaScript dependencies and caches
+node_modules/
+.vite/
+
+# Frontend build output
+dist/
+
+# Rust/Tauri build output
+target/
+src-tauri/target/
+
+# Local runtime data
+*.sqlite3
+*.sqlite3-shm
+*.sqlite3-wal
+
+# Logs and local environment files
+*.log
+.env
+.env.*
+!.env.example
+
+# Generated release binaries belong in GitHub Releases, not source control
+release/*.exe
+release/*.msi
+release/previous/
+
+# Editor and operating-system metadata
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
