@@ -26,9 +26,11 @@
 
 ## 历史数据语义
 
-v6 中不存在的数据不能推断：例如历史样本没有温度，就保持 NULL/unsupported-by-schema；没有 computer state 时，只能保留 foreground total，不能把全部前台时长标为 active usage。
+v6 中不存在的数据不能推断：例如历史样本没有温度、私有内存、能量或 coverage，就保持 NULL/unsupported-by-schema；没有 computer state 时，只能保留 foreground total，不能把全部前台时长标为 active usage。
 
 旧系统样本转换为 `sample_frame` 时按原时间戳和采样来源生成稳定映射。若多个旧表时间戳无法严格对齐，允许形成相邻 frame 或保存 legacy timestamp，不能为减少行数而错误合并。
+
+历史 v6 数据迁移完成并校验后，可以按 v7 processing_version 生成分钟/小时/日报；不能在缺少底层字段时生成伪造的能耗、CPU 贡献、私有内存或崩溃证据摘要。
 
 ## 校验清单
 

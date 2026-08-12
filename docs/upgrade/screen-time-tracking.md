@@ -29,6 +29,12 @@
 
 应用启动时恢复未封口区间：最多延伸到上次心跳、系统崩溃时间或 boot session 结束，不能直接延伸到本次启动时间。
 
+## Windows 与应用会话
+
+`boot_session` 表示 Windows 的一次启动/电源周期，来源于系统启动时间和 Windows Event Log；`collection_session` 只表示 Resource Timeline 在某套采集计划下的一次运行区间。同一 boot session 内可以有多个 collection session，应用重启不得被解释为 Windows 重启。
+
+系统启动/关机、睡眠/休眠和唤醒优先使用操作系统通知实时记录；应用未运行期间的历史由下一次启动扫描 Event Log 补齐。快速启动、完整重启、休眠恢复和普通睡眠恢复保留可验证的分类，不全部折叠成“应用启动”。
+
 ## 应用身份归一化
 
 逻辑 `app` 与具体 `app_executable` 分离。身份解析优先组合包族名、签名发布者、文件身份、规范化路径和产品名。Microsoft Store 应用升级后路径变化，应尽量归入同一逻辑应用；无法可靠合并时宁可保留两个候选并允许用户手动合并。
