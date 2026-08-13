@@ -126,6 +126,8 @@ pub fn render_probe_markdown(report: &ProbeReport) -> String {
     }
     output.push('\n');
 
+    output.push_str("Process detail permission-denied count is the number of processes with at least one denied child read; it is not the sum of denied API calls.\n\n");
+
     output.push_str("## Sampling\n\n");
     output.push_str(&format!(
         "- Wall duration: {} ms\n- Core expected/executed/dropped: {}/{}/{}\n- Process expected/executed/dropped: {}/{}/{}\n- Late wakeups: {}\n\n",

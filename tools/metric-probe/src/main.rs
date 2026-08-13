@@ -275,7 +275,7 @@ impl ProbeSession {
                 ("process.detail_working_set_readable_count", "count", "Processes with readable working set in the in-memory feasibility pass"),
                 ("process.detail_private_memory_readable_count", "count", "Processes with readable private memory in the in-memory feasibility pass"),
                 ("process.detail_io_readable_count", "count", "Processes with readable process I/O counters, counted independently of CPU and memory"),
-                ("process.detail_permission_denied_count", "count", "Process detail reads denied by Windows"),
+                ("process.detail_permission_denied_count", "count", "Processes with at least one denied process-detail child read; not a sum of denied API calls"),
                 ("process.detail_probe_failed_count", "count", "Process detail reads failed for non-permission reasons"),
                 ("process.detail_raced_count", "count", "Process detail reads affected by an exited process or transient PID race"),
             ] {

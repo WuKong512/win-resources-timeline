@@ -36,8 +36,7 @@ use windows::{
             Threading::{
                 GetCurrentProcess, GetCurrentProcessId, GetProcessHandleCount,
                 GetProcessIoCounters, GetProcessTimes, GetSystemTimes, OpenProcess,
-                OpenProcessToken, IO_COUNTERS, PROCESS_QUERY_INFORMATION,
-                PROCESS_QUERY_LIMITED_INFORMATION,
+                OpenProcessToken, IO_COUNTERS, PROCESS_QUERY_LIMITED_INFORMATION,
             },
         },
     },
@@ -671,49 +670,36 @@ pub fn process_metrics(pid: u32) -> ReadResult<ProcessMetrics> {
     }
 
     unsafe {
-        // Query and memory handles use the smallest access masks required by their APIs. A
-        // memory failure must not hide CPU time or I/O results, and vice versa.
-        let (cpu_time, read_bytes, write_bytes) =
-            match OpenProcess(PROCESS_QUERY_INFORMATION, false, pid) {
-                Ok(handle) => {
-                    let cpu_time = read_process_cpu_time(handle);
-                    let (read_bytes, write_bytes) = read_process_io_counters(handle);
-                    close_handle(handle);
-                    (cpu_time, read_bytes, write_bytes)
-                }
-                Err(error) => {
-                    let failure = classify_process_error(&error, "open_process_query");
-                    (
-                        ReadResult::status(failure.status, failure.reason_code.clone()),
-                        ReadResult::status(failure.status, failure.reason_code.clone()),
-                        ReadResult::status(failure.status, failure.reason_code),
-                    )
-                }
-            };
-
-        let (working_set_bytes, private_bytes) =
-            match OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) {
-                Ok(handle) => {
-                    let memory = read_process_memory(handle);
-                    close_handle(handle);
-                    memory
-                }
-                Err(error) => {
-                    let failure = classify_process_error(&error, "open_process_memory");
-                    (
-                        ReadResult::status(failure.status, failure.reason_code.clone()),
-                        ReadResult::status(failure.status, failure.reason_code),
-                    )
-                }
-            };
-
-        ReadResult::value(ProcessMetrics {
-            cpu_time_100ns: cpu_time,
-            working_set_bytes,
-            private_bytes,
-            read_bytes,
-            write_bytes,
-        })
+        // Windows 10/11 support all three detail APIs with limited query access. Keep one
+        // handle per process, while preserving independent results for each child read.
+        match OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) {
+            Ok(handle) => {
+                let cpu_time = read_process_cpu_time(handle);
+                let memory = read_process_memory(handle);
+                let (read_bytes, write_bytes) = read_process_io_counters(handle);
+                close_handle(handle);
+                ReadResult::value(ProcessMetrics {
+                    cpu_time_100ns: cpu_time,
+                    working_set_bytes: memory.0,
+                    private_bytes: memory.1,
+                    read_bytes,
+                    write_bytes,
+                })
+            }
+            Err(error) => {
+                let failure = classify_process_error(&error, "open_process_limited_query");
+                ReadResult::value(ProcessMetrics {
+                    cpu_time_100ns: ReadResult::status(failure.status, failure.reason_code.clone()),
+                    working_set_bytes: ReadResult::status(
+                        failure.status,
+                        failure.reason_code.clone(),
+                    ),
+                    private_bytes: ReadResult::status(failure.status, failure.reason_code.clone()),
+                    read_bytes: ReadResult::status(failure.status, failure.reason_code.clone()),
+                    write_bytes: ReadResult::status(failure.status, failure.reason_code),
+                })
+            }
+        }
     }
 }
 
@@ -1233,6 +1219,26 @@ mod tests {
         assert_eq!(summary.readable_io, 1);
         assert_eq!(summary.permission_denied, 1);
         assert_eq!(summary.probe_failed, 0);
+    }
+
+    #[test]
+    fn multiple_denied_child_reads_count_once_per_process() {
+        let mut summary = empty_summary();
+        summarize_process_detail(
+            &mut summary,
+            &metrics(
+                denied("cpu_denied"),
+                denied("memory_denied"),
+                denied("memory_denied"),
+                denied("io_denied"),
+                denied("io_denied"),
+            ),
+        );
+        assert_eq!(summary.permission_denied, 1);
+        assert_eq!(summary.readable_cpu_time, 0);
+        assert_eq!(summary.readable_working_set, 0);
+        assert_eq!(summary.readable_private_memory, 0);
+        assert_eq!(summary.readable_io, 0);
     }
 
     #[test]
