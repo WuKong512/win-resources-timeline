@@ -576,17 +576,19 @@
                              }
                          ],
     "comparison":  {
+                       "v3_default_process_enumerated_count":  346,
+                       "v4_default_process_enumerated_count":  308,
+                       "v3_default_process_accessible_count":  153,
+                       "v4_default_process_accessible_count":  130,
                        "v3_default_cpu_time_readable_count":  127,
                        "v4_default_cpu_time_readable_count":  130,
-                       "cpu_time_readable_delta":  3,
-                       "cpu_time_readable_improved":  true,
+                       "cpu_time_readable_observed_delta":  3,
                        "v3_default_io_readable_count":  127,
                        "v4_default_io_readable_count":  130,
-                       "io_readable_delta":  3,
-                       "io_readable_improved":  true,
+                       "io_readable_observed_delta":  3,
                        "average_probe_cpu_share_delta_percentage_points":  1.6845707336426985E-06,
                        "peak_working_set_delta_bytes":  7258112,
-                       "note":  "v3 values are from the prior final-default-v3 report; v4 values are from the final-v4 report. Resource differences are observed on this run only and are not a cross-hardware estimate."
+                       "note":  "The v3 and v4 runs enumerated different process populations (346 versus 308) and had different limited-access populations (153 versus 130). The 127-to-130 CPU-time and I/O differences are observed cross-run deltas only; they cannot establish causal improvement. The within-run v4 evidence is that all 130 processes with a successfully opened PROCESS_QUERY_LIMITED_INFORMATION handle also produced readable CPU time, working set, private memory, and I/O results. Resource differences are observed on this machine only and are not a cross-hardware estimate."
                    },
     "privacy":  {
                     "sanitized":  true,

@@ -79,12 +79,14 @@ The four readable counts are independent child-read outcomes. `process.detail_pe
 
 ## v3 Comparison
 
-| Metric | Final v3 | Final v4 | Delta | Improved |
-|---|---:|---:|---:|---|
-| CPU time readable processes | 127 | 130 | 3 | True |
-| I/O readable processes | 127 | 130 | 3 | True |
+| Metric | Final v3 | Final v4 | Observed delta |
+|---|---:|---:|---:|
+| Enumerated processes | 346 | 308 | -38 |
+| Limited-access processes | 153 | 130 | -23 |
+| CPU time readable processes | 127 | 130 | +3 |
+| I/O readable processes | 127 | 130 | +3 |
 
-The v4 CPU and I/O readable counts rose from 127 to 130 on this non-administrator run. This is an observed result on the current development machine, not a general Windows 10/11 estimate.
+The v3 and v4 runs enumerated different process populations, so the absolute 127-to-130 CPU-time and I/O differences are observed cross-run deltas only and cannot prove causal improvement. The primary within-run evidence is that v3 had 153 limited-access processes and 127 CPU/I/O-readable processes, while v4 had 130 limited-access processes and 130 readable processes for each of CPU time, working set, private memory, and I/O. Thus, in this v4 run, every process with a successfully opened `PROCESS_QUERY_LIMITED_INFORMATION` handle also produced all four detail reads successfully. This is an observation from the current development machine, not a general Windows 10/11 estimate.
 
 ## Permission Tests
 
