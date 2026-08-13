@@ -25,6 +25,9 @@ release/*.exe
 release/*.msi
 release/previous/
 
+# Raw metric-probe runs are local experiment artifacts
+artifacts/metric-probe/
+
 # Editor and operating-system metadata
 .DS_Store
 Thumbs.db

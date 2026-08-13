@@ -1,0 +1,655 @@
+{
+    "measurement_document_version":  "spike-01a/public-measurement/v1",
+    "source_schema_version":  "spike-01a/v1",
+    "title":  "Spike-01A Windows Basic Metrics Probe",
+    "scope":  "Current development machine result only; not generalizable to other hardware.",
+    "source_runs":  [
+                        {
+                            "label":  "default-v3",
+                            "source_report":  "artifacts/metric-probe/final-default-v3/report.json",
+                            "permission_scope":  "non-administrator process",
+                            "configuration":  {
+                                                  "duration_seconds":  60,
+                                                  "core_interval_ms":  2000,
+                                                  "process_interval_ms":  5000,
+                                                  "process_probe":  true,
+                                                  "disk_probe":  true,
+                                                  "network_probe":  true,
+                                                  "power_probe":  true
+                                              },
+                            "sampling":  {
+                                             "wall_duration_ms":  60000,
+                                             "core_expected_samples":  30,
+                                             "core_executed_samples":  30,
+                                             "core_dropped_samples":  0,
+                                             "process_expected_samples":  12,
+                                             "process_executed_samples":  12,
+                                             "process_dropped_samples":  0,
+                                             "late_wakeups":  0
+                                         },
+                            "coverage_ms":  {
+                                                "core":  57986,
+                                                "process":  54997
+                                            },
+                            "category_presence":  {
+                                                      "process":  true,
+                                                      "disk":  true,
+                                                      "network":  true,
+                                                      "power":  true
+                                                  },
+                            "resources":  {
+                                              "probe_cpu_share_percent":  {
+                                                                              "unit":  "percent",
+                                                                              "sample_count":  29,
+                                                                              "average":  0.1465189087000397,
+                                                                              "p50":  0.146484375,
+                                                                              "p95":  0.1758105615307653,
+                                                                              "max":  0.19541020510255128,
+                                                                              "peak":  0.19541020510255128
+                                                                          },
+                                              "working_set_bytes":  {
+                                                                        "unit":  "bytes",
+                                                                        "sample_count":  30,
+                                                                        "average":  13930086.4,
+                                                                        "p50":  13910016.0,
+                                                                        "p95":  14086144.0,
+                                                                        "max":  14086144.0,
+                                                                        "peak":  14086144.0
+                                                                    },
+                                              "thread_count":  {
+                                                                   "unit":  "count",
+                                                                   "sample_count":  30,
+                                                                   "average":  6.0,
+                                                                   "p50":  6.0,
+                                                                   "p95":  7.0,
+                                                                   "max":  7.0,
+                                                                   "peak":  7.0
+                                                               },
+                                              "handle_count":  {
+                                                                   "unit":  "count",
+                                                                   "sample_count":  30,
+                                                                   "average":  201.5,
+                                                                   "p50":  201.5,
+                                                                   "p95":  202.0,
+                                                                   "max":  202.0,
+                                                                   "peak":  202.0
+                                                               }
+                                          },
+                            "process_detail_latest_counts":  {
+                                                                 "process.detail_cpu_time_readable_count":  127.0,
+                                                                 "process.detail_working_set_readable_count":  153.0,
+                                                                 "process.detail_private_memory_readable_count":  153.0,
+                                                                 "process.detail_io_readable_count":  127.0,
+                                                                 "process.detail_permission_denied_count":  219.0,
+                                                                 "process.detail_probe_failed_count":  0.0,
+                                                                 "process.detail_raced_count":  0.0
+                                                             },
+                            "metrics":  {
+                                            "cpu.usage_percent":  {
+                                                                      "support_status":  "supported",
+                                                                      "reason_code":  "ready",
+                                                                      "sample_count":  29,
+                                                                      "failed_sample_count":  0,
+                                                                      "covered_duration_ms":  57986,
+                                                                      "call_latency_ms":  {
+                                                                                              "p50":  0.053399999999999996,
+                                                                                              "p95":  0.2294399999999998,
+                                                                                              "max":  0.317
+                                                                                          },
+                                                                      "latest_value":  3.857421875
+                                                                  },
+                                            "memory.used_bytes":  {
+                                                                      "support_status":  "supported",
+                                                                      "reason_code":  "ready",
+                                                                      "sample_count":  30,
+                                                                      "failed_sample_count":  0,
+                                                                      "covered_duration_ms":  57986,
+                                                                      "call_latency_ms":  {
+                                                                                              "p50":  0.0043,
+                                                                                              "p95":  0.006454999999999999,
+                                                                                              "max":  0.0083
+                                                                                          },
+                                                                      "latest_value":  18483916800.0
+                                                                  },
+                                            "memory.available_bytes":  {
+                                                                           "support_status":  "supported",
+                                                                           "reason_code":  "ready",
+                                                                           "sample_count":  30,
+                                                                           "failed_sample_count":  0,
+                                                                           "covered_duration_ms":  57986,
+                                                                           "call_latency_ms":  {
+                                                                                                   "p50":  0.0043,
+                                                                                                   "p95":  0.006454999999999999,
+                                                                                                   "max":  0.0083
+                                                                                               },
+                                                                           "latest_value":  15512801280.0
+                                                                       },
+                                            "memory.usage_percent":  {
+                                                                         "support_status":  "supported",
+                                                                         "reason_code":  "ready",
+                                                                         "sample_count":  30,
+                                                                         "failed_sample_count":  0,
+                                                                         "covered_duration_ms":  57986,
+                                                                         "call_latency_ms":  {
+                                                                                                 "p50":  0.0043,
+                                                                                                 "p95":  0.006454999999999999,
+                                                                                                 "max":  0.0083
+                                                                                             },
+                                                                         "latest_value":  54.369709324600784
+                                                                     },
+                                            "probe.cpu_time_100ns":  {
+                                                                         "support_status":  "supported",
+                                                                         "reason_code":  "ready",
+                                                                         "sample_count":  30,
+                                                                         "failed_sample_count":  0,
+                                                                         "covered_duration_ms":  57986,
+                                                                         "call_latency_ms":  {
+                                                                                                 "p50":  34.9574,
+                                                                                                 "p95":  36.32346,
+                                                                                                 "max":  37.6342
+                                                                                             },
+                                                                         "latest_value":  17343750.0
+                                                                     },
+                                            "probe.working_set_bytes":  {
+                                                                            "support_status":  "supported",
+                                                                            "reason_code":  "ready",
+                                                                            "sample_count":  30,
+                                                                            "failed_sample_count":  0,
+                                                                            "covered_duration_ms":  57986,
+                                                                            "call_latency_ms":  {
+                                                                                                    "p50":  34.9574,
+                                                                                                    "p95":  36.32346,
+                                                                                                    "max":  37.6342
+                                                                                                },
+                                                                            "latest_value":  14086144.0
+                                                                        },
+                                            "probe.thread_count":  {
+                                                                       "support_status":  "supported",
+                                                                       "reason_code":  "ready",
+                                                                       "sample_count":  30,
+                                                                       "failed_sample_count":  0,
+                                                                       "covered_duration_ms":  57986,
+                                                                       "call_latency_ms":  {
+                                                                                               "p50":  34.9574,
+                                                                                               "p95":  36.32346,
+                                                                                               "max":  37.6342
+                                                                                           },
+                                                                       "latest_value":  7.0
+                                                                   },
+                                            "probe.handle_count":  {
+                                                                       "support_status":  "supported",
+                                                                       "reason_code":  "ready",
+                                                                       "sample_count":  30,
+                                                                       "failed_sample_count":  0,
+                                                                       "covered_duration_ms":  57986,
+                                                                       "call_latency_ms":  {
+                                                                                               "p50":  34.9574,
+                                                                                               "p95":  36.32346,
+                                                                                               "max":  37.6342
+                                                                                           },
+                                                                       "latest_value":  202.0
+                                                                   },
+                                            "process.enumerated_count":  {
+                                                                             "support_status":  "supported",
+                                                                             "reason_code":  "ready",
+                                                                             "sample_count":  12,
+                                                                             "failed_sample_count":  0,
+                                                                             "covered_duration_ms":  54997,
+                                                                             "call_latency_ms":  {
+                                                                                                     "p50":  0.6733499999999999,
+                                                                                                     "p95":  0.86961,
+                                                                                                     "max":  0.8761
+                                                                                                 },
+                                                                             "latest_value":  346.0
+                                                                         },
+                                            "process.accessible_count":  {
+                                                                             "support_status":  "supported",
+                                                                             "reason_code":  "ready",
+                                                                             "sample_count":  12,
+                                                                             "failed_sample_count":  0,
+                                                                             "covered_duration_ms":  54997,
+                                                                             "call_latency_ms":  {
+                                                                                                     "p50":  0.6733499999999999,
+                                                                                                     "p95":  0.86961,
+                                                                                                     "max":  0.8761
+                                                                                                 },
+                                                                             "latest_value":  153.0
+                                                                         },
+                                            "process.restricted_count":  {
+                                                                             "support_status":  "supported",
+                                                                             "reason_code":  "ready",
+                                                                             "sample_count":  12,
+                                                                             "failed_sample_count":  0,
+                                                                             "covered_duration_ms":  54997,
+                                                                             "call_latency_ms":  {
+                                                                                                     "p50":  0.6733499999999999,
+                                                                                                     "p95":  0.86961,
+                                                                                                     "max":  0.8761
+                                                                                                 },
+                                                                             "latest_value":  193.0
+                                                                         },
+                                            "process.enumeration_elapsed_ms":  {
+                                                                                   "support_status":  "supported",
+                                                                                   "reason_code":  "ready",
+                                                                                   "sample_count":  12,
+                                                                                   "failed_sample_count":  0,
+                                                                                   "covered_duration_ms":  54997,
+                                                                                   "call_latency_ms":  {
+                                                                                                           "p50":  0.6733499999999999,
+                                                                                                           "p95":  0.86961,
+                                                                                                           "max":  0.8761
+                                                                                                       },
+                                                                                   "latest_value":  0.873
+                                                                               },
+                                            "process.detail_cpu_time_readable_count":  {
+                                                                                           "support_status":  "supported",
+                                                                                           "reason_code":  "ready",
+                                                                                           "sample_count":  12,
+                                                                                           "failed_sample_count":  0,
+                                                                                           "covered_duration_ms":  54997,
+                                                                                           "call_latency_ms":  {
+                                                                                                                   "p50":  2.28925,
+                                                                                                                   "p95":  2.62896,
+                                                                                                                   "max":  2.6744999999999997
+                                                                                                               },
+                                                                                           "latest_value":  127.0
+                                                                                       },
+                                            "process.detail_working_set_readable_count":  {
+                                                                                              "support_status":  "supported",
+                                                                                              "reason_code":  "ready",
+                                                                                              "sample_count":  12,
+                                                                                              "failed_sample_count":  0,
+                                                                                              "covered_duration_ms":  54997,
+                                                                                              "call_latency_ms":  {
+                                                                                                                      "p50":  2.28925,
+                                                                                                                      "p95":  2.62896,
+                                                                                                                      "max":  2.6744999999999997
+                                                                                                                  },
+                                                                                              "latest_value":  153.0
+                                                                                          },
+                                            "process.detail_private_memory_readable_count":  {
+                                                                                                 "support_status":  "supported",
+                                                                                                 "reason_code":  "ready",
+                                                                                                 "sample_count":  12,
+                                                                                                 "failed_sample_count":  0,
+                                                                                                 "covered_duration_ms":  54997,
+                                                                                                 "call_latency_ms":  {
+                                                                                                                         "p50":  2.28925,
+                                                                                                                         "p95":  2.62896,
+                                                                                                                         "max":  2.6744999999999997
+                                                                                                                     },
+                                                                                                 "latest_value":  153.0
+                                                                                             },
+                                            "process.detail_io_readable_count":  {
+                                                                                     "support_status":  "supported",
+                                                                                     "reason_code":  "ready",
+                                                                                     "sample_count":  12,
+                                                                                     "failed_sample_count":  0,
+                                                                                     "covered_duration_ms":  54997,
+                                                                                     "call_latency_ms":  {
+                                                                                                             "p50":  2.28925,
+                                                                                                             "p95":  2.62896,
+                                                                                                             "max":  2.6744999999999997
+                                                                                                         },
+                                                                                     "latest_value":  127.0
+                                                                                 },
+                                            "process.detail_permission_denied_count":  {
+                                                                                           "support_status":  "supported",
+                                                                                           "reason_code":  "ready",
+                                                                                           "sample_count":  12,
+                                                                                           "failed_sample_count":  0,
+                                                                                           "covered_duration_ms":  54997,
+                                                                                           "call_latency_ms":  {
+                                                                                                                   "p50":  2.28925,
+                                                                                                                   "p95":  2.62896,
+                                                                                                                   "max":  2.6744999999999997
+                                                                                                               },
+                                                                                           "latest_value":  219.0
+                                                                                       },
+                                            "process.detail_probe_failed_count":  {
+                                                                                      "support_status":  "supported",
+                                                                                      "reason_code":  "ready",
+                                                                                      "sample_count":  12,
+                                                                                      "failed_sample_count":  0,
+                                                                                      "covered_duration_ms":  54997,
+                                                                                      "call_latency_ms":  {
+                                                                                                              "p50":  2.28925,
+                                                                                                              "p95":  2.62896,
+                                                                                                              "max":  2.6744999999999997
+                                                                                                          },
+                                                                                      "latest_value":  0.0
+                                                                                  },
+                                            "process.detail_raced_count":  {
+                                                                               "support_status":  "supported",
+                                                                               "reason_code":  "ready",
+                                                                               "sample_count":  12,
+                                                                               "failed_sample_count":  0,
+                                                                               "covered_duration_ms":  54997,
+                                                                               "call_latency_ms":  {
+                                                                                                       "p50":  2.28925,
+                                                                                                       "p95":  2.62896,
+                                                                                                       "max":  2.6744999999999997
+                                                                                                   },
+                                                                               "latest_value":  0.0
+                                                                           },
+                                            "system.uptime_ms":  {
+                                                                     "support_status":  "supported",
+                                                                     "reason_code":  "ready",
+                                                                     "sample_count":  30,
+                                                                     "failed_sample_count":  0,
+                                                                     "covered_duration_ms":  57986,
+                                                                     "call_latency_ms":  {
+                                                                                             "p50":  0.00039999999999999996,
+                                                                                             "p95":  0.0006,
+                                                                                             "max":  0.0011
+                                                                                         },
+                                                                     "latest_value":  34835734.0
+                                                                 }
+                                        },
+                            "conclusion":  {
+                                               "average_probe_cpu_share_percent":  0.1465189087000397,
+                                               "probe_cpu_share_under_0_5_percent":  true,
+                                               "peak_working_set_bytes":  14086144,
+                                               "working_set_under_80_mb":  true
+                                           }
+                        },
+                        {
+                            "label":  "disabled-categories-v3",
+                            "source_report":  "artifacts/metric-probe/final-disabled-v3/report.json",
+                            "permission_scope":  "non-administrator process",
+                            "configuration":  {
+                                                  "duration_seconds":  60,
+                                                  "core_interval_ms":  2000,
+                                                  "process_interval_ms":  5000,
+                                                  "process_probe":  false,
+                                                  "disk_probe":  false,
+                                                  "network_probe":  false,
+                                                  "power_probe":  false
+                                              },
+                            "sampling":  {
+                                             "wall_duration_ms":  60000,
+                                             "core_expected_samples":  30,
+                                             "core_executed_samples":  30,
+                                             "core_dropped_samples":  0,
+                                             "process_expected_samples":  0,
+                                             "process_executed_samples":  0,
+                                             "process_dropped_samples":  0,
+                                             "late_wakeups":  0
+                                         },
+                            "coverage_ms":  {
+                                                "core":  57986,
+                                                "process":  null
+                                            },
+                            "category_presence":  {
+                                                      "process":  false,
+                                                      "disk":  false,
+                                                      "network":  false,
+                                                      "power":  false
+                                                  },
+                            "resources":  {
+                                              "probe_cpu_share_percent":  {
+                                                                              "unit":  "percent",
+                                                                              "sample_count":  29,
+                                                                              "average":  0.14146519649911166,
+                                                                              "p50":  0.146484375,
+                                                                              "p95":  0.1758105615307653,
+                                                                              "max":  0.19541020510255128,
+                                                                              "peak":  0.19541020510255128
+                                                                          },
+                                              "working_set_bytes":  {
+                                                                        "unit":  "bytes",
+                                                                        "sample_count":  30,
+                                                                        "average":  7051810.133333334,
+                                                                        "p50":  7053312.0,
+                                                                        "p95":  7067852.8,
+                                                                        "max":  7069696.0,
+                                                                        "peak":  7069696.0
+                                                                    },
+                                              "thread_count":  {
+                                                                   "unit":  "count",
+                                                                   "sample_count":  30,
+                                                                   "average":  2.5,
+                                                                   "p50":  2.5,
+                                                                   "p95":  4.0,
+                                                                   "max":  4.0,
+                                                                   "peak":  4.0
+                                                               },
+                                              "handle_count":  {
+                                                                   "unit":  "count",
+                                                                   "sample_count":  30,
+                                                                   "average":  90.0,
+                                                                   "p50":  90.0,
+                                                                   "p95":  90.0,
+                                                                   "max":  90.0,
+                                                                   "peak":  90.0
+                                                               }
+                                          },
+                            "process_detail_latest_counts":  {
+
+                                                             },
+                            "metrics":  {
+                                            "cpu.usage_percent":  {
+                                                                      "support_status":  "supported",
+                                                                      "reason_code":  "ready",
+                                                                      "sample_count":  29,
+                                                                      "failed_sample_count":  0,
+                                                                      "covered_duration_ms":  57986,
+                                                                      "call_latency_ms":  {
+                                                                                              "p50":  0.023799999999999998,
+                                                                                              "p95":  0.11221999999999997,
+                                                                                              "max":  0.1317
+                                                                                          },
+                                                                      "latest_value":  2.681618722574354
+                                                                  },
+                                            "memory.used_bytes":  {
+                                                                      "support_status":  "supported",
+                                                                      "reason_code":  "ready",
+                                                                      "sample_count":  30,
+                                                                      "failed_sample_count":  0,
+                                                                      "covered_duration_ms":  57986,
+                                                                      "call_latency_ms":  {
+                                                                                              "p50":  0.00405,
+                                                                                              "p95":  0.005755,
+                                                                                              "max":  0.0061
+                                                                                          },
+                                                                      "latest_value":  18475663360.0
+                                                                  },
+                                            "memory.available_bytes":  {
+                                                                           "support_status":  "supported",
+                                                                           "reason_code":  "ready",
+                                                                           "sample_count":  30,
+                                                                           "failed_sample_count":  0,
+                                                                           "covered_duration_ms":  57986,
+                                                                           "call_latency_ms":  {
+                                                                                                   "p50":  0.00405,
+                                                                                                   "p95":  0.005755,
+                                                                                                   "max":  0.0061
+                                                                                               },
+                                                                           "latest_value":  15521054720.0
+                                                                       },
+                                            "memory.usage_percent":  {
+                                                                         "support_status":  "supported",
+                                                                         "reason_code":  "ready",
+                                                                         "sample_count":  30,
+                                                                         "failed_sample_count":  0,
+                                                                         "covered_duration_ms":  57986,
+                                                                         "call_latency_ms":  {
+                                                                                                 "p50":  0.00405,
+                                                                                                 "p95":  0.005755,
+                                                                                                 "max":  0.0061
+                                                                                             },
+                                                                         "latest_value":  54.34543215766785
+                                                                     },
+                                            "probe.cpu_time_100ns":  {
+                                                                         "support_status":  "supported",
+                                                                         "reason_code":  "ready",
+                                                                         "sample_count":  30,
+                                                                         "failed_sample_count":  0,
+                                                                         "covered_duration_ms":  57986,
+                                                                         "call_latency_ms":  {
+                                                                                                 "p50":  34.051950000000005,
+                                                                                                 "p95":  35.17837,
+                                                                                                 "max":  35.3874
+                                                                                             },
+                                                                         "latest_value":  13125000.0
+                                                                     },
+                                            "probe.working_set_bytes":  {
+                                                                            "support_status":  "supported",
+                                                                            "reason_code":  "ready",
+                                                                            "sample_count":  30,
+                                                                            "failed_sample_count":  0,
+                                                                            "covered_duration_ms":  57986,
+                                                                            "call_latency_ms":  {
+                                                                                                    "p50":  34.051950000000005,
+                                                                                                    "p95":  35.17837,
+                                                                                                    "max":  35.3874
+                                                                                                },
+                                                                            "latest_value":  7061504.0
+                                                                        },
+                                            "probe.thread_count":  {
+                                                                       "support_status":  "supported",
+                                                                       "reason_code":  "ready",
+                                                                       "sample_count":  30,
+                                                                       "failed_sample_count":  0,
+                                                                       "covered_duration_ms":  57986,
+                                                                       "call_latency_ms":  {
+                                                                                               "p50":  34.051950000000005,
+                                                                                               "p95":  35.17837,
+                                                                                               "max":  35.3874
+                                                                                           },
+                                                                       "latest_value":  1.0
+                                                                   },
+                                            "probe.handle_count":  {
+                                                                       "support_status":  "supported",
+                                                                       "reason_code":  "ready",
+                                                                       "sample_count":  30,
+                                                                       "failed_sample_count":  0,
+                                                                       "covered_duration_ms":  57986,
+                                                                       "call_latency_ms":  {
+                                                                                               "p50":  34.051950000000005,
+                                                                                               "p95":  35.17837,
+                                                                                               "max":  35.3874
+                                                                                           },
+                                                                       "latest_value":  90.0
+                                                                   },
+                                            "system.uptime_ms":  {
+                                                                     "support_status":  "supported",
+                                                                     "reason_code":  "ready",
+                                                                     "sample_count":  30,
+                                                                     "failed_sample_count":  0,
+                                                                     "covered_duration_ms":  57986,
+                                                                     "call_latency_ms":  {
+                                                                                             "p50":  0.00039999999999999996,
+                                                                                             "p95":  0.0006549999999999997,
+                                                                                             "max":  0.001
+                                                                                         },
+                                                                     "latest_value":  34835359.0
+                                                                 }
+                                        },
+                            "conclusion":  {
+                                               "average_probe_cpu_share_percent":  0.14146519649911166,
+                                               "probe_cpu_share_under_0_5_percent":  true,
+                                               "peak_working_set_bytes":  7069696,
+                                               "working_set_under_80_mb":  true
+                                           }
+                        }
+                    ],
+    "machine":  {
+                    "os_name":  "Windows",
+                    "os_display_version":  "25H2",
+                    "os_build":  "26200",
+                    "architecture":  "x64",
+                    "cpu_model":  "AMD Ryzen 7 9700X 8-Core Processor",
+                    "logical_processor_count":  16,
+                    "memory_total_bytes":  33996718080
+                },
+    "permission_tests":  [
+                             {
+                                 "integrity_level":  "non-administrator",
+                                 "status":  "completed",
+                                 "observed_scope":  "non-administrator process"
+                             },
+                             {
+                                 "integrity_level":  "administrator",
+                                 "status":  "pending",
+                                 "reason":  "Not executed; no UAC elevation was triggered."
+                             }
+                         ],
+    "comparison":  {
+                       "average_probe_cpu_share_delta_percentage_points":  0.00505371220092804,
+                       "peak_working_set_delta_bytes":  7016448,
+                       "note":  "Differences are observed on this run only and are not a cross-hardware estimate."
+                   },
+    "deferred":  [
+                     {
+                         "item":  "CPU/GPU temperature or power",
+                         "status":  "deferred",
+                         "reason":  "Not implemented in this spike"
+                     },
+                     {
+                         "item":  "GPU utilization, frequency, and VRAM",
+                         "status":  "deferred",
+                         "reason":  "Vendor APIs are explicitly out of scope"
+                     },
+                     {
+                         "item":  "Battery charge/discharge power, health, and cycles",
+                         "status":  "deferred",
+                         "reason":  "Windows baseline status only"
+                     },
+                     {
+                         "item":  "SMART/NVMe temperature",
+                         "status":  "deferred",
+                         "reason":  "No storage health API is called"
+                     },
+                     {
+                         "item":  "Fan or pump telemetry",
+                         "status":  "deferred",
+                         "reason":  "No hardware sensor provider is called"
+                     },
+                     {
+                         "item":  "Windows crash judgment",
+                         "status":  "deferred",
+                         "reason":  "No crash inference is implemented"
+                     },
+                     {
+                         "item":  "Event Log event classification",
+                         "status":  "deferred",
+                         "reason":  "No Event Log subscription is implemented"
+                     },
+                     {
+                         "item":  "Formal sleep/wake event subscription",
+                         "status":  "deferred",
+                         "reason":  "No event subscription is implemented"
+                     },
+                     {
+                         "item":  "Process GPU/VRAM attribution",
+                         "status":  "deferred",
+                         "reason":  "No GPU process attribution is implemented"
+                     },
+                     {
+                         "item":  "Cross-hardware validation",
+                         "status":  "deferred",
+                         "reason":  "This result is limited to the current machine"
+                     },
+                     {
+                         "item":  "Administrator comparison",
+                         "status":  "pending",
+                         "reason":  "The other Windows integrity level was not run automatically"
+                     }
+                 ],
+    "privacy":  {
+                    "sanitized":  true,
+                    "omitted_fields":  [
+                                           "account identity",
+                                           "host identity",
+                                           "hardware serial identifiers",
+                                           "network address identifiers",
+                                           "absolute paths",
+                                           "process identity and invocation text",
+                                           "window caption text",
+                                           "security identifiers",
+                                           "database contents"
+                                       ],
+                    "process_detail_retention":  "in memory only; aggregate counts only in report"
+                }
+}
