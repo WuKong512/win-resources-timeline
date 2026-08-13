@@ -1,6 +1,6 @@
 # 下一阶段架构设计（PR-00）
 
-状态：Draft；合并后作为下一阶段实现基线  
+状态：已合并；作为下一阶段实现基线持续增补  
 基线版本：v0.3.2 / SQLite schema v6  
 基线提交：`0b50c5cc9acf33564c5274b6e58ce95dd16710c3`
 
@@ -23,6 +23,7 @@
 | [data-model-v7.md](./data-model-v7.md) | v7 表结构、语义和查询模型 |
 | [collection-providers.md](./collection-providers.md) | 硬件 Provider、能力发现和降级策略 |
 | [collection-policy.md](./collection-policy.md) | 最终指标范围、采样频率、能耗与用户设置 |
+| [collection-feasibility-spike.md](./collection-feasibility-spike.md) | Spike-01 接口可用性、权限和后台开销验证 |
 | [screen-time-tracking.md](./screen-time-tracking.md) | 前台应用与 Windows 使用时间统计 |
 | [crash-detection.md](./crash-detection.md) | 崩溃识别、证据保护和客观摘要边界 |
 | [performance-storage-budget.md](./performance-storage-budget.md) | 后台资源预算、写入策略和保留策略 |
@@ -35,6 +36,7 @@
 - 屏幕使用时间与进程资源快照是两条独立数据链，查询时再关联。
 - 前台切换优先使用 Windows 事件钩子，心跳仅用于恢复与校验。
 - 硬件传感器使用可插拔 Provider；同一指标同一时刻只选择一个有效来源。
+- 正式默认启用硬件指标前必须完成 Spike-01；单机可读取不等于跨设备支持或低开销。
 - 均衡模式默认核心资源 2 秒、进程资源 5 秒；Windows 节能模式下默认自动切换轻量采集。
 - 功耗统计只组合本身有采集价值、来源可靠且范围不重叠的 CPU/GPU 数据，并明确标注构成与覆盖率。
 - 进程数据按详细样本 → 1 分钟 → 1 小时 → 每日统计分层压缩，保留期限由用户控制。
