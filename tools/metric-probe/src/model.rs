@@ -2,7 +2,7 @@ use crate::stats::Distribution;
 use serde::Serialize;
 use std::collections::BTreeMap;
 
-pub const SCHEMA_VERSION: &str = "spike-01a/v1";
+pub const SCHEMA_VERSION: &str = "spike-01b/v1";
 
 #[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -55,6 +55,9 @@ pub struct MetricRecord {
     pub support_status: SupportStatus,
     pub reason_code: String,
     pub unit: String,
+    pub value_range: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub power_scope: Option<String>,
     pub sample_count: usize,
     pub failed_sample_count: usize,
     pub covered_duration_ms: u64,
@@ -90,6 +93,8 @@ impl MetricRecord {
             support_status,
             reason_code: reason_code.into(),
             unit: unit.into(),
+            value_range: "provider-defined".to_string(),
+            power_scope: None,
             sample_count: 0,
             failed_sample_count: 0,
             covered_duration_ms: 0,
@@ -102,6 +107,16 @@ impl MetricRecord {
             interval_values: Vec::new(),
             latency_values: Vec::new(),
         }
+    }
+
+    pub fn with_value_range(mut self, value_range: impl Into<String>) -> Self {
+        self.value_range = value_range.into();
+        self
+    }
+
+    pub fn with_power_scope(mut self, power_scope: impl Into<String>) -> Self {
+        self.power_scope = Some(power_scope.into());
+        self
     }
 
     pub fn record_success(
@@ -188,6 +203,7 @@ pub struct TestConfiguration {
     pub disk_probe: bool,
     pub network_probe: bool,
     pub power_probe: bool,
+    pub gpu_probe: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -356,5 +372,40 @@ mod tests {
         assert_eq!(metric.covered_duration_ms, 40);
         assert_eq!(metric.sampling_interval.p50, Some(20.0));
         assert_eq!(metric.sampling_interval.p95, Some(20.0));
+    }
+
+    #[test]
+    fn one_metric_failure_does_not_affect_another_metric() {
+        let mut successful = MetricRecord::new(
+            "gpu:nvidia:index-0",
+            "gpu.utilization_percent",
+            "nvidia-nvml",
+            SupportStatus::Supported,
+            "ready",
+            "percent",
+            "NVIDIA NVML dynamic runtime",
+            Vec::new(),
+        );
+        let mut failed = MetricRecord::new(
+            "gpu:nvidia:index-0",
+            "gpu.power_watts",
+            "nvidia-nvml",
+            SupportStatus::Supported,
+            "ready",
+            "W",
+            "NVIDIA NVML dynamic runtime",
+            Vec::new(),
+        );
+        successful.record_success(100, 42.0, Some(2_000), 2_000, 0.1);
+        failed.record_failure_with_status(
+            SupportStatus::Unsupported,
+            "nvml_not_supported".to_string(),
+            0.2,
+        );
+        assert_eq!(successful.support_status, SupportStatus::Supported);
+        assert_eq!(successful.sample_count, 1);
+        assert_eq!(failed.support_status, SupportStatus::Unsupported);
+        assert_eq!(failed.sample_count, 0);
+        assert_eq!(failed.latest_value, None);
     }
 }

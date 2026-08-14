@@ -1,0 +1,340 @@
+{
+  "measurement_document_version": "spike-01b/public-measurement/v1",
+  "source_schema_version": "spike-01b/v1",
+  "title": "Spike-01B NVIDIA NVML GPU metrics and background-cost probe",
+  "scope": "Current development machine only; not generalizable to other hardware or the NVIDIA product line.",
+  "git": {
+    "starting_head": "7c5f03debcc258d5b4e48fb71ec8edcbb0466c06",
+    "base_commit": "7c5f03debcc258d5b4e48fb71ec8edcbb0466c06",
+    "branch": "agent/spike-01b-nvidia-nvml-probe"
+  },
+  "machine": {
+    "os_name": "Windows",
+    "os_display_version": "25H2",
+    "os_build": "26200",
+    "architecture": "x64",
+    "cpu_model": "AMD Ryzen 7 9700X 8-Core Processor",
+    "logical_processor_count": 16,
+    "memory_total_bytes": 33996718080,
+    "gpu_model": "NVIDIA GeForce RTX 5070 Ti",
+    "nvidia_driver_version": "610.88"
+  },
+  "permission_scope": {
+    "integrity_level": "non-administrator",
+    "elevated": false,
+    "administrator_comparison": "pending; no UAC elevation was triggered"
+  },
+  "provider": {
+    "name": "nvidia-nvml",
+    "source": "NVIDIA NVML dynamic runtime",
+    "dynamic_loading": "LoadLibraryExW with LOAD_LIBRARY_SEARCH_SYSTEM32 for nvml.dll, then the official ProgramW6432 NVIDIA Corporation NVSMI location; no recursive disk scan",
+    "initialization": "nvmlInit_v2",
+    "shutdown": "nvmlShutdown on normal and error cleanup paths",
+    "dependency_change": "No new Rust crate or third-party binary; the existing windows 0.58 dependency supplies Win32 loader APIs",
+    "implementation_boundary": "Independent tools/metric-probe CLI only; not a production Provider"
+  },
+  "runs": [
+    {
+      "label": "nvml-enabled",
+      "source_artifact": "artifacts/metric-probe/spike-01b-enabled-60s/report.json",
+      "started_at_utc": "2026-08-14T03:48:44Z",
+      "finished_at_utc": "2026-08-14T03:49:44Z",
+      "permission_scope": "non-administrator",
+      "configuration": {
+        "duration_seconds": 60,
+        "core_interval_ms": 2000,
+        "gpu_interval_ms": 2000,
+        "process_probe": false,
+        "disk_probe": false,
+        "network_probe": false,
+        "power_baseline_probe": false,
+        "gpu_probe": true
+      },
+      "sampling": {
+        "wall_duration_ms": 60000,
+        "core_expected_samples": 30,
+        "core_executed_samples": 30,
+        "core_dropped_samples": 0,
+        "gpu_expected_samples": 30,
+        "gpu_executed_samples": 30,
+        "gpu_dropped_samples": 0,
+        "gpu_covered_duration_ms": 57985,
+        "gpu_coverage_percent": 96.642,
+        "late_wakeups": 0
+      },
+      "resources": {
+        "probe_cpu_share_percent": {
+          "unit": "percent_of_whole_machine",
+          "sample_count": 29,
+          "average": 0.097680676275638,
+          "p50": 0.097705102551276,
+          "p95": 0.097705102551276,
+          "max": 0.146484375
+        },
+        "working_set_bytes": {
+          "unit": "bytes",
+          "sample_count": 30,
+          "average": 30057676.8,
+          "p50": 30046208,
+          "p95": 30085120,
+          "peak": 30085120
+        },
+        "thread_count": {
+          "unit": "count",
+          "sample_count": 30,
+          "average": 2.5,
+          "peak": 4
+        },
+        "handle_count": {
+          "unit": "count",
+          "sample_count": 30,
+          "average": 117,
+          "peak": 117
+        }
+      },
+      "devices": [
+        {
+          "device_key": "gpu:nvidia:index-0",
+          "product_name": "NVIDIA GeForce RTX 5070 Ti",
+          "driver_version": "610.88",
+          "metrics": {
+            "gpu.utilization_percent": {
+              "support_status": "supported",
+              "reason_code": "ready",
+              "unit": "percent",
+              "value_range": "0..100",
+              "sample_count": 30,
+              "failed_sample_count": 0,
+              "covered_duration_ms": 57985,
+              "coverage_percent": 96.642,
+              "call_latency_ms": { "p50": 0.00715, "p95": 0.009265, "max": 0.501 },
+              "latest_value": 6
+            },
+            "gpu.memory_controller_utilization_percent": {
+              "support_status": "supported",
+              "reason_code": "ready",
+              "unit": "percent",
+              "value_range": "0..100",
+              "sample_count": 30,
+              "failed_sample_count": 0,
+              "covered_duration_ms": 57985,
+              "coverage_percent": 96.642,
+              "call_latency_ms": { "p50": 0.00715, "p95": 0.009265, "max": 0.501 },
+              "latest_value": 1
+            },
+            "gpu.temperature_celsius": {
+              "support_status": "supported",
+              "reason_code": "ready",
+              "unit": "C",
+              "value_range": "driver-defined non-negative Celsius value",
+              "sample_count": 30,
+              "failed_sample_count": 0,
+              "covered_duration_ms": 57985,
+              "coverage_percent": 96.642,
+              "call_latency_ms": { "p50": 0.0014, "p95": 0.002155, "max": 0.0679 },
+              "latest_value": 47
+            },
+            "gpu.power_watts": {
+              "support_status": "supported",
+              "reason_code": "ready",
+              "unit": "W",
+              "power_scope": "gpu_board",
+              "value_range": "driver-defined non-negative board power",
+              "sample_count": 30,
+              "failed_sample_count": 0,
+              "covered_duration_ms": 57985,
+              "coverage_percent": 96.642,
+              "call_latency_ms": { "p50": 0.0022, "p95": 0.0033, "max": 0.1686 },
+              "latest_value": 41.776
+            },
+            "gpu.graphics_clock_mhz": {
+              "support_status": "supported",
+              "reason_code": "ready",
+              "unit": "MHz",
+              "value_range": "driver-defined non-negative clock",
+              "sample_count": 30,
+              "failed_sample_count": 0,
+              "covered_duration_ms": 57985,
+              "coverage_percent": 96.642,
+              "call_latency_ms": { "p50": 0.0018, "p95": 0.00273, "max": 0.0594 },
+              "latest_value": 2535
+            },
+            "gpu.memory_clock_mhz": {
+              "support_status": "supported",
+              "reason_code": "ready",
+              "unit": "MHz",
+              "value_range": "driver-defined non-negative clock",
+              "sample_count": 30,
+              "failed_sample_count": 0,
+              "covered_duration_ms": 57985,
+              "coverage_percent": 96.642,
+              "call_latency_ms": { "p50": 0.00025, "p95": 0.0005, "max": 0.0006 },
+              "latest_value": 16001
+            },
+            "gpu.vram_used_bytes": {
+              "support_status": "supported",
+              "reason_code": "ready",
+              "unit": "bytes",
+              "value_range": "0..gpu.vram_total_bytes",
+              "sample_count": 30,
+              "failed_sample_count": 0,
+              "covered_duration_ms": 57985,
+              "coverage_percent": 96.642,
+              "call_latency_ms": { "p50": 0.01395, "p95": 0.020895, "max": 0.0219 },
+              "latest_value": 3527151616
+            },
+            "gpu.vram_total_bytes": {
+              "support_status": "supported",
+              "reason_code": "ready",
+              "unit": "bytes",
+              "value_range": "non-negative device memory capacity",
+              "sample_count": 30,
+              "failed_sample_count": 0,
+              "covered_duration_ms": 57985,
+              "coverage_percent": 96.642,
+              "call_latency_ms": { "p50": 0.01395, "p95": 0.020895, "max": 0.0219 },
+              "latest_value": 17094934528
+            }
+          }
+        }
+      ]
+    },
+    {
+      "label": "nvml-disabled",
+      "source_artifact": "artifacts/metric-probe/spike-01b-disabled-60s/report.json",
+      "started_at_utc": "2026-08-14T03:49:53Z",
+      "finished_at_utc": "2026-08-14T03:50:53Z",
+      "permission_scope": "non-administrator",
+      "configuration": {
+        "duration_seconds": 60,
+        "core_interval_ms": 2000,
+        "gpu_interval_ms": 2000,
+        "process_probe": false,
+        "disk_probe": false,
+        "network_probe": false,
+        "power_baseline_probe": false,
+        "gpu_probe": false
+      },
+      "sampling": {
+        "wall_duration_ms": 60000,
+        "core_expected_samples": 30,
+        "core_executed_samples": 30,
+        "core_dropped_samples": 0,
+        "gpu_expected_samples": 0,
+        "gpu_executed_samples": 0,
+        "gpu_dropped_samples": 0,
+        "gpu_covered_duration_ms": 0,
+        "gpu_coverage_percent": 0,
+        "late_wakeups": 0
+      },
+      "resources": {
+        "probe_cpu_share_percent": {
+          "unit": "percent_of_whole_machine",
+          "sample_count": 29,
+          "average": 0.102735230761933,
+          "p50": 0.097705102551276,
+          "p95": 0.146557653826913,
+          "max": 0.146557653826913
+        },
+        "working_set_bytes": {
+          "unit": "bytes",
+          "sample_count": 30,
+          "average": 6203665.066667,
+          "p50": 6201344,
+          "p95": 6238208,
+          "peak": 6238208
+        },
+        "thread_count": {
+          "unit": "count",
+          "sample_count": 30,
+          "average": 2.5,
+          "peak": 4
+        },
+        "handle_count": {
+          "unit": "count",
+          "sample_count": 30,
+          "average": 83,
+          "peak": 83
+        }
+      },
+      "devices": [],
+      "gpu_metrics_generated": false
+    }
+  ],
+  "observed_delta_enabled_minus_disabled": {
+    "meaning": "Observed delta from two sequential 60-second runs on this machine; not a causal estimate",
+    "probe_cpu_share_percentage_points": -0.005054554486295,
+    "peak_working_set_bytes": 23846912,
+    "peak_working_set_mib": 22.7421875,
+    "peak_thread_count": 0,
+    "peak_handle_count": 34
+  },
+  "budget_comparison": {
+    "reference_cpu_budget_percent": 0.5,
+    "reference_working_set_budget_bytes": 83886080,
+    "enabled_average_probe_cpu_percent": 0.097680676275638,
+    "enabled_peak_working_set_bytes": 30085120,
+    "enabled_peak_working_set_mib": 28.69140625,
+    "current_machine_within_reference_budget": true
+  },
+  "reference_tool": {
+    "tool": "nvidia-smi",
+    "status": "completed_once_read_only",
+    "snapshot": {
+      "gpu_model": "NVIDIA GeForce RTX 5070 Ti",
+      "driver_version": "610.88",
+      "memory_total_mib": 16303,
+      "memory_used_mib": 3057,
+      "memory_free_mib": 12939
+    },
+    "limitation": "nvidia-smi also uses NVML, so it is not an independent implementation or source. It is only a same-backend reasonableness snapshot and does not replace an independent MSI Afterburner or HWiNFO time-window comparison; no such independent comparison was run."
+  },
+  "measurement_conditions": {
+    "uac_triggered": false,
+    "administrator_switch": false,
+    "gpu_stress_test_started": false,
+    "game_or_benchmark_started": false,
+    "afterburner_or_hwinfo_changed": false,
+    "driver_or_gpu_configuration_changed": false,
+    "load_description": "No controlled GPU load; ordinary current-machine desktop state only"
+  },
+  "conclusion": {
+    "current_machine": "NVML initialized successfully; one NVIDIA GPU enumerated; all eight requested GPU metrics were supported for 30 samples with zero failures at the shared 2-second core interval.",
+    "power_semantics": "gpu.power_watts is unit=W with power_scope=gpu_board. It is not whole-system, socket, wall-input, or total system power.",
+    "scope_limit": "This does not establish support, semantics, or overhead for the NVIDIA GeForce product line, other NVIDIA devices, other drivers, or other Windows machines.",
+    "production_decision": "Probe evidence is complete for this machine only; formal production Provider work remains out of scope."
+  },
+  "privacy": {
+    "sanitized": true,
+    "privacy_scan": "passed",
+    "omitted_fields": [
+      "account identity",
+      "host identity",
+      "hardware unique identifiers",
+      "network address identifiers",
+      "absolute paths",
+      "process identity and invocation text",
+      "window caption text",
+      "security identifiers",
+      "database contents"
+    ],
+    "raw_measurements": "Ignored under artifacts/metric-probe/ and not part of the public report"
+  },
+  "validation_status": {
+    "administrator_comparison": "pending",
+    "idle_30_minute_run": "deferred",
+    "representative_load_30_minute_run": "deferred",
+    "24_hour_soak": "deferred",
+    "cross_hardware_validation": "deferred",
+    "formal_provider": "deferred",
+    "schema_database_tauri_runtime_ui": "not modified"
+  },
+  "blocked": [],
+  "deferred": [
+    "Administrator comparison; no UAC elevation was triggered",
+    "30-minute idle and representative-load windows",
+    "24-hour soak and long-term storage-growth validation",
+    "Cross-hardware NVIDIA/AMD/Intel validation",
+    "Formal production GPU Provider, schema v7, database writes, Tauri runtime, and UI"
+  ]
+}

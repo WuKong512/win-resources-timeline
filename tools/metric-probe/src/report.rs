@@ -34,7 +34,7 @@ pub fn write_inventory_json(report: &InventoryReport) -> Result<String, String> 
 
 pub fn render_probe_markdown(report: &ProbeReport) -> String {
     let mut output = String::new();
-    output.push_str("# Spike-01A Windows Metric Probe\n\n");
+    output.push_str("# Spike-01B NVIDIA NVML GPU Metric Probe\n\n");
     output.push_str(&format!("- Schema: `{}`\n", report.schema_version));
     output.push_str(&format!("- Started: `{}`\n", report.started_at_utc));
     output.push_str(&format!("- Finished: `{}`\n", report.finished_at_utc));
@@ -84,14 +84,15 @@ pub fn render_probe_markdown(report: &ProbeReport) -> String {
 
     output.push_str("## Configuration\n\n");
     output.push_str(&format!(
-        "- Duration: {} seconds\n- Core interval: {} ms\n- Process interval: {} ms\n- Process probe: {}\n- Disk probe: {}\n- Network probe: {}\n- Power probe: {}\n\n",
+        "- Duration: {} seconds\n- Core interval: {} ms\n- Process interval: {} ms\n- Process probe: {}\n- Disk probe: {}\n- Network probe: {}\n- Power probe: {}\n- GPU probe: {}\n\n",
         report.configuration.duration_seconds,
         report.configuration.core_interval_ms,
         report.configuration.process_interval_ms,
         report.configuration.process_probe,
         report.configuration.disk_probe,
         report.configuration.network_probe,
-        report.configuration.power_probe
+        report.configuration.power_probe,
+        report.configuration.gpu_probe
     ));
 
     output.push_str("## Devices\n\n| Device | Category | Present | Classification | Details |\n|---|---|---:|---|---|\n");
@@ -120,13 +121,13 @@ pub fn render_probe_markdown(report: &ProbeReport) -> String {
     }
     output.push('\n');
 
-    output.push_str("## Metrics\n\n| Device | Metric | Provider | Status | Samples | Failed | Coverage | Interval P50 | Interval P95 | Interval Max | Call P50 | Call P95 | Call Max | Latest |\n|---|---|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|\n");
+    output.push_str("## Metrics\n\n| Device | Metric | Provider | Status | Unit | Range | Power scope | Samples | Failed | Coverage | Interval P50 | Interval P95 | Interval Max | Call P50 | Call P95 | Call Max | Latest |\n|---|---|---|---|---|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|\n");
     for metric in &report.metrics {
         output.push_str(&format_metric_row(metric));
     }
     output.push('\n');
 
-    output.push_str("Process detail permission-denied count is the number of processes with at least one denied child read; it is not the sum of denied API calls.\n\n");
+    output.push_str("Process detail permission-denied count is the number of processes with at least one denied child read; it is not the sum of denied API calls. NVIDIA board power is `unit=W` with `power_scope=gpu_board`; it is not system or wall power.\n\n");
 
     output.push_str("## Sampling\n\n");
     output.push_str(&format!(
@@ -231,6 +232,12 @@ pub fn validate_public_text(text: &str) -> Result<(), String> {
         "c:\\users\\",
         "\\users\\",
         "s-1-5-",
+        "uuid",
+        "serial",
+        "pci bus",
+        "pci_bus",
+        "full path",
+        "dll path",
     ];
     if let Some(marker) = forbidden.iter().find(|marker| lower.contains(**marker)) {
         return Err(format!("privacy scan failed on marker '{marker}'"));
@@ -314,11 +321,14 @@ fn status_name(status: SupportStatus) -> &'static str {
 
 fn format_metric_row(metric: &MetricRecord) -> String {
     format!(
-        "| `{}` | `{}` | `{}` | `{}` | {} | {} | {} ms | {} | {} | {} | {} | {} | {} | {} |\n",
+        "| `{}` | `{}` | `{}` | `{}` | `{}` | `{}` | {} | {} | {} | {} ms | {} | {} | {} | {} | {} | {} | {} |\n",
         metric.device_key,
         metric.metric_key,
         metric.provider,
         status_name(metric.support_status),
+        metric.unit,
+        metric.value_range,
+        metric.power_scope.as_deref().unwrap_or("n/a"),
         metric.sample_count,
         metric.failed_sample_count,
         metric.covered_duration_ms,
@@ -398,6 +408,7 @@ mod tests {
                 disk_probe: true,
                 network_probe: true,
                 power_probe: true,
+                gpu_probe: true,
             },
             devices: vec![DeviceInfo {
                 device_key: "device:test".to_string(),
@@ -471,6 +482,9 @@ mod tests {
         assert!(validate_public_text("C:\\Users\\someone\\file.exe").is_err());
         assert!(validate_public_text("Windows SID is intentionally omitted").is_ok());
         assert!(validate_public_text("S-1-5-18").is_err());
+        assert!(validate_public_text("GPU UUID is omitted").is_err());
+        assert!(validate_public_text("PCI bus ID is omitted").is_err());
+        assert!(validate_public_text("serial number is omitted").is_err());
     }
 
     #[test]
@@ -495,6 +509,36 @@ mod tests {
         assert!(markdown.contains("device:test"));
         assert!(markdown.contains("metric:test"));
         assert!(markdown.contains(status));
+    }
+
+    #[test]
+    fn json_and_markdown_keep_metric_unit_range_and_power_scope_consistent() {
+        let mut report = fixture();
+        report.metrics[0] = MetricRecord::new(
+            "gpu:nvidia:index-0",
+            "gpu.power_watts",
+            "nvidia-nvml",
+            SupportStatus::Supported,
+            "ok",
+            "W",
+            "NVIDIA NVML dynamic runtime",
+            Vec::new(),
+        )
+        .with_value_range("driver-defined non-negative board power")
+        .with_power_scope("gpu_board");
+        let json = serde_json::to_value(&report).unwrap();
+        let metric = &json["metrics"][0];
+        let markdown = render_probe_markdown(&report);
+        assert_eq!(metric["unit"].as_str(), Some("W"));
+        assert_eq!(
+            metric["value_range"].as_str(),
+            Some("driver-defined non-negative board power")
+        );
+        assert_eq!(metric["power_scope"].as_str(), Some("gpu_board"));
+        assert!(markdown.contains("gpu.power_watts"));
+        assert!(
+            markdown.contains("| `W` | `driver-defined non-negative board power` | gpu_board |")
+        );
     }
 
     #[allow(dead_code)]

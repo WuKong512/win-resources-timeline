@@ -44,6 +44,10 @@ use windows::{
 
 pub const SOURCE_SYSTEM_INFO: &str = "Windows Win32 API";
 pub const SOURCE_PDH: &str = "Windows PDH English counters";
+pub const SOURCE_NVML: &str = "NVIDIA NVML dynamic runtime";
+
+#[cfg(windows)]
+pub use crate::nvml::{append_nvidia_inventory, NvmlProvider, TimedRead};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ReadStatus {
@@ -286,7 +290,21 @@ pub fn machine_info() -> MachineInfo {
 }
 
 pub fn inventory() -> (Vec<DeviceInfo>, Vec<Capability>) {
-    inventory_with_options(true, true, true, true)
+    let (mut devices, mut capabilities) = inventory_with_options(true, true, true, true);
+    match NvmlProvider::new() {
+        ReadResult {
+            status: ReadStatus::Value,
+            value: Some(provider),
+            ..
+        } => append_nvidia_inventory(&mut devices, &mut capabilities, Some(&provider), None),
+        result => append_nvidia_inventory(
+            &mut devices,
+            &mut capabilities,
+            None,
+            Some(&(result.status, result.reason_code)),
+        ),
+    }
+    (devices, capabilities)
 }
 
 pub fn inventory_with_options(

@@ -20,6 +20,7 @@ pub struct RunConfig {
     pub disk_probe: bool,
     pub network_probe: bool,
     pub power_probe: bool,
+    pub gpu_probe: bool,
 }
 
 impl Default for RunConfig {
@@ -33,6 +34,7 @@ impl Default for RunConfig {
             disk_probe: true,
             network_probe: true,
             power_probe: true,
+            gpu_probe: true,
         }
     }
 }
@@ -100,6 +102,7 @@ where
             "--no-disk-probe" => config.disk_probe = false,
             "--no-network-probe" => config.network_probe = false,
             "--no-power-probe" => config.power_probe = false,
+            "--no-gpu-probe" => config.gpu_probe = false,
             "--help" | "-h" => return Err(usage().to_string()),
             other => return Err(format!("invalid run argument '{other}'")),
         }
@@ -120,7 +123,7 @@ fn parse_positive(flag: &str, value: Option<String>) -> Result<u64, String> {
 }
 
 pub fn usage() -> &'static str {
-    "Usage:\n  metric-probe inventory\n  metric-probe run [options]\n\nOptions:\n  --duration-seconds <n>\n  --core-interval-ms <n>\n  --process-interval-ms <n>\n  --output-dir <path>\n  --no-process-probe\n  --no-disk-probe\n  --no-network-probe\n  --no-power-probe"
+    "Usage:\n  metric-probe inventory\n  metric-probe run [options]\n\nOptions:\n  --duration-seconds <n>\n  --core-interval-ms <n>\n  --process-interval-ms <n>\n  --output-dir <path>\n  --no-process-probe\n  --no-disk-probe\n  --no-network-probe\n  --no-power-probe\n  --no-gpu-probe"
 }
 
 pub fn args() -> Vec<String> {
@@ -157,6 +160,7 @@ mod tests {
             "--no-disk-probe",
             "--no-network-probe",
             "--no-power-probe",
+            "--no-gpu-probe",
         ])
         .unwrap();
         assert_eq!(
@@ -170,6 +174,7 @@ mod tests {
                 disk_probe: false,
                 network_probe: false,
                 power_probe: false,
+                gpu_probe: false,
             })
         );
     }
