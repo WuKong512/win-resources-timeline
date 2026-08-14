@@ -4,6 +4,9 @@ mod report;
 mod stats;
 
 #[cfg(windows)]
+mod nvml;
+
+#[cfg(windows)]
 mod windows;
 
 #[cfg(not(windows))]
@@ -94,6 +97,8 @@ struct ProbeSession {
     network_previous: HashMap<String, NetworkPrevious>,
     disk_provider: Option<windows::DiskProvider>,
     disk_init_status: Option<(windows::ReadStatus, String)>,
+    gpu_provider: Option<windows::NvmlProvider>,
+    gpu_init_status: Option<(windows::ReadStatus, String)>,
     started_at: String,
 }
 
@@ -116,12 +121,32 @@ struct SelfSamples {
 impl ProbeSession {
     fn new(config: RunConfig) -> Self {
         let machine = windows::machine_info();
-        let (devices, capabilities) = windows::inventory_with_options(
+        let (gpu_provider, gpu_init_status) = if config.gpu_probe {
+            match windows::NvmlProvider::new() {
+                windows::ReadResult {
+                    status: windows::ReadStatus::Value,
+                    value: Some(provider),
+                    ..
+                } => (Some(provider), None),
+                result => (None, Some((result.status, result.reason_code))),
+            }
+        } else {
+            (None, None)
+        };
+        let (mut devices, mut capabilities) = windows::inventory_with_options(
             config.disk_probe,
             config.network_probe,
             config.power_probe,
             config.process_probe,
         );
+        if config.gpu_probe {
+            windows::append_nvidia_inventory(
+                &mut devices,
+                &mut capabilities,
+                gpu_provider.as_ref(),
+                gpu_init_status.as_ref(),
+            );
+        }
         let (disk_provider, disk_init_status) = if config.disk_probe {
             match windows::DiskProvider::new() {
                 windows::ReadResult {
@@ -144,6 +169,8 @@ impl ProbeSession {
             network_previous: HashMap::new(),
             disk_provider,
             disk_init_status,
+            gpu_provider,
+            gpu_init_status,
             started_at: utc_now_string(),
         };
         session.initialize_metric_records();
@@ -265,6 +292,67 @@ impl ProbeSession {
                 "Windows SystemStatusFlag; not a complete power-plan or performance-mode taxonomy",
             );
         }
+        if self.config.gpu_probe {
+            let gpu_metric_definitions = gpu_metric_definitions();
+            let device_keys = self
+                .gpu_provider
+                .as_ref()
+                .map(windows::NvmlProvider::device_keys)
+                .filter(|keys| !keys.is_empty())
+                .unwrap_or_else(|| vec!["gpu:nvidia:provider".to_string()]);
+            for device_key in &device_keys {
+                for (metric_key, unit, value_range, power_scope, limitation) in
+                    gpu_metric_definitions.iter().copied()
+                {
+                    self.add_gpu_metric(
+                        device_key,
+                        metric_key,
+                        unit,
+                        value_range,
+                        power_scope,
+                        limitation,
+                    );
+                }
+            }
+            if let Some(provider) = self.gpu_provider.as_ref() {
+                let statuses = provider.device_statuses();
+                if statuses.is_empty() {
+                    for metric_key in gpu_metric_keys() {
+                        self.record_skip(
+                            "gpu:nvidia:provider",
+                            metric_key,
+                            windows::ReadStatus::Unsupported,
+                            "no_compatible_nvidia_gpu".to_string(),
+                            0.0,
+                        );
+                    }
+                } else {
+                    for (device_key, status, reason_code) in statuses {
+                        if status != windows::ReadStatus::Value {
+                            for metric_key in gpu_metric_keys() {
+                                self.record_skip(
+                                    &device_key,
+                                    metric_key,
+                                    status,
+                                    reason_code.clone(),
+                                    0.0,
+                                );
+                            }
+                        }
+                    }
+                }
+            } else if let Some((status, reason_code)) = self.gpu_init_status.clone() {
+                for metric_key in gpu_metric_keys() {
+                    self.record_skip(
+                        "gpu:nvidia:provider",
+                        metric_key,
+                        status,
+                        reason_code.clone(),
+                        0.0,
+                    );
+                }
+            }
+        }
         if self.config.process_probe {
             for (metric_key, unit, limitation) in [
                 ("process.enumerated_count", "count", "Enumerated PIDs; no process identity is retained"),
@@ -304,12 +392,41 @@ impl ProbeSession {
                 unit,
                 if provider.starts_with("pdh") {
                     windows::SOURCE_PDH
+                } else if provider.starts_with("nvidia-nvml") {
+                    windows::SOURCE_NVML
                 } else {
                     windows::SOURCE_SYSTEM_INFO
                 },
                 vec![limitation.to_string()],
             ),
         );
+    }
+
+    fn add_gpu_metric(
+        &mut self,
+        device_key: &str,
+        metric_key: &str,
+        unit: &str,
+        value_range: &str,
+        power_scope: Option<&str>,
+        limitation: &str,
+    ) {
+        let mut metric = MetricRecord::new(
+            device_key,
+            metric_key,
+            "nvidia-nvml",
+            SupportStatus::Supported,
+            "ready",
+            unit,
+            windows::SOURCE_NVML,
+            vec![limitation.to_string()],
+        )
+        .with_value_range(value_range);
+        if let Some(power_scope) = power_scope {
+            metric = metric.with_power_scope(power_scope);
+        }
+        self.metrics
+            .insert(metric_identity(device_key, metric_key), metric);
     }
 
     fn run(mut self) -> Result<ProbeReport, String> {
@@ -430,6 +547,7 @@ impl ProbeSession {
                 disk_probe: self.config.disk_probe,
                 network_probe: self.config.network_probe,
                 power_probe: self.config.power_probe,
+                gpu_probe: self.config.gpu_probe,
             },
             devices: self.devices,
             capabilities: self.capabilities,
@@ -639,6 +757,7 @@ impl ProbeSession {
         self.sample_disk(timestamp_ms, interval);
         self.sample_network(timestamp_ms, now);
         self.sample_power(timestamp_ms, interval);
+        self.sample_gpu(timestamp_ms, interval);
         self.sample_self(timestamp_ms, previous_cpu_sample, now, sampling);
         (cpu_result.value, Some(now))
     }
@@ -1057,6 +1176,105 @@ impl ProbeSession {
         }
     }
 
+    fn sample_gpu(&mut self, timestamp_ms: i64, interval: Option<u64>) {
+        if !self.config.gpu_probe {
+            return;
+        }
+        let samples = self
+            .gpu_provider
+            .as_ref()
+            .map(windows::NvmlProvider::sample_all)
+            .unwrap_or_default();
+        for sample in samples {
+            self.record_gpu_read(
+                &sample.device_key,
+                "gpu.utilization_percent",
+                sample.utilization_percent,
+                timestamp_ms,
+                interval,
+            );
+            self.record_gpu_read(
+                &sample.device_key,
+                "gpu.memory_controller_utilization_percent",
+                sample.memory_controller_utilization_percent,
+                timestamp_ms,
+                interval,
+            );
+            self.record_gpu_read(
+                &sample.device_key,
+                "gpu.temperature_celsius",
+                sample.temperature_celsius,
+                timestamp_ms,
+                interval,
+            );
+            self.record_gpu_read(
+                &sample.device_key,
+                "gpu.power_watts",
+                sample.power_watts,
+                timestamp_ms,
+                interval,
+            );
+            self.record_gpu_read(
+                &sample.device_key,
+                "gpu.graphics_clock_mhz",
+                sample.graphics_clock_mhz,
+                timestamp_ms,
+                interval,
+            );
+            self.record_gpu_read(
+                &sample.device_key,
+                "gpu.memory_clock_mhz",
+                sample.memory_clock_mhz,
+                timestamp_ms,
+                interval,
+            );
+            self.record_gpu_read(
+                &sample.device_key,
+                "gpu.vram_used_bytes",
+                sample.vram_used_bytes,
+                timestamp_ms,
+                interval,
+            );
+            self.record_gpu_read(
+                &sample.device_key,
+                "gpu.vram_total_bytes",
+                sample.vram_total_bytes,
+                timestamp_ms,
+                interval,
+            );
+        }
+    }
+
+    fn record_gpu_read(
+        &mut self,
+        device_key: &str,
+        metric_key: &str,
+        timed: windows::TimedRead<f64>,
+        timestamp_ms: i64,
+        interval: Option<u64>,
+    ) {
+        let latency = timed.latency_ms;
+        let result = timed.result;
+        match result.value {
+            Some(value) => self.record_success(
+                device_key,
+                metric_key,
+                timestamp_ms,
+                value,
+                interval,
+                None,
+                latency,
+            ),
+            None => self.record_failure(
+                device_key,
+                metric_key,
+                result.status,
+                result.reason_code,
+                latency,
+            ),
+        }
+    }
+
     fn sample_self(
         &mut self,
         timestamp_ms: i64,
@@ -1210,6 +1428,86 @@ fn metric_identity(device_key: &str, metric_key: &str) -> String {
     format!("{device_key}\0{metric_key}")
 }
 
+fn gpu_metric_keys() -> [&'static str; 8] {
+    [
+        "gpu.utilization_percent",
+        "gpu.memory_controller_utilization_percent",
+        "gpu.temperature_celsius",
+        "gpu.power_watts",
+        "gpu.graphics_clock_mhz",
+        "gpu.memory_clock_mhz",
+        "gpu.vram_used_bytes",
+        "gpu.vram_total_bytes",
+    ]
+}
+
+fn gpu_metric_definitions() -> [(
+    &'static str,
+    &'static str,
+    &'static str,
+    Option<&'static str>,
+    &'static str,
+); 8] {
+    [
+        (
+            "gpu.utilization_percent",
+            "percent",
+            "0..100",
+            None,
+            "NVML utilization over the driver's sampling window",
+        ),
+        (
+            "gpu.memory_controller_utilization_percent",
+            "percent",
+            "0..100",
+            None,
+            "NVML memory-controller utilization over the driver's sampling window",
+        ),
+        (
+            "gpu.temperature_celsius",
+            "C",
+            "driver-defined non-negative Celsius value",
+            None,
+            "NVML GPU temperature sensor; hotspot and memory temperatures are not sampled",
+        ),
+        (
+            "gpu.power_watts",
+            "W",
+            "driver-defined non-negative board power",
+            Some("gpu_board"),
+            "NVML board power converted from milliwatts; not system or wall power",
+        ),
+        (
+            "gpu.graphics_clock_mhz",
+            "MHz",
+            "driver-defined non-negative clock",
+            None,
+            "NVML graphics clock, not a guaranteed sustained frequency",
+        ),
+        (
+            "gpu.memory_clock_mhz",
+            "MHz",
+            "driver-defined non-negative clock",
+            None,
+            "NVML memory clock, not a guaranteed sustained frequency",
+        ),
+        (
+            "gpu.vram_used_bytes",
+            "bytes",
+            "0..gpu.vram_total_bytes",
+            None,
+            "NVML device memory used in bytes",
+        ),
+        (
+            "gpu.vram_total_bytes",
+            "bytes",
+            "non-negative device memory capacity",
+            None,
+            "NVML device memory total in bytes",
+        ),
+    ]
+}
+
 fn map_status(status: windows::ReadStatus) -> SupportStatus {
     match status {
         windows::ReadStatus::Value => SupportStatus::Supported,
@@ -1293,7 +1591,7 @@ fn privacy_summary() -> PrivacySummary {
         omitted_fields: vec![
             "account identity".to_string(),
             "host identity".to_string(),
-            "hardware serial identifiers".to_string(),
+            "hardware unique identifiers".to_string(),
             "network address identifiers".to_string(),
             "absolute paths".to_string(),
             "process identity and invocation text".to_string(),
@@ -1308,13 +1606,10 @@ fn privacy_summary() -> PrivacySummary {
 fn deferred_items() -> Vec<DeferredItem> {
     [
         (
-            "CPU/GPU temperature or power",
-            "Not implemented in this spike",
+            "CPU temperature, power, and sensor frequency",
+            "Outside Spike-01B scope",
         ),
-        (
-            "GPU utilization, frequency, and VRAM",
-            "Vendor APIs are explicitly out of scope",
-        ),
+        ("AMD and Intel GPU providers", "Outside Spike-01B scope"),
         (
             "Battery charge/discharge power, health, and cycles",
             "Windows baseline status only",
@@ -1339,6 +1634,10 @@ fn deferred_items() -> Vec<DeferredItem> {
         (
             "Process GPU/VRAM attribution",
             "No GPU process attribution is implemented",
+        ),
+        (
+            "24-hour soak and 30-minute load runs",
+            "Deferred to release validation",
         ),
         (
             "Cross-hardware validation",
@@ -1370,6 +1669,9 @@ fn rerun_commands(config: &RunConfig) -> Vec<String> {
     }
     if !config.power_probe {
         command.push_str(" --no-power-probe");
+    }
+    if !config.gpu_probe {
+        command.push_str(" --no-gpu-probe");
     }
     vec![
         command.clone(),
@@ -1417,9 +1719,65 @@ fn battery_metric_should_be_created(battery_present: bool) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use super::ProbeSession;
+    use crate::cli::RunConfig;
+
     #[test]
     fn no_battery_does_not_create_battery_metric() {
         assert!(!super::battery_metric_should_be_created(false));
         assert!(super::battery_metric_should_be_created(true));
+    }
+
+    #[test]
+    fn gpu_disabled_does_not_initialize_or_create_gpu_metrics() {
+        let config = RunConfig {
+            gpu_probe: false,
+            process_probe: false,
+            disk_probe: false,
+            network_probe: false,
+            power_probe: false,
+            ..RunConfig::default()
+        };
+        let session = ProbeSession::new(config);
+        assert!(session.gpu_provider.is_none());
+        assert!(session.gpu_init_status.is_none());
+        assert!(!session
+            .metrics
+            .values()
+            .any(|metric| metric.metric_key.starts_with("gpu.")));
+    }
+
+    #[test]
+    fn gpu_metric_keys_are_complete_and_stable() {
+        assert_eq!(super::gpu_metric_keys().len(), 8);
+        assert!(super::gpu_metric_keys().contains(&"gpu.power_watts"));
+        assert!(super::gpu_metric_keys().contains(&"gpu.vram_total_bytes"));
+    }
+
+    #[test]
+    fn gpu_metric_units_and_power_scope_are_explicit() {
+        let definitions = super::gpu_metric_definitions();
+        let power = definitions
+            .iter()
+            .find(|definition| definition.0 == "gpu.power_watts")
+            .unwrap();
+        assert_eq!(power.1, "W");
+        assert_eq!(power.3, Some("gpu_board"));
+        assert_eq!(
+            definitions
+                .iter()
+                .find(|definition| definition.0 == "gpu.vram_used_bytes")
+                .unwrap()
+                .1,
+            "bytes"
+        );
+        assert_eq!(
+            definitions
+                .iter()
+                .find(|definition| definition.0 == "gpu.graphics_clock_mhz")
+                .unwrap()
+                .1,
+            "MHz"
+        );
     }
 }
