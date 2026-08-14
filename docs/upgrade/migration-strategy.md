@@ -46,6 +46,20 @@ v6 中不存在的数据不能推断：例如历史样本没有温度、私有�
 
 DDL/回填事务失败时回滚并继续使用原 v6 数据库；如果数据库在提交后无法通过 postflight，则停止采集，向用户提供恢复备份和导出诊断的明确操作，不自动删除数据库。备份清理只能在新版本经过多个正常启动和用户可配置保留期后发生。
 
+## PR-01 已落地边界
+
+PR-01 将上述策略落成 `src-tauri/src/db/schema.rs` 中的单入口迁移：
+
+1. `Database::open` 对 v6 数据库先启用 `foreign_keys=ON`、WAL、`synchronous=NORMAL` 和 5 秒 busy timeout；schema 版本高于 7 时拒绝打开。
+2. Preflight 执行 `quick_check`、`integrity_check` 和 `foreign_key_check`，并记录主库、`-wal`、`-shm` 大小及备份目录可用性。
+3. Backup 使用 SQLite `VACUUM INTO` 生成 `*.v7-backup-<timestamp>-<pid>.sqlite3`。迁移不直接复制正在使用的主库、WAL 或 SHM 文件。
+4. `migration_journal` 为每次 v6 → v7 运行记录 `preflight`、`backup`、`create`、三类 backfill、`verify`、`commit` 和 `postflight` 阶段。重启时，未完成的 pending/started 阶段先标记为 interrupted，再开始新的 run。
+5. Create/backfill/verify/版本切换在同一个事务内完成。旧表先改名为 `legacy_v6_*`，再创建 v7 表和索引；迁移会移除旧表遗留的同名索引，避免 `IF NOT EXISTS` 把索引错误地留在旧表上。
+6. Identity、foreground、system frame 和 process sample 使用稳定映射表回填。v6 没有的温度、私有内存、能量、coverage 或设备能力字段保持 NULL/未覆盖，不推断为零或 active。
+7. 行数、时间范围、关键总量、外键和完整性检查全部通过后，事务才设置 `PRAGMA user_version = 7` 并提交；提交后再次执行 postflight。失败的回填事务保持 v6 `user_version` 和旧表可读，journal 保留失败信息。
+
+当前测试使用临时目录中的脱敏 v6 fixture，覆盖空库、带 foreground/system/process 数据、重复打开、失败回滚、备份、范围/总量/NULL 语义、外键和完整性校验。真实用户数据库不参与测试或迁移演练。
+
 ## 测试矩阵
 
 覆盖空库、小库、大库、WAL 未 checkpoint、旧版本逐级升级、重复身份、无效区间、磁盘空间不足、迁移中强杀、迁移后降级启动。所有 fixture 必须脱敏并固定预期计数/摘要。

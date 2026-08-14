@@ -1,4 +1,5 @@
 pub mod query;
+pub mod rollup;
 pub mod schema;
 pub mod writer;
 
@@ -20,8 +21,9 @@ impl Database {
                 .map_err(|_| rusqlite::Error::InvalidPath(path.clone()))?;
         }
         let mut conn = Connection::open(&path)?;
-        schema::migrate(&mut conn)?;
+        schema::migrate_with_path(&mut conn, Some(&path))?;
         writer::recover_open_interval(&conn)?;
+        writer::start_runtime_session(&conn, now_ms())?;
         Ok(Self {
             path,
             writer: Mutex::new(conn),
@@ -57,6 +59,13 @@ impl Database {
     }
 }
 
+fn now_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_millis() as i64)
+        .unwrap_or(0)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -67,12 +76,187 @@ mod tests {
             SystemSample,
         },
     };
+    use rusqlite::params;
 
     fn test_path(name: &str) -> PathBuf {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|duration| duration.as_nanos())
+            .unwrap_or_default();
         std::env::temp_dir().join(format!(
-            "resource-timeline-{name}-{}.sqlite3",
-            std::process::id()
+            "resource-timeline-{name}-{}-{nonce}.sqlite3",
+            std::process::id(),
         ))
+    }
+
+    fn cleanup_test_files(path: &Path) {
+        for suffix in ["", "-wal", "-shm"] {
+            let candidate = PathBuf::from(format!("{}{}", path.display(), suffix));
+            let _ = std::fs::remove_file(candidate);
+        }
+        let Some(parent) = path.parent() else {
+            return;
+        };
+        let Some(name) = path.file_name().and_then(|value| value.to_str()) else {
+            return;
+        };
+        let prefix = format!("{name}.v7-backup-");
+        if let Ok(entries) = std::fs::read_dir(parent) {
+            for entry in entries.flatten() {
+                if entry
+                    .file_name()
+                    .to_str()
+                    .is_some_and(|value| value.starts_with(&prefix))
+                {
+                    let _ = std::fs::remove_file(entry.path());
+                }
+            }
+        }
+    }
+
+    fn pragma_text(conn: &Connection, pragma: &str) -> rusqlite::Result<String> {
+        conn.query_row(&format!("PRAGMA {pragma}"), [], |row| row.get(0))
+    }
+
+    fn foreign_key_error_count(conn: &Connection) -> rusqlite::Result<i64> {
+        let mut statement = conn.prepare("PRAGMA foreign_key_check")?;
+        let mut rows = statement.query([])?;
+        let mut count = 0;
+        while rows.next()?.is_some() {
+            count += 1;
+        }
+        Ok(count)
+    }
+
+    fn create_v6_fixture(path: &Path, populated: bool) {
+        let conn = Connection::open(path).unwrap();
+        conn.execute_batch(
+            r#"
+            PRAGMA foreign_keys = ON;
+            CREATE TABLE app_identity (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                identity_key TEXT NOT NULL UNIQUE,
+                process_name TEXT NOT NULL,
+                exe_path TEXT,
+                display_name TEXT NOT NULL,
+                publisher TEXT,
+                is_hidden INTEGER NOT NULL DEFAULT 0 CHECK (is_hidden IN (0, 1)),
+                first_seen_at_ms INTEGER NOT NULL,
+                last_seen_at_ms INTEGER NOT NULL
+            );
+            CREATE TABLE foreground_interval (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                app_id INTEGER NOT NULL,
+                start_time_ms INTEGER NOT NULL,
+                end_time_ms INTEGER,
+                last_seen_time_ms INTEGER NOT NULL,
+                activity_state TEXT NOT NULL CHECK (activity_state IN ('active', 'idle')),
+                end_reason TEXT,
+                FOREIGN KEY(app_id) REFERENCES app_identity(id),
+                CHECK(end_time_ms IS NULL OR end_time_ms >= start_time_ms),
+                CHECK(last_seen_time_ms >= start_time_ms)
+            );
+            CREATE TABLE system_sample (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                timestamp_ms INTEGER NOT NULL,
+                sample_duration_ms INTEGER NOT NULL,
+                cpu_percent REAL,
+                memory_percent REAL,
+                memory_used_bytes INTEGER,
+                memory_total_bytes INTEGER,
+                disk_read_bytes_per_sec INTEGER,
+                disk_write_bytes_per_sec INTEGER
+            );
+            CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at_ms INTEGER NOT NULL);
+            CREATE TABLE app_resource_sample (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                system_sample_id INTEGER NOT NULL,
+                app_key TEXT NOT NULL,
+                process_name TEXT NOT NULL,
+                exe_path TEXT,
+                process_count INTEGER NOT NULL,
+                cpu_percent REAL NOT NULL,
+                memory_used_bytes INTEGER NOT NULL,
+                io_read_bytes_per_sec INTEGER NOT NULL,
+                io_write_bytes_per_sec INTEGER NOT NULL,
+                FOREIGN KEY(system_sample_id) REFERENCES system_sample(id) ON DELETE CASCADE,
+                UNIQUE(system_sample_id, app_key)
+            );
+             CREATE TABLE app_resource_snapshot (
+                 system_sample_id INTEGER PRIMARY KEY,
+                 FOREIGN KEY(system_sample_id) REFERENCES system_sample(id) ON DELETE CASCADE
+             );
+             CREATE UNIQUE INDEX idx_foreground_single_open ON foreground_interval((end_time_ms IS NULL)) WHERE end_time_ms IS NULL;
+             CREATE INDEX idx_foreground_interval_range ON foreground_interval(start_time_ms, end_time_ms, last_seen_time_ms);
+             CREATE INDEX idx_foreground_interval_app ON foreground_interval(app_id, start_time_ms);
+            CREATE INDEX idx_system_sample_timestamp ON system_sample(timestamp_ms);
+            CREATE INDEX idx_app_resource_sample_system ON app_resource_sample(system_sample_id);
+            INSERT INTO settings(key, value, updated_at_ms) VALUES
+                ('foreground_poll_interval_ms', '1000', 0),
+                ('system_sample_interval_ms', '5000', 0),
+                ('idle_threshold_seconds', '300', 0),
+                ('system_sample_retention_days', '7', 0),
+                ('start_with_windows', '1', 0);
+            "#,
+        )
+        .unwrap();
+
+        if populated {
+            let app_id = conn
+                .execute(
+                    "INSERT INTO app_identity(identity_key, process_name, exe_path, display_name, first_seen_at_ms, last_seen_at_ms) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                    params![
+                        "path:c:\\editor.exe",
+                        "Editor.exe",
+                        "C:\\Editor.exe",
+                        "Editor",
+                        1_000_i64,
+                        5_000_i64
+                    ],
+                )
+                .map(|_| conn.last_insert_rowid())
+                .unwrap();
+            conn.execute(
+                "INSERT INTO foreground_interval(app_id, start_time_ms, end_time_ms, last_seen_time_ms, activity_state, end_reason) VALUES (?1, ?2, ?3, ?3, ?4, ?5)",
+                params![app_id, 1_000_i64, 2_500_i64, "active", "shutdown"],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO foreground_interval(app_id, start_time_ms, end_time_ms, last_seen_time_ms, activity_state, end_reason) VALUES (?1, ?2, ?3, ?3, ?4, ?5)",
+                params![app_id, 3_000_i64, 5_000_i64, "idle", "shutdown"],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO system_sample(timestamp_ms, sample_duration_ms, cpu_percent, memory_percent, memory_used_bytes, memory_total_bytes, disk_read_bytes_per_sec, disk_write_bytes_per_sec) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                params![2_000_i64, 5_000_i64, 30.0_f64, 50.0_f64, 100_i64, 200_i64, 10_i64, 20_i64],
+            )
+            .unwrap();
+            let first_sample_id = conn.last_insert_rowid();
+            conn.execute(
+                "INSERT INTO system_sample(timestamp_ms, sample_duration_ms, cpu_percent, memory_percent, memory_used_bytes, memory_total_bytes, disk_read_bytes_per_sec, disk_write_bytes_per_sec) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                params![7_000_i64, 5_000_i64, Option::<f64>::None, Option::<f64>::None, Option::<i64>::None, Option::<i64>::None, 3_i64, 4_i64],
+            )
+            .unwrap();
+            let second_sample_id = conn.last_insert_rowid();
+            for sample_id in [first_sample_id, second_sample_id] {
+                conn.execute(
+                    "INSERT INTO app_resource_snapshot(system_sample_id) VALUES (?1)",
+                    [sample_id],
+                )
+                .unwrap();
+            }
+            for (sample_id, cpu, memory, read, write) in [
+                (first_sample_id, 10.0_f64, 100_i64, 5_i64, 6_i64),
+                (second_sample_id, 20.0_f64, 200_i64, 7_i64, 8_i64),
+            ] {
+                conn.execute(
+                    "INSERT INTO app_resource_sample(system_sample_id, app_key, process_name, exe_path, process_count, cpu_percent, memory_used_bytes, io_read_bytes_per_sec, io_write_bytes_per_sec) VALUES (?1, ?2, ?3, ?4, 1, ?5, ?6, ?7, ?8)",
+                    params![sample_id, "path:c:\\editor.exe", "Editor.exe", "C:\\Editor.exe", cpu, memory, read, write],
+                )
+                .unwrap();
+            }
+        }
+        conn.pragma_update(None, "user_version", 6).unwrap();
     }
 
     #[test]
@@ -118,86 +302,231 @@ mod tests {
     }
 
     #[test]
-    fn v1_to_v6_migration_preserves_data_and_existing_settings() {
-        let path = test_path("v1-to-v6");
-        let _ = std::fs::remove_file(&path);
+    fn empty_v6_database_migrates_to_v7() {
+        let path = test_path("empty-v6");
+        cleanup_test_files(&path);
+        create_v6_fixture(&path, false);
+
+        let db = Database::open(path.clone()).unwrap();
+        db.read(|conn| {
+            let version: i64 = conn.pragma_query_value(None, "user_version", |row| row.get(0))?;
+            assert_eq!(version, 7);
+            assert_eq!(conn.query_row("SELECT COUNT(*) FROM app", [], |row| row.get::<_, i64>(0))?, 0);
+            assert_eq!(conn.query_row("SELECT COUNT(*) FROM sample_frame", [], |row| row.get::<_, i64>(0))?, 0);
+            assert_eq!(conn.query_row("SELECT COUNT(*) FROM process_sample", [], |row| row.get::<_, i64>(0))?, 0);
+            assert_eq!(foreign_key_error_count(conn)?, 0);
+            assert_eq!(pragma_text(conn, "quick_check")?, "ok");
+            assert_eq!(pragma_text(conn, "integrity_check")?, "ok");
+            let (runs, completed): (i64, i64) = conn.query_row(
+                "SELECT COUNT(DISTINCT run_id), SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END) FROM migration_journal",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )?;
+            assert_eq!((runs, completed), (1, 9));
+            Ok(())
+        })
+        .unwrap();
+        drop(db);
+        cleanup_test_files(&path);
+    }
+
+    #[test]
+    fn populated_v6_migration_preserves_rows_ranges_totals_and_nulls() {
+        let path = test_path("populated-v6");
+        cleanup_test_files(&path);
+        create_v6_fixture(&path, true);
+
+        let db = Database::open(path.clone()).unwrap();
+        db.read(|conn| {
+            assert_eq!(conn.pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))?, 7);
+            assert_eq!(conn.query_row("SELECT COUNT(*) FROM app", [], |row| row.get::<_, i64>(0))?, 1);
+            assert_eq!(conn.query_row("SELECT COUNT(*) FROM foreground_interval", [], |row| row.get::<_, i64>(0))?, 2);
+            assert_eq!(conn.query_row("SELECT COUNT(*) FROM sample_frame", [], |row| row.get::<_, i64>(0))?, 2);
+            assert_eq!(conn.query_row("SELECT COUNT(*) FROM process_sample", [], |row| row.get::<_, i64>(0))?, 2);
+            assert_eq!(conn.query_row("SELECT tbl_name FROM sqlite_master WHERE type = 'index' AND name = 'idx_foreground_single_open'", [], |row| row.get::<_, String>(0))?, "foreground_interval");
+            assert_eq!(conn.query_row("SELECT tbl_name FROM sqlite_master WHERE type = 'index' AND name = 'idx_foreground_interval_range'", [], |row| row.get::<_, String>(0))?, "foreground_interval");
+            assert_eq!(conn.query_row("SELECT MIN(start_time_ms), MAX(COALESCE(end_time_ms, last_seen_time_ms)) FROM foreground_interval", [], |row| Ok((row.get::<_, Option<i64>>(0)?, row.get::<_, Option<i64>>(1)?)))?, (Some(1_000), Some(5_000)));
+            assert_eq!(conn.query_row("SELECT MIN(ts), MAX(ts) FROM sample_frame", [], |row| Ok((row.get::<_, Option<i64>>(0)?, row.get::<_, Option<i64>>(1)?)))?, (Some(2_000), Some(7_000)));
+            assert_eq!(conn.query_row("SELECT SUM(used_bytes) FROM memory_sample", [], |row| row.get::<_, Option<i64>>(0))?, Some(100));
+            assert_eq!(conn.query_row("SELECT SUM(read_bps), SUM(write_bps) FROM disk_sample", [], |row| Ok((row.get::<_, Option<i64>>(0)?, row.get::<_, Option<i64>>(1)?)))?, (Some(13), Some(24)));
+            assert_eq!(conn.query_row("SELECT SUM(cpu_pct), SUM(working_set_bytes), SUM(read_bps), SUM(write_bps) FROM process_sample", [], |row| Ok((row.get::<_, Option<f64>>(0)?, row.get::<_, Option<i64>>(1)?, row.get::<_, Option<i64>>(2)?, row.get::<_, Option<i64>>(3)?)))?, (Some(30.0), Some(300), Some(12), Some(14)));
+            assert_eq!(conn.query_row("SELECT COUNT(*) FROM cpu_sample", [], |row| row.get::<_, i64>(0))?, 1);
+            assert_eq!(conn.query_row("SELECT COUNT(*) FROM memory_sample", [], |row| row.get::<_, i64>(0))?, 1);
+            assert_eq!(conn.query_row("SELECT COUNT(*) FROM sample_frame WHERE source = 'legacy-v6' AND writer_delay_ms IS NULL", [], |row| row.get::<_, i64>(0))?, 2);
+            assert_eq!(conn.query_row("SELECT normalized_path FROM app_executable", [], |row| row.get::<_, String>(0))?, "path:c:\\editor.exe");
+            assert_eq!(foreign_key_error_count(conn)?, 0);
+            assert_eq!(pragma_text(conn, "quick_check")?, "ok");
+            assert_eq!(pragma_text(conn, "integrity_check")?, "ok");
+            let settings = writer::collection_settings(conn)?;
+            assert_eq!(settings.idle_threshold_seconds, 300);
+            assert_eq!(settings.foreground_poll_interval_ms, 1_000);
+            assert_eq!(settings.system_sample_interval_ms, 5_000);
+            Ok(())
+        })
+        .unwrap();
+
+        let backups: Vec<PathBuf> = std::fs::read_dir(path.parent().unwrap())
+            .unwrap()
+            .flatten()
+            .map(|entry| entry.path())
+            .filter(|candidate| {
+                candidate
+                    .file_name()
+                    .and_then(|value| value.to_str())
+                    .is_some_and(|value| {
+                        value.starts_with(&format!(
+                            "{}.v7-backup-",
+                            path.file_name().unwrap().to_string_lossy()
+                        ))
+                    })
+            })
+            .collect();
+        assert_eq!(backups.len(), 1);
+        let backup = Connection::open(&backups[0]).unwrap();
+        assert_eq!(
+            backup
+                .pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))
+                .unwrap(),
+            6
+        );
+        assert_eq!(
+            backup
+                .query_row("SELECT COUNT(*) FROM app_identity", [], |row| row
+                    .get::<_, i64>(0))
+                .unwrap(),
+            1
+        );
+
+        drop(db);
+        cleanup_test_files(&path);
+    }
+
+    #[test]
+    fn opening_v7_again_does_not_backfill_legacy_rows_twice() {
+        let path = test_path("repeat-v7-open");
+        cleanup_test_files(&path);
+        create_v6_fixture(&path, true);
+
         {
             let db = Database::open(path.clone()).unwrap();
-            db.with_writer(|conn| {
-                conn.execute(
-                    "INSERT INTO app_identity(identity_key, process_name, display_name, first_seen_at_ms, last_seen_at_ms) VALUES ('name:kept', 'kept.exe', 'Kept', 10, 20)",
+            assert_eq!(
+                db.read(|conn| conn.query_row(
+                    "SELECT COUNT(*) FROM sample_frame WHERE source = 'legacy-v6'",
                     [],
-                )?;
-                conn.execute(
-                    "UPDATE settings SET value = '600' WHERE key = 'idle_threshold_seconds'",
-                    [],
-                )?;
-                conn.execute(
-                    "DELETE FROM settings WHERE key IN ('foreground_poll_interval_ms', 'system_sample_interval_ms')",
-                    [],
-                )?;
-                conn.execute("DROP TABLE app_resource_sample", [])?;
-                conn.execute("DROP TABLE app_resource_snapshot", [])?;
-                conn.pragma_update(None, "user_version", 1)?;
+                    |row| row.get::<_, i64>(0)
+                ))
+                .unwrap(),
+                2
+            );
+        }
+        {
+            let db = Database::open(path.clone()).unwrap();
+            db.read(|conn| {
+                assert_eq!(
+                    conn.query_row("SELECT COUNT(*) FROM app", [], |row| row.get::<_, i64>(0))?,
+                    1
+                );
+                assert_eq!(
+                    conn.query_row(
+                        "SELECT COUNT(*) FROM sample_frame WHERE source = 'legacy-v6'",
+                        [],
+                        |row| row.get::<_, i64>(0)
+                    )?,
+                    2
+                );
+                assert_eq!(
+                    conn.query_row(
+                        "SELECT COUNT(*) FROM process_sample WHERE source = 'legacy-v6'",
+                        [],
+                        |row| row.get::<_, i64>(0)
+                    )?,
+                    2
+                );
+                assert_eq!(
+                    conn.query_row("SELECT COUNT(*) FROM migration_journal", [], |row| row
+                        .get::<_, i64>(0))?,
+                    9
+                );
                 Ok(())
             })
             .unwrap();
         }
-
-        let db = Database::open(path.clone()).unwrap();
-        let (version, app_count, settings) = db
-            .read(|conn| {
-                Ok((
-                    conn.pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))?,
-                    conn.query_row("SELECT COUNT(*) FROM app_identity", [], |row| {
-                        row.get::<_, i64>(0)
-                    })?,
-                    writer::collection_settings(conn)?,
-                ))
-            })
-            .unwrap();
-        assert_eq!(version, 6);
-        assert_eq!(app_count, 1);
-        assert_eq!(settings.idle_threshold_seconds, 600);
-        assert_eq!(settings.foreground_poll_interval_ms, 1_000);
-        assert_eq!(settings.system_sample_interval_ms, 5_000);
-        drop(db);
-        let _ = std::fs::remove_file(path);
+        cleanup_test_files(&path);
     }
 
     #[test]
-    fn v5_repairs_false_clock_gaps_from_slow_polling() {
-        let path = test_path("v5-clock-gap-repair");
-        let _ = std::fs::remove_file(&path);
+    fn failed_v6_to_v7_migration_rolls_back_legacy_schema() {
+        let path = test_path("failed-v6-migration");
+        cleanup_test_files(&path);
+        create_v6_fixture(&path, true);
         {
-            let db = Database::open(path.clone()).unwrap();
-            db.with_writer(|conn| {
-                conn.execute(
-                    "INSERT INTO app_identity(identity_key, process_name, display_name, first_seen_at_ms, last_seen_at_ms) VALUES ('name:test', 'test.exe', 'Test', 1000, 6000)",
-                    [],
-                )?;
-                conn.execute(
-                    "INSERT INTO foreground_interval(app_id, start_time_ms, end_time_ms, last_seen_time_ms, activity_state, end_reason) VALUES (1, 1000, 2000, 2000, 'active', 'clock_gap')",
-                    [],
-                )?;
-                conn.execute(
-                    "INSERT INTO foreground_interval(app_id, start_time_ms, end_time_ms, last_seen_time_ms, activity_state, end_reason) VALUES (1, 6000, 7000, 7000, 'active', 'shutdown')",
-                    [],
-                )?;
-                conn.execute(
-                    "UPDATE settings SET value = '5000' WHERE key = 'foreground_poll_interval_ms'",
-                    [],
-                )?;
-                conn.pragma_update(None, "user_version", 4)?;
-                Ok(())
-            })
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch("CREATE VIEW app AS SELECT 1 AS id;")
+                .unwrap();
+        }
+
+        let mut conn = Connection::open(&path).unwrap();
+        assert!(schema::migrate_with_path(&mut conn, Some(&path)).is_err());
+        assert_eq!(
+            conn.pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))
+                .unwrap(),
+            6
+        );
+        assert_eq!(
+            conn.query_row("SELECT COUNT(*) FROM app_identity", [], |row| row
+                .get::<_, i64>(0))
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            conn.query_row("SELECT COUNT(*) FROM system_sample", [], |row| row
+                .get::<_, i64>(0))
+                .unwrap(),
+            2
+        );
+        assert_eq!(conn.query_row("SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'legacy_v6_app_identity'", [], |row| row.get::<_, i64>(0)).unwrap(), 0);
+        assert_eq!(
+            conn.query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'boot_session'",
+                [],
+                |row| row.get::<_, i64>(0)
+            )
+            .unwrap(),
+            0
+        );
+        cleanup_test_files(&path);
+    }
+
+    #[test]
+    fn v5_repairs_false_clock_gaps_before_v7_backfill() {
+        let path = test_path("v5-clock-gap-repair");
+        cleanup_test_files(&path);
+        create_v6_fixture(&path, true);
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute("DELETE FROM foreground_interval", []).unwrap();
+            conn.execute(
+                "INSERT INTO foreground_interval(app_id, start_time_ms, end_time_ms, last_seen_time_ms, activity_state, end_reason) VALUES (1, 1000, 2000, 2000, 'active', 'clock_gap')",
+                [],
+            )
             .unwrap();
+            conn.execute(
+                "INSERT INTO foreground_interval(app_id, start_time_ms, end_time_ms, last_seen_time_ms, activity_state, end_reason) VALUES (1, 6000, 7000, 7000, 'active', 'shutdown')",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "UPDATE settings SET value = '5000' WHERE key = 'foreground_poll_interval_ms'",
+                [],
+            )
+            .unwrap();
+            conn.pragma_update(None, "user_version", 4).unwrap();
         }
         let db = Database::open(path.clone()).unwrap();
         let repaired = db
             .read(|conn| {
                 conn.query_row(
-                    "SELECT end_time_ms, last_seen_time_ms, end_reason FROM foreground_interval WHERE start_time_ms = 1000",
+                    "SELECT end_time_ms, last_seen_time_ms, close_reason FROM foreground_interval WHERE start_time_ms = 1000",
                     [],
                     |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?, row.get::<_, String>(2)?)),
                 )
@@ -205,7 +534,7 @@ mod tests {
             .unwrap();
         assert_eq!(repaired, (6_000, 6_000, "sampling_interval_repair".into()));
         drop(db);
-        let _ = std::fs::remove_file(path);
+        cleanup_test_files(&path);
     }
 
     #[test]
@@ -351,5 +680,78 @@ mod tests {
 
         drop(db);
         let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn frame_writer_keeps_failed_frames_until_commit_and_bounds_queue() {
+        let path = test_path("frame-writer");
+        cleanup_test_files(&path);
+        let db = Database::open(path.clone()).unwrap();
+        let snapshot = |timestamp_ms| ResourceSnapshot {
+            system: SystemSample {
+                timestamp_ms,
+                sample_duration_ms: 5_000,
+                cpu_percent: Some(25.0),
+                memory_percent: None,
+                memory_used_bytes: None,
+                memory_total_bytes: None,
+                disk_read_bytes_per_sec: None,
+                disk_write_bytes_per_sec: None,
+                has_app_snapshot: false,
+            },
+            apps: Vec::new(),
+        };
+        let mut frame_writer = writer::FrameWriter::new(2, 2);
+        assert!(frame_writer.enqueue(snapshot(10_000)));
+        assert!(frame_writer.enqueue(snapshot(20_000)));
+        assert!(!frame_writer.enqueue(snapshot(30_000)));
+        assert_eq!(frame_writer.health().queue_depth, 2);
+        assert_eq!(frame_writer.health().drop_count, 1);
+
+        let readonly = Connection::open_with_flags(
+            &path,
+            OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        )
+        .unwrap();
+        assert!(frame_writer.write_next(&readonly).is_err());
+        assert_eq!(frame_writer.health().queue_depth, 2);
+        assert_eq!(frame_writer.health().front_retry_attempts, Some(1));
+        assert!(frame_writer.health().last_error.is_some());
+        assert!(frame_writer.write_next(&readonly).is_err());
+        assert!(frame_writer.write_next(&readonly).is_err());
+        assert_eq!(frame_writer.health().front_retry_attempts, Some(2));
+        drop(readonly);
+
+        assert!(db
+            .with_writer(|conn| frame_writer.write_next(conn))
+            .unwrap());
+        assert_eq!(frame_writer.health().queue_depth, 1);
+        assert_eq!(
+            db.read(
+                |conn| conn.query_row("SELECT COUNT(*) FROM sample_frame", [], |row| row
+                    .get::<_, i64>(0))
+            )
+            .unwrap(),
+            1
+        );
+        assert_eq!(
+            db.with_writer(|conn| frame_writer.flush_all(conn)).unwrap(),
+            1
+        );
+        assert_eq!(frame_writer.health().queue_depth, 0);
+        assert_eq!(
+            db.read(
+                |conn| conn.query_row("SELECT COUNT(*) FROM sample_frame", [], |row| row
+                    .get::<_, i64>(0))
+            )
+            .unwrap(),
+            2
+        );
+        assert_eq!(
+            frame_writer.health().last_committed_timestamp_ms,
+            Some(20_000)
+        );
+        drop(db);
+        cleanup_test_files(&path);
     }
 }

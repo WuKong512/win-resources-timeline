@@ -4,7 +4,7 @@ use super::{
 };
 use crate::{
     db::{writer, Database},
-    models::{ActivityState, CollectionSettings, CollectorStatus, ResourceSnapshot},
+    models::{ActivityState, CollectionSettings, CollectorStatus},
     platform,
 };
 use crossbeam_channel::{bounded, Receiver, Sender};
@@ -107,7 +107,7 @@ fn run_collector(
     let mut last_system =
         Instant::now() - Duration::from_millis(settings.system_sample_interval_ms);
     let mut last_system_flush = Instant::now();
-    let mut pending_system_samples = Vec::with_capacity(4);
+    let mut frame_writer = writer::FrameWriter::new(64, 5);
     let mut last_prune = Instant::now() - Duration::from_secs(86_400);
     let mut session_suspended = false;
     loop {
@@ -142,7 +142,7 @@ fn run_collector(
                     &mut last_checkpoint_ms,
                     engine.terminate(now, reason),
                 );
-                let _ = flush_system_samples(&db, &mut pending_system_samples);
+                let _ = flush_system_samples(&db, &mut frame_writer, true);
                 session_suspended = true;
                 if let Ok(mut s) = status.lock() {
                     s.last_heartbeat_at_ms = Some(now);
@@ -193,7 +193,7 @@ fn run_collector(
                     &mut last_checkpoint_ms,
                     engine.terminate(now, "paused"),
                 );
-                pending_system_samples.clear();
+                frame_writer.discard_for_explicit_clear();
                 let result = db
                     .with_writer(writer::clear_collected_data)
                     .map_err(|e| e.to_string());
@@ -210,7 +210,7 @@ fn run_collector(
                     &mut last_checkpoint_ms,
                     engine.terminate(now_ms(), "shutdown"),
                 );
-                let _ = flush_system_samples(&db, &mut pending_system_samples);
+                let _ = flush_system_samples(&db, &mut frame_writer, true);
                 break;
             }
             Err(crossbeam_channel::RecvTimeoutError::Disconnected) => break,
@@ -252,21 +252,18 @@ fn run_collector(
             if last_system.elapsed() >= Duration::from_millis(settings.system_sample_interval_ms) {
                 last_system = Instant::now();
                 if let Some(sample) = system.sample(now, &tracked_app_keys) {
-                    pending_system_samples.push(sample);
+                    frame_writer.enqueue(sample);
                 }
             }
-            if last_system_flush.elapsed() >= Duration::from_secs(15)
-                && !pending_system_samples.is_empty()
+            if last_system_flush.elapsed() >= Duration::from_millis(250)
+                && frame_writer.queue_depth() > 0
             {
                 last_system_flush = Instant::now();
-                let latest = pending_system_samples.last().map(|s| s.system.timestamp_ms);
-                let dropped = pending_system_samples.len() as u64;
-                let result = flush_system_samples(&db, &mut pending_system_samples);
+                let result = flush_system_samples(&db, &mut frame_writer, false);
                 if let Ok(mut s) = status.lock() {
-                    if result.is_ok() {
-                        s.last_system_sample_at_ms = latest;
-                    } else {
-                        s.dropped_system_samples += dropped;
+                    if let Ok(health) = &result {
+                        s.last_system_sample_at_ms = health.last_committed_timestamp_ms;
+                        s.dropped_system_samples = health.drop_count;
                     }
                 }
             }
@@ -323,18 +320,15 @@ fn apply_actions(
 
 fn flush_system_samples(
     db: &Database,
-    samples: &mut Vec<ResourceSnapshot>,
-) -> rusqlite::Result<()> {
-    if samples.is_empty() {
-        return Ok(());
-    }
-    let result = db.with_writer(|conn| {
-        let tx = conn.unchecked_transaction()?;
-        for sample in samples.iter() {
-            writer::insert_resource_snapshot(&tx, sample)?;
+    frame_writer: &mut writer::FrameWriter,
+    drain: bool,
+) -> rusqlite::Result<writer::WriterHealth> {
+    db.with_writer(|conn| {
+        if drain {
+            frame_writer.flush_all(conn)?;
+        } else {
+            frame_writer.write_next(conn)?;
         }
-        tx.commit()
-    });
-    samples.clear();
-    result
+        Ok(frame_writer.health())
+    })
 }
