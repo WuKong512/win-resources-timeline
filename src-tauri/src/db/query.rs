@@ -16,7 +16,7 @@ fn valid_range(start_ms: i64, end_ms: i64) -> rusqlite::Result<()> {
 
 pub fn list_apps(conn: &Connection) -> rusqlite::Result<Vec<AppIdentity>> {
     let mut stmt = conn.prepare(
-        "SELECT id, process_name, exe_path, display_name, publisher, is_hidden, first_seen_at_ms, last_seen_at_ms FROM app_identity ORDER BY display_name COLLATE NOCASE"
+        "SELECT e.id, a.process_name, CASE WHEN e.normalized_path LIKE 'path:%' THEN substr(e.normalized_path, 6) END, a.display_name, a.publisher, a.is_hidden, a.first_seen_at_ms, a.last_seen_at_ms FROM app_executable e JOIN app a ON a.id = e.app_id ORDER BY a.display_name COLLATE NOCASE",
     )?;
     let rows = stmt.query_map([], |r| {
         Ok(AppIdentity {
@@ -42,12 +42,14 @@ pub fn foreground_intervals(
 ) -> rusqlite::Result<Vec<ForegroundInterval>> {
     valid_range(start_ms, end_ms)?;
     let mut stmt = conn.prepare(
-        r#"SELECT fi.id, fi.app_id, ai.process_name, ai.display_name,
+        r#"SELECT fi.id, fi.app_executable_id, a.process_name, a.display_name,
                   MAX(fi.start_time_ms, ?1), MIN(COALESCE(fi.end_time_ms, fi.last_seen_time_ms), ?2),
-                  fi.activity_state, ai.is_hidden
-           FROM foreground_interval fi JOIN app_identity ai ON ai.id = fi.app_id
+                  fi.activity_state, a.is_hidden
+           FROM foreground_interval fi
+           JOIN app_executable e ON e.id = fi.app_executable_id
+           JOIN app a ON a.id = e.app_id
            WHERE fi.start_time_ms < ?2 AND COALESCE(fi.end_time_ms, fi.last_seen_time_ms) > ?1
-             AND (?3 = 1 OR ai.is_hidden = 0) AND (?4 = 1 OR fi.activity_state = 'active')
+             AND (?3 = 1 OR a.is_hidden = 0) AND (?4 = 1 OR fi.activity_state = 'active')
            ORDER BY fi.start_time_ms"#,
     )?;
     let rows = stmt.query_map(
@@ -98,9 +100,7 @@ pub fn timeline_available_dates(conn: &Connection) -> rusqlite::Result<Vec<Strin
 
 pub fn resource_available_dates(conn: &Connection) -> rusqlite::Result<Vec<String>> {
     let mut statement = conn.prepare(
-        r#"SELECT DISTINCT date(timestamp_ms / 1000.0, 'unixepoch', 'localtime') AS day
-           FROM system_sample
-           ORDER BY day"#,
+        "SELECT DISTINCT date(ts / 1000.0, 'unixepoch', 'localtime') FROM sample_frame ORDER BY 1",
     )?;
     let rows = statement.query_map([], |row| row.get(0))?;
     rows.collect()
@@ -150,7 +150,7 @@ pub fn usage_summary(
             0.0
         };
     }
-    values.sort_by_key(|v| std::cmp::Reverse(v.active_seconds));
+    values.sort_by_key(|value| std::cmp::Reverse(value.active_seconds));
     Ok(values)
 }
 
@@ -162,12 +162,19 @@ pub fn system_samples(
 ) -> rusqlite::Result<Vec<SystemSample>> {
     valid_range(start_ms, end_ms)?;
     let mut stmt = conn.prepare(
-        r#"SELECT ss.timestamp_ms, ss.sample_duration_ms, ss.cpu_percent, ss.memory_percent,
-                  ss.memory_used_bytes, ss.memory_total_bytes, ss.disk_read_bytes_per_sec,
-                  ss.disk_write_bytes_per_sec,
-                  EXISTS(SELECT 1 FROM app_resource_snapshot snapshot WHERE snapshot.system_sample_id = ss.id)
-           FROM system_sample ss WHERE ss.timestamp_ms >= ?1 AND ss.timestamp_ms < ?2
-           ORDER BY ss.timestamp_ms"#,
+        r#"SELECT f.ts, f.duration_ms, cpu.usage_pct, memory.usage_pct, memory.used_bytes,
+                  CASE WHEN memory.used_bytes IS NOT NULL AND memory.available_bytes IS NOT NULL
+                       THEN memory.used_bytes + memory.available_bytes END,
+                  disk.read_bps, disk.write_bps, f.process_snapshot_present
+           FROM sample_frame f
+           LEFT JOIN cpu_sample cpu ON cpu.frame_id = f.id
+           LEFT JOIN memory_sample memory ON memory.frame_id = f.id
+           LEFT JOIN (
+             SELECT frame_id, SUM(read_bps) AS read_bps, SUM(write_bps) AS write_bps
+             FROM disk_sample GROUP BY frame_id
+           ) disk ON disk.frame_id = f.id
+           WHERE f.ts >= ?1 AND f.ts < ?2
+           ORDER BY f.ts"#,
     )?;
     let all: Vec<SystemSample> = stmt
         .query_map(params![start_ms, end_ms], |r| {
@@ -187,7 +194,7 @@ pub fn system_samples(
     if all.len() <= max_points {
         return Ok(all);
     }
-    let stride = all.len().div_ceil(max_points);
+    let stride = all.len().div_ceil(max_points.max(1));
     Ok(all.into_iter().step_by(stride).collect())
 }
 
@@ -196,13 +203,16 @@ pub fn app_resource_samples(
     timestamp_ms: i64,
 ) -> rusqlite::Result<Vec<AppResourceSample>> {
     let mut stmt = conn.prepare(
-        r#"SELECT ars.app_key, ars.process_name, ars.exe_path, ars.process_count,
-                  ars.cpu_percent, ars.memory_used_bytes, ars.io_read_bytes_per_sec,
-                  ars.io_write_bytes_per_sec
-           FROM app_resource_sample ars
-           JOIN system_sample ss ON ss.id = ars.system_sample_id
-           WHERE ss.timestamp_ms = ?1
-           ORDER BY ars.cpu_percent DESC, ars.memory_used_bytes DESC"#,
+        r#"SELECT a.stable_key, a.process_name,
+                  CASE WHEN e.normalized_path LIKE 'path:%' THEN substr(e.normalized_path, 6) END,
+                  p.process_count, p.cpu_pct, p.working_set_bytes, p.read_bps, p.write_bps
+           FROM process_sample p
+           JOIN sample_frame f ON f.id = p.frame_id
+           JOIN process_instance i ON i.id = p.process_instance_id
+           JOIN app_executable e ON e.id = i.app_executable_id
+           JOIN app a ON a.id = e.app_id
+           WHERE f.ts = ?1
+           ORDER BY p.cpu_pct DESC, p.working_set_bytes DESC"#,
     )?;
     let rows = stmt.query_map([timestamp_ms], |r| {
         Ok(AppResourceSample {
@@ -221,24 +231,38 @@ pub fn app_resource_samples(
 
 pub fn resource_apps(conn: &Connection) -> rusqlite::Result<Vec<ResourceApp>> {
     let mut stmt = conn.prepare(
-        r#"WITH ranked AS (
-             SELECT LOWER(ars.process_name) AS process_key,
-                    ars.process_name,
-                    COALESCE(ai.display_name, ars.process_name) AS display_name,
-                    ars.exe_path,
-                    ss.timestamp_ms,
-                    ROW_NUMBER() OVER (
-                      PARTITION BY LOWER(ars.process_name)
-                      ORDER BY ss.timestamp_ms DESC
-                    ) AS row_number
-             FROM app_resource_sample ars
-             JOIN system_sample ss ON ss.id = ars.system_sample_id
-             LEFT JOIN app_identity ai ON ai.identity_key = ars.app_key
+        r#"WITH samples AS (
+             SELECT LOWER(a.process_name) AS process_key, a.process_name, a.display_name,
+                     CASE WHEN e.normalized_path LIKE 'path:%' THEN substr(e.normalized_path, 6) END AS exe_path,
+                     f.ts
+             FROM process_sample p
+             JOIN sample_frame f ON f.id = p.frame_id
+             JOIN process_instance i ON i.id = p.process_instance_id
+             JOIN app_executable e ON e.id = i.app_executable_id
+             JOIN app a ON a.id = e.app_id
+             WHERE a.process_name IS NOT NULL AND trim(a.process_name) <> ''
+           ),
+           ranked AS (
+             SELECT samples.*,
+                    ROW_NUMBER() OVER (PARTITION BY process_key ORDER BY ts DESC) AS row_number
+             FROM samples
+           ),
+           friendly AS (
+             SELECT process_key, display_name
+             FROM (
+               SELECT process_key, display_name,
+                      ROW_NUMBER() OVER (PARTITION BY process_key ORDER BY ts DESC) AS row_number
+               FROM samples
+               WHERE LOWER(TRIM(display_name)) <> LOWER(TRIM(process_name))
+             )
+             WHERE row_number = 1
            )
-           SELECT 'process:' || process_key, process_name, display_name, exe_path, timestamp_ms
+           SELECT 'process:' || ranked.process_key, ranked.process_name,
+                  COALESCE(friendly.display_name, ranked.display_name), ranked.exe_path, ranked.ts
            FROM ranked
-           WHERE row_number = 1
-           ORDER BY display_name COLLATE NOCASE, process_name COLLATE NOCASE"#,
+           LEFT JOIN friendly ON friendly.process_key = ranked.process_key
+           WHERE ranked.row_number = 1
+           ORDER BY COALESCE(friendly.display_name, ranked.display_name) COLLATE NOCASE"#,
     )?;
     let rows = stmt.query_map([], |r| {
         Ok(ResourceApp {
@@ -259,14 +283,10 @@ pub fn app_resource_available_dates(
     let (predicate, key) = app_resource_predicate(app_key);
     let predicate = predicate.replace("?3", "?1");
     let sql = format!(
-        r#"SELECT DISTINCT date(ss.timestamp_ms / 1000.0, 'unixepoch', 'localtime') AS day
-           FROM app_resource_sample ars
-           JOIN system_sample ss ON ss.id = ars.system_sample_id
-           WHERE {predicate}
-           ORDER BY day"#
+        "SELECT DISTINCT date(f.ts / 1000.0, 'unixepoch', 'localtime') FROM process_sample p JOIN sample_frame f ON f.id=p.frame_id JOIN process_instance i ON i.id=p.process_instance_id JOIN app_executable e ON e.id=i.app_executable_id JOIN app a ON a.id=e.app_id WHERE {predicate} ORDER BY 1"
     );
-    let mut statement = conn.prepare(&sql)?;
-    let rows = statement.query_map([key], |row| row.get(0))?;
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt.query_map([key], |row| row.get(0))?;
     rows.collect()
 }
 
@@ -281,22 +301,22 @@ pub fn app_resource_history(
     let (predicate, key) = app_resource_predicate(app_key);
     let sql = format!(
         r#"WITH app_samples AS (
-             SELECT ars.system_sample_id,
-                    SUM(ars.cpu_percent) AS cpu_percent,
-                    SUM(ars.memory_used_bytes) AS memory_used_bytes,
-                    SUM(ars.io_read_bytes_per_sec) AS io_read_bytes_per_sec,
-                    SUM(ars.io_write_bytes_per_sec) AS io_write_bytes_per_sec
-             FROM app_resource_sample ars
+             SELECT p.frame_id, SUM(p.cpu_pct) AS cpu_percent, SUM(p.working_set_bytes) AS memory_used_bytes,
+                    SUM(p.read_bps) AS io_read_bytes_per_sec, SUM(p.write_bps) AS io_write_bytes_per_sec
+             FROM process_sample p
+             JOIN process_instance i ON i.id=p.process_instance_id
+             JOIN app_executable e ON e.id=i.app_executable_id
+             JOIN app a ON a.id=e.app_id
              WHERE {predicate}
-             GROUP BY ars.system_sample_id
+             GROUP BY p.frame_id
            )
-           SELECT ss.timestamp_ms, ss.sample_duration_ms, app.cpu_percent,
-                  app.memory_used_bytes, app.io_read_bytes_per_sec, app.io_write_bytes_per_sec
-           FROM system_sample ss
-           JOIN app_resource_snapshot snapshot ON snapshot.system_sample_id = ss.id
-           LEFT JOIN app_samples app ON app.system_sample_id = ss.id
-           WHERE ss.timestamp_ms >= ?1 AND ss.timestamp_ms < ?2
-           ORDER BY ss.timestamp_ms"#
+           SELECT f.ts, f.duration_ms, app.cpu_percent, app.memory_used_bytes,
+                  app.io_read_bytes_per_sec, app.io_write_bytes_per_sec
+            FROM sample_frame f
+            LEFT JOIN app_samples app ON app.frame_id=f.id
+            WHERE f.process_snapshot_present = 1
+              AND f.ts >= ?1 AND f.ts < ?2
+           ORDER BY f.ts"#
     );
     let mut stmt = conn.prepare(&sql)?;
     let all: Vec<AppResourceHistoryPoint> = stmt
@@ -314,15 +334,15 @@ pub fn app_resource_history(
     if all.len() <= max_points {
         return Ok(all);
     }
-    let stride = all.len().div_ceil(max_points);
+    let stride = all.len().div_ceil(max_points.max(1));
     Ok(all.into_iter().step_by(stride).collect())
 }
 
 fn app_resource_predicate(app_key: &str) -> (&'static str, &str) {
     if let Some(process_name) = app_key.strip_prefix("process:") {
-        ("LOWER(ars.process_name) = ?3", process_name)
+        ("LOWER(a.process_name) = LOWER(?3)", process_name)
     } else {
-        ("ars.app_key = ?3", app_key)
+        ("a.stable_key = ?3", app_key)
     }
 }
 

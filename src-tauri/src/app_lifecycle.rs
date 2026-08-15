@@ -73,7 +73,9 @@ pub fn install_tray(app: &AppHandle, exiting: Arc<AtomicBool>) -> tauri::Result<
             "quit" => {
                 exiting.store(true, Ordering::SeqCst);
                 if let Some(state) = app.try_state::<AppState>() {
-                    state.collector.shutdown();
+                    if let Err(error) = state.collector.shutdown() {
+                        eprintln!("collector shutdown acknowledgement failed: {error}");
+                    }
                 }
                 app.exit(0);
             }

@@ -37,7 +37,7 @@ erDiagram
 | `hardware_device` | id, stable_key, category, vendor, model, capacity_bytes, first/last_seen | CPU/GPU/内存/磁盘静态信息 |
 | `provider` | id, kind, name, version, priority, last_status | 记录实际数据来源 |
 | `collection_session_metric` | session_id, device_id, metric_key, enabled, support_status, provider_id, interval_ms | 解释该会话为何有或没有某指标 |
-| `app` | id, stable_key, display_name, publisher, category | 跨版本的逻辑应用 |
+| `app` | id, stable_key, process_name, display_name, publisher, category | 跨版本的逻辑应用；`process_name` 保存真实进程名，`display_name` 保留前台 resolver 提供的友好展示名 |
 | `app_executable` | id, app_id, normalized_path, file_identity, version, package_family | 具体可执行文件身份 |
 | `process_instance` | id, app_executable_id, pid, create/exit_ts, exit_code | 避免 PID 复用并支持运行时长/退出事件 |
 
