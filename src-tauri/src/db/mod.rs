@@ -1043,6 +1043,67 @@ mod tests {
     }
 
     #[test]
+    fn app_resource_history_preserves_process_snapshot_gaps_as_nulls() {
+        let path = test_path("resource-history-gaps");
+        cleanup_test_files(&path);
+        let db = Database::open(path.clone()).unwrap();
+        let snapshot = |timestamp_ms, apps| ResourceSnapshot {
+            system: SystemSample {
+                timestamp_ms,
+                sample_duration_ms: 5_000,
+                cpu_percent: Some(25.0),
+                memory_percent: Some(50.0),
+                memory_used_bytes: Some(1_000),
+                memory_total_bytes: Some(2_000),
+                disk_read_bytes_per_sec: Some(300),
+                disk_write_bytes_per_sec: Some(400),
+                has_app_snapshot: true,
+            },
+            apps,
+        };
+        let app = |path: &str, cpu_percent: f64| AppResourceSample {
+            app_key: format!("path:{}", path.to_lowercase()),
+            process_name: "ChatGPT.exe".into(),
+            exe_path: Some(path.into()),
+            process_count: 1,
+            cpu_percent,
+            memory_used_bytes: 900,
+            io_read_bytes_per_sec: 250,
+            io_write_bytes_per_sec: 350,
+        };
+        for (timestamp_ms, apps) in [
+            (10_000, vec![app(r"C:\ChatGPT\v1\ChatGPT.exe", 10.0)]),
+            (15_000, Vec::new()),
+            (20_000, vec![app(r"C:\ChatGPT\v2\ChatGPT.exe", 20.0)]),
+        ] {
+            db.with_writer(|conn| {
+                writer::insert_resource_snapshot(conn, &snapshot(timestamp_ms, apps))
+            })
+            .unwrap();
+        }
+
+        let history = db
+            .read(|conn| query::app_resource_history(conn, "process:chatgpt.exe", 1, 30_000, 500))
+            .unwrap();
+        assert_eq!(
+            history
+                .iter()
+                .map(|point| point.timestamp_ms)
+                .collect::<Vec<_>>(),
+            vec![10_000, 15_000, 20_000]
+        );
+        assert_eq!(history[0].cpu_percent, Some(10.0));
+        assert_eq!(history[1].cpu_percent, None);
+        assert_eq!(history[1].memory_used_bytes, None);
+        assert_eq!(history[1].io_read_bytes_per_sec, None);
+        assert_eq!(history[1].io_write_bytes_per_sec, None);
+        assert_eq!(history[2].cpu_percent, Some(20.0));
+
+        drop(db);
+        cleanup_test_files(&path);
+    }
+
+    #[test]
     fn database_size_includes_main_wal_and_shm_and_handles_missing_files() {
         let path = test_path("database-size");
         cleanup_test_files(&path);
@@ -1055,6 +1116,16 @@ mod tests {
         assert_eq!(schema::database_size_bytes(&path), 3);
         std::fs::remove_file(&path).unwrap();
         assert_eq!(schema::database_size_bytes(&path), 0);
+    }
+
+    #[test]
+    fn database_directory_resolves_the_database_parent_once() {
+        let path = PathBuf::from("root").join("data").join("timeline.sqlite3");
+        assert_eq!(schema::database_directory(&path), path.parent());
+        assert_eq!(
+            schema::database_directory(Path::new("timeline.sqlite3")),
+            Some(Path::new("."))
+        );
     }
 
     #[test]
@@ -1371,6 +1442,98 @@ mod tests {
             .unwrap(),
             1
         );
+
+        drop(db);
+        cleanup_test_files(&path);
+    }
+
+    #[test]
+    fn frame_writer_transient_error_then_success_returns_ok() {
+        let path = test_path("frame-writer-transient-success");
+        cleanup_test_files(&path);
+        let db = Database::open(path.clone()).unwrap();
+        let snapshot = ResourceSnapshot {
+            system: SystemSample {
+                timestamp_ms: 10_000,
+                sample_duration_ms: 5_000,
+                cpu_percent: Some(25.0),
+                memory_percent: None,
+                memory_used_bytes: None,
+                memory_total_bytes: None,
+                disk_read_bytes_per_sec: None,
+                disk_write_bytes_per_sec: None,
+                has_app_snapshot: false,
+            },
+            apps: Vec::new(),
+        };
+        let mut frame_writer = writer::FrameWriter::new(2, 2);
+        assert!(frame_writer.enqueue(snapshot));
+        let attempts = Rc::new(Cell::new(0_u32));
+        let attempts_for_write = attempts.clone();
+        let result = db.with_writer(|conn| {
+            frame_writer.flush_all_with(conn, move |conn, snapshot| {
+                let attempt = attempts_for_write.get();
+                attempts_for_write.set(attempt + 1);
+                if attempt == 0 {
+                    Err(rusqlite::Error::InvalidQuery)
+                } else {
+                    writer::insert_resource_snapshot(conn, snapshot)
+                }
+            })
+        });
+        assert_eq!(result.unwrap(), 1);
+        let health = frame_writer.health();
+        assert_eq!(health.queue_depth, 0);
+        assert_eq!(health.retry_count, 1);
+        assert_eq!(health.terminal_failure_count, 0);
+        assert!(health.last_error.is_some());
+        assert_eq!(
+            db.read(
+                |conn| conn.query_row("SELECT COUNT(*) FROM sample_frame", [], |row| row
+                    .get::<_, i64>(0))
+            )
+            .unwrap(),
+            1
+        );
+
+        drop(db);
+        cleanup_test_files(&path);
+    }
+
+    #[test]
+    fn frame_writer_deadline_failure_preserves_queue_without_retrying_forever() {
+        let path = test_path("frame-writer-deadline");
+        cleanup_test_files(&path);
+        let db = Database::open(path.clone()).unwrap();
+        let snapshot = ResourceSnapshot {
+            system: SystemSample {
+                timestamp_ms: 10_000,
+                sample_duration_ms: 5_000,
+                cpu_percent: Some(25.0),
+                memory_percent: None,
+                memory_used_bytes: None,
+                memory_total_bytes: None,
+                disk_read_bytes_per_sec: None,
+                disk_write_bytes_per_sec: None,
+                has_app_snapshot: false,
+            },
+            apps: Vec::new(),
+        };
+        let mut frame_writer = writer::FrameWriter::new(2, 32);
+        assert!(frame_writer.enqueue(snapshot));
+        let result = db.with_writer(|conn| {
+            frame_writer.flush_until_with(conn, std::time::Instant::now(), |_conn, _snapshot| {
+                panic!("deadline should prevent another write attempt")
+            })
+        });
+        assert!(result.is_err());
+        let health = frame_writer.health();
+        assert_eq!(health.queue_depth, 1);
+        assert_eq!(health.retry_count, 0);
+        assert_eq!(health.terminal_failure_count, 0);
+        assert!(health
+            .last_error
+            .is_some_and(|error| error.contains("deadline")));
 
         drop(db);
         cleanup_test_files(&path);

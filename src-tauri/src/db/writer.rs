@@ -2,6 +2,7 @@ use crate::models::{CollectionSettings, ForegroundApp, ResourceSnapshot, SystemS
 use rusqlite::{params, Connection, OptionalExtension};
 use std::{
     collections::{HashSet, VecDeque},
+    io,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
@@ -65,13 +66,14 @@ impl FrameWriter {
     /// failure is returned as `Err`; terminal failures are also removed and recorded in health,
     /// so callers can distinguish them from a deferred retry using `terminal_failure_count`.
     pub fn write_next(&mut self, conn: &Connection) -> rusqlite::Result<bool> {
-        self.write_next_inner(conn, false, insert_resource_snapshot)
+        self.write_next_inner(conn, false, None, insert_resource_snapshot)
     }
 
     fn write_next_inner<F>(
         &mut self,
         conn: &Connection,
         ignore_backoff: bool,
+        deadline: Option<Instant>,
         write: F,
     ) -> rusqlite::Result<bool>
     where
@@ -91,6 +93,13 @@ impl FrameWriter {
         }
         let timestamp_ms = item.snapshot.system.timestamp_ms;
         let started = Instant::now();
+        if let Some(deadline) = deadline {
+            if let Err(error) = configure_connection_for_deadline(conn, deadline) {
+                self.health.last_error = Some(error.to_string());
+                self.refresh_front_health();
+                return Err(error);
+            }
+        }
         match write(conn, &item.snapshot) {
             Ok(()) => {
                 self.queue.pop_front();
@@ -138,23 +147,90 @@ impl FrameWriter {
         self.flush_all_inner(conn, insert_resource_snapshot)
     }
 
+    pub fn flush_until(&mut self, conn: &Connection, deadline: Instant) -> rusqlite::Result<usize> {
+        self.flush_until_inner(conn, deadline, insert_resource_snapshot)
+    }
+
     fn flush_all_inner<F>(&mut self, conn: &Connection, mut write: F) -> rusqlite::Result<usize>
     where
         F: FnMut(&Connection, &ResourceSnapshot) -> rusqlite::Result<()>,
     {
         let mut committed = 0;
         let mut last_error = None;
+        let initial_terminal_failures = self.health.terminal_failure_count;
         while self.queue.front().is_some() {
-            match self.write_next_inner(conn, true, &mut write) {
+            match self.write_next_inner(conn, true, None, &mut write) {
                 Ok(true) => committed += 1,
                 Ok(false) => break,
                 Err(error) => last_error = Some(error),
             }
         }
-        if let Some(error) = last_error {
-            return Err(error);
+        if self.queue.is_empty() && self.health.terminal_failure_count == initial_terminal_failures
+        {
+            return Ok(committed);
         }
-        Ok(committed)
+        Err(last_error.unwrap_or_else(|| {
+            rusqlite::Error::ToSqlConversionFailure(Box::new(io::Error::other(
+                "frame queue could not be drained",
+            )))
+        }))
+    }
+
+    fn flush_until_inner<F>(
+        &mut self,
+        conn: &Connection,
+        deadline: Instant,
+        mut write: F,
+    ) -> rusqlite::Result<usize>
+    where
+        F: FnMut(&Connection, &ResourceSnapshot) -> rusqlite::Result<()>,
+    {
+        let mut committed = 0;
+        let mut last_error = None;
+        let initial_terminal_failures = self.health.terminal_failure_count;
+        let mut deadline_exceeded_after_commit = false;
+        while self.queue.front().is_some() {
+            if Instant::now() >= deadline {
+                let error = shutdown_timeout_error();
+                self.health.last_error = Some(error.to_string());
+                self.refresh_front_health();
+                last_error = Some(error);
+                break;
+            }
+            match self.write_next_inner(conn, true, Some(deadline), &mut write) {
+                Ok(true) => {
+                    committed += 1;
+                    if Instant::now() >= deadline {
+                        deadline_exceeded_after_commit = true;
+                        break;
+                    }
+                }
+                Ok(false) => break,
+                Err(error) => {
+                    last_error = Some(error);
+                    if Instant::now() >= deadline {
+                        break;
+                    }
+                }
+            }
+        }
+        let timed_out = deadline_exceeded_after_commit
+            || (Instant::now() >= deadline && self.queue.front().is_some());
+        if self.queue.is_empty()
+            && self.health.terminal_failure_count == initial_terminal_failures
+            && !timed_out
+        {
+            return Ok(committed);
+        }
+        Err(last_error.unwrap_or_else(|| {
+            if timed_out {
+                shutdown_timeout_error()
+            } else {
+                rusqlite::Error::ToSqlConversionFailure(Box::new(io::Error::other(
+                    "frame queue could not be drained before shutdown deadline",
+                )))
+            }
+        }))
     }
 
     pub fn discard_for_explicit_clear(&mut self) {
@@ -195,7 +271,7 @@ impl FrameWriter {
     where
         F: FnOnce(&Connection, &ResourceSnapshot) -> rusqlite::Result<()>,
     {
-        self.write_next_inner(conn, ignore_backoff, write)
+        self.write_next_inner(conn, ignore_backoff, None, write)
     }
 
     #[cfg(test)]
@@ -208,6 +284,19 @@ impl FrameWriter {
         F: FnMut(&Connection, &ResourceSnapshot) -> rusqlite::Result<()>,
     {
         self.flush_all_inner(conn, write)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn flush_until_with<F>(
+        &mut self,
+        conn: &Connection,
+        deadline: Instant,
+        write: F,
+    ) -> rusqlite::Result<usize>
+    where
+        F: FnMut(&Connection, &ResourceSnapshot) -> rusqlite::Result<()>,
+    {
+        self.flush_until_inner(conn, deadline, write)
     }
 
     fn refresh_front_health(&mut self) {
@@ -524,6 +613,7 @@ fn normalized_path(app: &ForegroundApp) -> String {
 const RETRY_BASE_DELAY_MS: u64 = 25;
 const RETRY_MAX_DELAY_MS: u64 = 5_000;
 const MAX_RETRY_LIMIT: u32 = 32;
+const SQLITE_BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 
 fn retry_backoff(attempt: u32) -> Duration {
     if attempt == 0 {
@@ -544,6 +634,24 @@ fn remaining_backoff_ms(next_attempt_at: Instant) -> u64 {
             .as_millis(),
     )
     .unwrap_or(u64::MAX)
+}
+
+pub(crate) fn configure_connection_for_deadline(
+    conn: &Connection,
+    deadline: Instant,
+) -> rusqlite::Result<()> {
+    let remaining = deadline.saturating_duration_since(Instant::now());
+    if remaining.is_zero() {
+        return Err(shutdown_timeout_error());
+    }
+    conn.busy_timeout(remaining.min(SQLITE_BUSY_TIMEOUT))
+}
+
+fn shutdown_timeout_error() -> rusqlite::Error {
+    rusqlite::Error::ToSqlConversionFailure(Box::new(io::Error::new(
+        io::ErrorKind::TimedOut,
+        "frame writer shutdown drain deadline expired",
+    )))
 }
 
 fn ensure_device_tx(

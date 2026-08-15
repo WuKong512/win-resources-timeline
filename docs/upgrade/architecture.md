@@ -58,6 +58,7 @@ PR-01 已把运行时写入边界接到 SQLite v7，但没有扩大 Provider、T
 
 - `Database` 持有串行写连接；查询使用独立只读连接，并设置 busy timeout。打开数据库时先完成 schema 迁移、开放 foreground 区间恢复，再创建新的 boot/collection session。
 - `FrameWriter` 以 `ResourceSnapshot` 为队列单位。每个 frame 通过一个小事务写入 `sample_frame` 及已有的 system/process 子表；只有事务成功提交后才从队列移除。失败样本留在队首，重试次数和重试总数进入 `WriterHealth`，队列达到上限时只增加 drop count 并拒绝新样本。
+- 正常 shutdown 使用单一 deadline drain 队列；每次 SQLite 尝试按剩余时间设置 busy timeout，并跳过等待中的退避但仍遵守 retry 上限。transient error 后成功清空队列不构成最终失败，只有 terminal drop、deadline 到期或其他未完成 drain 才返回错误；collection session 在最终 flush boundary 之后关闭。
 - `WriterHealth` 暴露 queue depth、writer delay、drop count、retry count、队首重试次数、最近提交耗时、最近提交时间和最近错误。collector 在健康状态中继续同步已有的丢弃计数；完整诊断展示不属于本 PR。
 - `rollup.rs` 只提供 rollup 表清单、待处理 frame 时间窗和维护状态接口。v7 DDL 已预留分钟、小时、日报和能耗表，但本 PR 不启动完整 rollup、保留清理或后台维护任务。
 - v7 查询保留按进程名合并不同可执行版本的既有语义；历史字段仍按来源和 NULL 语义表达，不能通过查询层补成完整 coverage。

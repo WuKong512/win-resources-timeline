@@ -474,7 +474,7 @@ fn preflight_with_available_space(
         )));
     }
     let backup_parent_exists = database_path
-        .and_then(Path::parent)
+        .and_then(database_directory)
         .map(Path::exists)
         .unwrap_or(true);
     if !backup_parent_exists {
@@ -490,7 +490,7 @@ fn preflight_with_available_space(
     let required_bytes = required_migration_space(database_bytes, wal_bytes, shm_bytes);
     let available_bytes = available_override.or_else(|| {
         database_path
-            .and_then(Path::parent)
+            .and_then(database_directory)
             .and_then(available_space_bytes)
     });
     if let Some(available) = available_bytes {
@@ -1325,11 +1325,10 @@ fn required_migration_space(database_bytes: u64, wal_bytes: u64, shm_bytes: u64)
 }
 
 #[cfg(windows)]
-fn available_space_bytes(path: &Path) -> Option<u64> {
+fn available_space_bytes(directory: &Path) -> Option<u64> {
     use std::os::windows::ffi::OsStrExt;
     use windows::{core::PCWSTR, Win32::Storage::FileSystem::GetDiskFreeSpaceExW};
 
-    let directory = path.parent().unwrap_or_else(|| Path::new("."));
     let wide: Vec<u16> = directory
         .as_os_str()
         .encode_wide()
@@ -1344,8 +1343,14 @@ fn available_space_bytes(path: &Path) -> Option<u64> {
 }
 
 #[cfg(not(windows))]
-fn available_space_bytes(_path: &Path) -> Option<u64> {
+fn available_space_bytes(_directory: &Path) -> Option<u64> {
     None
+}
+
+pub(crate) fn database_directory(path: &Path) -> Option<&Path> {
+    path.parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .or_else(|| Some(Path::new(".")))
 }
 
 fn sidecar(path: &Path, suffix: &str) -> PathBuf {

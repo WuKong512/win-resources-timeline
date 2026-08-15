@@ -312,9 +312,10 @@ pub fn app_resource_history(
            )
            SELECT f.ts, f.duration_ms, app.cpu_percent, app.memory_used_bytes,
                   app.io_read_bytes_per_sec, app.io_write_bytes_per_sec
-           FROM sample_frame f
-           JOIN app_samples app ON app.frame_id=f.id
-           WHERE f.ts >= ?1 AND f.ts < ?2
+            FROM sample_frame f
+            LEFT JOIN app_samples app ON app.frame_id=f.id
+            WHERE f.process_snapshot_present = 1
+              AND f.ts >= ?1 AND f.ts < ?2
            ORDER BY f.ts"#
     );
     let mut stmt = conn.prepare(&sql)?;

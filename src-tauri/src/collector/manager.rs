@@ -22,7 +22,11 @@ pub(crate) enum Control {
     OpenWindow,
     UpdateSettings(CollectionSettings, Sender<Result<(), String>>),
     Clear(Sender<Result<(), String>>),
-    Shutdown(Sender<Result<(), String>>, Sender<()>),
+    Shutdown {
+        deadline: Instant,
+        reply: Sender<Result<(), String>>,
+        done: Sender<()>,
+    },
 }
 
 type ShutdownCompletion = (Sender<Result<(), String>>, Sender<()>, Result<(), String>);
@@ -32,6 +36,8 @@ pub struct CollectorManager {
     tx: Sender<Control>,
     status: Arc<Mutex<CollectorStatus>>,
 }
+
+const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(10);
 
 impl CollectorManager {
     pub fn start(db: Arc<Database>, app: tauri::AppHandle) -> Self {
@@ -92,12 +98,19 @@ impl CollectorManager {
         {
             return Ok(());
         }
+        let deadline = Instant::now() + SHUTDOWN_TIMEOUT;
         let (tx, rx) = bounded(1);
         let (done_tx, done_rx) = bounded(1);
         self.tx
-            .send(Control::Shutdown(tx, done_tx))
-            .map_err(|_| "collector stopped".to_string())?;
-        let deadline = Instant::now() + Duration::from_secs(10);
+            .send_timeout(
+                Control::Shutdown {
+                    deadline,
+                    reply: tx,
+                    done: done_tx,
+                },
+                deadline.saturating_duration_since(Instant::now()),
+            )
+            .map_err(|_| "collector did not accept shutdown before deadline".to_string())?;
         let result = rx
             .recv_timeout(deadline.saturating_duration_since(Instant::now()))
             .map_err(|_| "collector did not acknowledge shutdown".to_string())?;
@@ -143,6 +156,7 @@ fn run_collector(
                         &mut open_interval_id,
                         &mut last_checkpoint_ms,
                         engine.pause(now),
+                        None,
                     ) {
                         eprintln!("collector pause update failed: {error}");
                     }
@@ -166,6 +180,7 @@ fn run_collector(
                     &mut open_interval_id,
                     &mut last_checkpoint_ms,
                     engine.terminate(now, reason),
+                    None,
                 ) {
                     eprintln!("collector session pause update failed: {error}");
                 }
@@ -222,6 +237,7 @@ fn run_collector(
                     &mut open_interval_id,
                     &mut last_checkpoint_ms,
                     engine.terminate(now, "paused"),
+                    None,
                 ) {
                     eprintln!("collector clear update failed: {error}");
                 }
@@ -235,21 +251,36 @@ fn run_collector(
                 let _ = reply.send(result);
                 continue;
             }
-            Ok(Control::Shutdown(reply, done)) => {
+            Ok(Control::Shutdown {
+                deadline,
+                reply,
+                done,
+            }) => {
                 let shutdown_at = now_ms();
                 let action_result = apply_actions(
                     &db,
                     &mut open_interval_id,
                     &mut last_checkpoint_ms,
                     engine.terminate(shutdown_at, "shutdown"),
+                    Some(deadline),
                 );
-                let flush_result = flush_system_samples(&db, &mut frame_writer, true)
+                let flush_result = flush_system_samples_until(&db, &mut frame_writer, deadline)
                     .map(|_| ())
                     .map_err(|error| format!("final frame flush failed: {error}"));
                 sync_writer_status(&status, &frame_writer.health());
-                let session_result = db
-                    .with_writer(|conn| writer::finish_runtime_session(conn, shutdown_at, "clean"))
-                    .map_err(|error| format!("final collection session close failed: {error}"));
+                let shutdown_kind = if action_result.is_ok() && flush_result.is_ok() {
+                    "clean"
+                } else {
+                    "unknown"
+                };
+                let session_result = if Instant::now() >= deadline {
+                    Err("shutdown deadline expired before final collection session close".into())
+                } else {
+                    with_writer_deadline(&db, Some(deadline), |conn| {
+                        writer::finish_runtime_session(conn, shutdown_at, shutdown_kind)
+                    })
+                    .map_err(|error| format!("final collection session close failed: {error}"))
+                };
                 let result = [action_result, flush_result, session_result]
                     .into_iter()
                     .find_map(Result::err)
@@ -290,6 +321,7 @@ fn run_collector(
                     &mut open_interval_id,
                     &mut last_checkpoint_ms,
                     engine.observe(now, observation),
+                    None,
                 ) {
                     eprintln!("collector interval update failed: {error}");
                 }
@@ -342,6 +374,7 @@ fn apply_actions(
     open_interval_id: &mut Option<i64>,
     last_checkpoint_ms: &mut i64,
     actions: Vec<IntervalAction>,
+    deadline: Option<Instant>,
 ) -> Result<(), String> {
     let mut first_error = None;
     for action in actions {
@@ -351,9 +384,9 @@ fn apply_actions(
                 at_ms,
                 activity,
             } => {
-                match db
-                    .with_writer(|c| writer::begin_interval(c, app_id, at_ms, activity.as_str()))
-                {
+                match with_writer_deadline(db, deadline, |c| {
+                    writer::begin_interval(c, app_id, at_ms, activity.as_str())
+                }) {
                     Ok(interval_id) => *open_interval_id = Some(interval_id),
                     Err(error) => {
                         *open_interval_id = None;
@@ -365,9 +398,9 @@ fn apply_actions(
             IntervalAction::Checkpoint { at_ms } => {
                 if at_ms - *last_checkpoint_ms >= 15_000 {
                     if let Some(id) = *open_interval_id {
-                        if let Err(error) =
-                            db.with_writer(|c| writer::checkpoint_interval(c, id, at_ms))
-                        {
+                        if let Err(error) = with_writer_deadline(db, deadline, |c| {
+                            writer::checkpoint_interval(c, id, at_ms)
+                        }) {
                             first_error.get_or_insert_with(|| error.to_string());
                         }
                     }
@@ -376,9 +409,9 @@ fn apply_actions(
             }
             IntervalAction::Close { at_ms, reason } => {
                 if let Some(id) = open_interval_id.take() {
-                    if let Err(error) =
-                        db.with_writer(|c| writer::close_interval(c, id, at_ms, reason))
-                    {
+                    if let Err(error) = with_writer_deadline(db, deadline, |c| {
+                        writer::close_interval(c, id, at_ms, reason)
+                    }) {
                         first_error.get_or_insert_with(|| error.to_string());
                     }
                 }
@@ -401,6 +434,30 @@ fn flush_system_samples(
             frame_writer.write_next(conn)?;
         }
         Ok(frame_writer.health())
+    })
+}
+
+fn flush_system_samples_until(
+    db: &Database,
+    frame_writer: &mut writer::FrameWriter,
+    deadline: Instant,
+) -> rusqlite::Result<writer::WriterHealth> {
+    db.with_writer(|conn| {
+        frame_writer.flush_until(conn, deadline)?;
+        Ok(frame_writer.health())
+    })
+}
+
+fn with_writer_deadline<T>(
+    db: &Database,
+    deadline: Option<Instant>,
+    operation: impl FnOnce(&rusqlite::Connection) -> rusqlite::Result<T>,
+) -> rusqlite::Result<T> {
+    db.with_writer(|conn| {
+        if let Some(deadline) = deadline {
+            writer::configure_connection_for_deadline(conn, deadline)?;
+        }
+        operation(conn)
     })
 }
 
