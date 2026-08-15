@@ -442,7 +442,7 @@ fn flush_system_samples_until(
     frame_writer: &mut writer::FrameWriter,
     deadline: Instant,
 ) -> rusqlite::Result<writer::WriterHealth> {
-    db.with_writer(|conn| {
+    db.with_writer_until(deadline, |conn| {
         frame_writer.flush_until(conn, deadline)?;
         Ok(frame_writer.health())
     })
@@ -453,12 +453,13 @@ fn with_writer_deadline<T>(
     deadline: Option<Instant>,
     operation: impl FnOnce(&rusqlite::Connection) -> rusqlite::Result<T>,
 ) -> rusqlite::Result<T> {
-    db.with_writer(|conn| {
-        if let Some(deadline) = deadline {
+    match deadline {
+        Some(deadline) => db.with_writer_until(deadline, |conn| {
             writer::configure_connection_for_deadline(conn, deadline)?;
-        }
-        operation(conn)
-    })
+            operation(conn)
+        }),
+        None => db.with_writer(operation),
+    }
 }
 
 fn sync_writer_status(status: &Arc<Mutex<CollectorStatus>>, health: &writer::WriterHealth) {

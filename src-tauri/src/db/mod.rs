@@ -6,7 +6,9 @@ pub mod writer;
 use rusqlite::{Connection, OpenFlags};
 use std::{
     path::{Path, PathBuf},
-    sync::Mutex,
+    sync::{Mutex, TryLockError},
+    thread,
+    time::{Duration, Instant},
 };
 
 pub struct Database {
@@ -42,6 +44,39 @@ impl Database {
         f(&conn)
     }
 
+    pub fn with_writer_until<T>(
+        &self,
+        deadline: Instant,
+        f: impl FnOnce(&Connection) -> rusqlite::Result<T>,
+    ) -> rusqlite::Result<T> {
+        let conn = loop {
+            if Instant::now() >= deadline {
+                return Err(writer_lock_timeout_error());
+            }
+            match self.writer.try_lock() {
+                Ok(conn) => {
+                    if Instant::now() >= deadline {
+                        return Err(writer_lock_timeout_error());
+                    }
+                    break conn;
+                }
+                Err(TryLockError::Poisoned(_)) => {
+                    return Err(writer_lock_poisoned_error());
+                }
+                Err(TryLockError::WouldBlock) => {
+                    let remaining = deadline
+                        .saturating_duration_since(Instant::now())
+                        .min(Duration::from_millis(1));
+                    if remaining.is_zero() {
+                        return Err(writer_lock_timeout_error());
+                    }
+                    thread::sleep(remaining);
+                }
+            }
+        };
+        f(&conn)
+    }
+
     pub fn read<T>(
         &self,
         f: impl FnOnce(&Connection) -> rusqlite::Result<T>,
@@ -66,6 +101,19 @@ fn now_ms() -> i64 {
         .unwrap_or(0)
 }
 
+fn writer_lock_timeout_error() -> rusqlite::Error {
+    rusqlite::Error::ToSqlConversionFailure(Box::new(std::io::Error::new(
+        std::io::ErrorKind::TimedOut,
+        "database writer lock deadline expired",
+    )))
+}
+
+fn writer_lock_poisoned_error() -> rusqlite::Error {
+    rusqlite::Error::ToSqlConversionFailure(Box::new(std::io::Error::other(
+        "database writer lock poisoned",
+    )))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -77,7 +125,16 @@ mod tests {
         },
     };
     use rusqlite::params;
-    use std::{cell::Cell, rc::Rc};
+    use std::{
+        cell::Cell,
+        rc::Rc,
+        sync::{
+            atomic::{AtomicBool, Ordering},
+            mpsc, Arc,
+        },
+        thread,
+        time::{Duration, Instant},
+    };
 
     fn test_path(name: &str) -> PathBuf {
         let nonce = std::time::SystemTime::now()
@@ -1216,6 +1273,58 @@ mod tests {
             Ok(())
         })
         .unwrap();
+        drop(db);
+        cleanup_test_files(&path);
+    }
+
+    #[test]
+    fn writer_lock_deadline_timeout_does_not_run_closure() {
+        let path = test_path("writer-lock-deadline");
+        cleanup_test_files(&path);
+        let db = Arc::new(Database::open(path.clone()).unwrap());
+        let (locked_tx, locked_rx) = mpsc::sync_channel(0);
+        let (release_tx, release_rx) = mpsc::sync_channel(0);
+        let holder_db = Arc::clone(&db);
+        let holder = thread::spawn(move || {
+            let _guard = holder_db.writer.lock().unwrap();
+            locked_tx.send(()).unwrap();
+            release_rx.recv().unwrap();
+        });
+        locked_rx.recv().unwrap();
+
+        let called = Arc::new(AtomicBool::new(false));
+        let called_by_closure = Arc::clone(&called);
+        let result = db.with_writer_until(Instant::now() + Duration::from_millis(25), |_| {
+            called_by_closure.store(true, Ordering::SeqCst);
+            Ok(())
+        });
+        let closure_ran = called.load(Ordering::SeqCst);
+        release_tx.send(()).unwrap();
+        holder.join().unwrap();
+
+        let error = result.unwrap_err().to_string();
+        assert!(error.contains("database writer lock deadline expired"));
+        assert!(!closure_ran);
+
+        drop(db);
+        cleanup_test_files(&path);
+    }
+
+    #[test]
+    fn writer_lock_deadline_success_runs_closure() {
+        let path = test_path("writer-lock-success");
+        cleanup_test_files(&path);
+        let db = Database::open(path.clone()).unwrap();
+        let called = Cell::new(false);
+        let result = db
+            .with_writer_until(Instant::now() + Duration::from_secs(1), |conn| {
+                called.set(true);
+                conn.query_row("SELECT 1", [], |row| row.get::<_, i64>(0))
+            })
+            .unwrap();
+
+        assert_eq!(result, 1);
+        assert!(called.get());
         drop(db);
         cleanup_test_files(&path);
     }
