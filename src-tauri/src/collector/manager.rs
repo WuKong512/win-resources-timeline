@@ -22,8 +22,10 @@ pub(crate) enum Control {
     OpenWindow,
     UpdateSettings(CollectionSettings, Sender<Result<(), String>>),
     Clear(Sender<Result<(), String>>),
-    Shutdown,
+    Shutdown(Sender<Result<(), String>>, Sender<()>),
 }
+
+type ShutdownCompletion = (Sender<Result<(), String>>, Sender<()>, Result<(), String>);
 
 #[derive(Clone)]
 pub struct CollectorManager {
@@ -81,8 +83,28 @@ impl CollectorManager {
             .map_err(|_| "collector did not acknowledge settings update".to_string())?
     }
 
-    pub fn shutdown(&self) {
-        let _ = self.tx.send(Control::Shutdown);
+    pub fn shutdown(&self) -> Result<(), String> {
+        if !self
+            .status
+            .lock()
+            .map_err(|_| "collector status lock poisoned".to_string())?
+            .running
+        {
+            return Ok(());
+        }
+        let (tx, rx) = bounded(1);
+        let (done_tx, done_rx) = bounded(1);
+        self.tx
+            .send(Control::Shutdown(tx, done_tx))
+            .map_err(|_| "collector stopped".to_string())?;
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let result = rx
+            .recv_timeout(deadline.saturating_duration_since(Instant::now()))
+            .map_err(|_| "collector did not acknowledge shutdown".to_string())?;
+        done_rx
+            .recv_timeout(deadline.saturating_duration_since(Instant::now()))
+            .map_err(|_| "collector did not finish shutdown".to_string())?;
+        result
     }
 }
 
@@ -110,17 +132,20 @@ fn run_collector(
     let mut frame_writer = writer::FrameWriter::new(64, 5);
     let mut last_prune = Instant::now() - Duration::from_secs(86_400);
     let mut session_suspended = false;
+    let mut shutdown_completion: Option<ShutdownCompletion> = None;
     loop {
         match rx.recv_timeout(Duration::from_secs(1)) {
             Ok(Control::SetPaused(paused)) => {
                 let now = now_ms();
                 if paused {
-                    apply_actions(
+                    if let Err(error) = apply_actions(
                         &db,
                         &mut open_interval_id,
                         &mut last_checkpoint_ms,
                         engine.pause(now),
-                    );
+                    ) {
+                        eprintln!("collector pause update failed: {error}");
+                    }
                 } else {
                     engine.resume(now);
                     system = SystemSampler::new();
@@ -136,13 +161,18 @@ fn run_collector(
             }
             Ok(Control::SessionPause(reason)) => {
                 let now = now_ms();
-                apply_actions(
+                if let Err(error) = apply_actions(
                     &db,
                     &mut open_interval_id,
                     &mut last_checkpoint_ms,
                     engine.terminate(now, reason),
-                );
-                let _ = flush_system_samples(&db, &mut frame_writer, true);
+                ) {
+                    eprintln!("collector session pause update failed: {error}");
+                }
+                if let Err(error) = flush_system_samples(&db, &mut frame_writer, true) {
+                    eprintln!("collector session pause flush failed: {error}");
+                }
+                sync_writer_status(&status, &frame_writer.health());
                 session_suspended = true;
                 if let Ok(mut s) = status.lock() {
                     s.last_heartbeat_at_ms = Some(now);
@@ -187,12 +217,14 @@ fn run_collector(
             }
             Ok(Control::Clear(reply)) => {
                 let now = now_ms();
-                apply_actions(
+                if let Err(error) = apply_actions(
                     &db,
                     &mut open_interval_id,
                     &mut last_checkpoint_ms,
                     engine.terminate(now, "paused"),
-                );
+                ) {
+                    eprintln!("collector clear update failed: {error}");
+                }
                 frame_writer.discard_for_explicit_clear();
                 let result = db
                     .with_writer(writer::clear_collected_data)
@@ -203,14 +235,29 @@ fn run_collector(
                 let _ = reply.send(result);
                 continue;
             }
-            Ok(Control::Shutdown) => {
-                apply_actions(
+            Ok(Control::Shutdown(reply, done)) => {
+                let shutdown_at = now_ms();
+                let action_result = apply_actions(
                     &db,
                     &mut open_interval_id,
                     &mut last_checkpoint_ms,
-                    engine.terminate(now_ms(), "shutdown"),
+                    engine.terminate(shutdown_at, "shutdown"),
                 );
-                let _ = flush_system_samples(&db, &mut frame_writer, true);
+                let flush_result = flush_system_samples(&db, &mut frame_writer, true)
+                    .map(|_| ())
+                    .map_err(|error| format!("final frame flush failed: {error}"));
+                sync_writer_status(&status, &frame_writer.health());
+                let session_result = db
+                    .with_writer(|conn| writer::finish_runtime_session(conn, shutdown_at, "clean"))
+                    .map_err(|error| format!("final collection session close failed: {error}"));
+                let result = [action_result, flush_result, session_result]
+                    .into_iter()
+                    .find_map(Result::err)
+                    .map_or(Ok(()), Err);
+                if let Err(error) = &result {
+                    eprintln!("collector shutdown failed: {error}");
+                }
+                shutdown_completion = Some((reply, done, result));
                 break;
             }
             Err(crossbeam_channel::RecvTimeoutError::Disconnected) => break,
@@ -238,12 +285,14 @@ fn run_collector(
                     };
                     Some((app_id, activity))
                 });
-                apply_actions(
+                if let Err(error) = apply_actions(
                     &db,
                     &mut open_interval_id,
                     &mut last_checkpoint_ms,
                     engine.observe(now, observation),
-                );
+                ) {
+                    eprintln!("collector interval update failed: {error}");
+                }
                 if let Ok(mut s) = status.lock() {
                     s.last_foreground_sample_at_ms = Some(now);
                 }
@@ -260,11 +309,9 @@ fn run_collector(
             {
                 last_system_flush = Instant::now();
                 let result = flush_system_samples(&db, &mut frame_writer, false);
-                if let Ok(mut s) = status.lock() {
-                    if let Ok(health) = &result {
-                        s.last_system_sample_at_ms = health.last_committed_timestamp_ms;
-                        s.dropped_system_samples = health.drop_count;
-                    }
+                sync_writer_status(&status, &frame_writer.health());
+                if let Err(error) = result {
+                    eprintln!("collector frame flush failed: {error}");
                 }
             }
         }
@@ -280,6 +327,14 @@ fn run_collector(
     if let Ok(mut s) = status.lock() {
         s.running = false;
     }
+    if let Some((reply, done, result)) = shutdown_completion {
+        if reply.send(result).is_err() {
+            eprintln!("collector shutdown acknowledgement receiver dropped");
+        }
+        if done.send(()).is_err() {
+            eprintln!("collector shutdown completion receiver dropped");
+        }
+    }
 }
 
 fn apply_actions(
@@ -287,7 +342,8 @@ fn apply_actions(
     open_interval_id: &mut Option<i64>,
     last_checkpoint_ms: &mut i64,
     actions: Vec<IntervalAction>,
-) {
+) -> Result<(), String> {
+    let mut first_error = None;
     for action in actions {
         match action {
             IntervalAction::Start {
@@ -295,27 +351,42 @@ fn apply_actions(
                 at_ms,
                 activity,
             } => {
-                *open_interval_id = db
+                match db
                     .with_writer(|c| writer::begin_interval(c, app_id, at_ms, activity.as_str()))
-                    .ok();
+                {
+                    Ok(interval_id) => *open_interval_id = Some(interval_id),
+                    Err(error) => {
+                        *open_interval_id = None;
+                        first_error.get_or_insert_with(|| error.to_string());
+                    }
+                }
                 *last_checkpoint_ms = at_ms;
             }
             IntervalAction::Checkpoint { at_ms } => {
                 if at_ms - *last_checkpoint_ms >= 15_000 {
                     if let Some(id) = *open_interval_id {
-                        let _ = db.with_writer(|c| writer::checkpoint_interval(c, id, at_ms));
+                        if let Err(error) =
+                            db.with_writer(|c| writer::checkpoint_interval(c, id, at_ms))
+                        {
+                            first_error.get_or_insert_with(|| error.to_string());
+                        }
                     }
                     *last_checkpoint_ms = at_ms;
                 }
             }
             IntervalAction::Close { at_ms, reason } => {
                 if let Some(id) = open_interval_id.take() {
-                    let _ = db.with_writer(|c| writer::close_interval(c, id, at_ms, reason));
+                    if let Err(error) =
+                        db.with_writer(|c| writer::close_interval(c, id, at_ms, reason))
+                    {
+                        first_error.get_or_insert_with(|| error.to_string());
+                    }
                 }
                 *last_checkpoint_ms = 0;
             }
         }
     }
+    first_error.map_or(Ok(()), Err)
 }
 
 fn flush_system_samples(
@@ -331,4 +402,11 @@ fn flush_system_samples(
         }
         Ok(frame_writer.health())
     })
+}
+
+fn sync_writer_status(status: &Arc<Mutex<CollectorStatus>>, health: &writer::WriterHealth) {
+    if let Ok(mut value) = status.lock() {
+        value.last_system_sample_at_ms = health.last_committed_timestamp_ms;
+        value.dropped_system_samples = health.drop_count;
+    }
 }

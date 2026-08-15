@@ -16,7 +16,7 @@ fn valid_range(start_ms: i64, end_ms: i64) -> rusqlite::Result<()> {
 
 pub fn list_apps(conn: &Connection) -> rusqlite::Result<Vec<AppIdentity>> {
     let mut stmt = conn.prepare(
-        "SELECT e.id, a.display_name, CASE WHEN e.normalized_path LIKE 'path:%' THEN substr(e.normalized_path, 6) END, a.display_name, a.publisher, a.is_hidden, a.first_seen_at_ms, a.last_seen_at_ms FROM app_executable e JOIN app a ON a.id = e.app_id ORDER BY a.display_name COLLATE NOCASE",
+        "SELECT e.id, a.process_name, CASE WHEN e.normalized_path LIKE 'path:%' THEN substr(e.normalized_path, 6) END, a.display_name, a.publisher, a.is_hidden, a.first_seen_at_ms, a.last_seen_at_ms FROM app_executable e JOIN app a ON a.id = e.app_id ORDER BY a.display_name COLLATE NOCASE",
     )?;
     let rows = stmt.query_map([], |r| {
         Ok(AppIdentity {
@@ -42,7 +42,7 @@ pub fn foreground_intervals(
 ) -> rusqlite::Result<Vec<ForegroundInterval>> {
     valid_range(start_ms, end_ms)?;
     let mut stmt = conn.prepare(
-        r#"SELECT fi.id, fi.app_executable_id, a.display_name, a.display_name,
+        r#"SELECT fi.id, fi.app_executable_id, a.process_name, a.display_name,
                   MAX(fi.start_time_ms, ?1), MIN(COALESCE(fi.end_time_ms, fi.last_seen_time_ms), ?2),
                   fi.activity_state, a.is_hidden
            FROM foreground_interval fi
@@ -203,7 +203,7 @@ pub fn app_resource_samples(
     timestamp_ms: i64,
 ) -> rusqlite::Result<Vec<AppResourceSample>> {
     let mut stmt = conn.prepare(
-        r#"SELECT a.stable_key, a.display_name,
+        r#"SELECT a.stable_key, a.process_name,
                   CASE WHEN e.normalized_path LIKE 'path:%' THEN substr(e.normalized_path, 6) END,
                   p.process_count, p.cpu_pct, p.working_set_bytes, p.read_bps, p.write_bps
            FROM process_sample p
@@ -231,20 +231,38 @@ pub fn app_resource_samples(
 
 pub fn resource_apps(conn: &Connection) -> rusqlite::Result<Vec<ResourceApp>> {
     let mut stmt = conn.prepare(
-        r#"WITH ranked AS (
-             SELECT LOWER(a.display_name) AS process_key, a.display_name,
-                    CASE WHEN e.normalized_path LIKE 'path:%' THEN substr(e.normalized_path, 6) END AS exe_path,
-                    f.ts,
-                    ROW_NUMBER() OVER (PARTITION BY LOWER(a.display_name) ORDER BY f.ts DESC) AS row_number
+        r#"WITH samples AS (
+             SELECT LOWER(a.process_name) AS process_key, a.process_name, a.display_name,
+                     CASE WHEN e.normalized_path LIKE 'path:%' THEN substr(e.normalized_path, 6) END AS exe_path,
+                     f.ts
              FROM process_sample p
              JOIN sample_frame f ON f.id = p.frame_id
              JOIN process_instance i ON i.id = p.process_instance_id
              JOIN app_executable e ON e.id = i.app_executable_id
              JOIN app a ON a.id = e.app_id
+             WHERE a.process_name IS NOT NULL AND trim(a.process_name) <> ''
+           ),
+           ranked AS (
+             SELECT samples.*,
+                    ROW_NUMBER() OVER (PARTITION BY process_key ORDER BY ts DESC) AS row_number
+             FROM samples
+           ),
+           friendly AS (
+             SELECT process_key, display_name
+             FROM (
+               SELECT process_key, display_name,
+                      ROW_NUMBER() OVER (PARTITION BY process_key ORDER BY ts DESC) AS row_number
+               FROM samples
+               WHERE LOWER(TRIM(display_name)) <> LOWER(TRIM(process_name))
+             )
+             WHERE row_number = 1
            )
-           SELECT 'process:' || process_key, display_name, display_name, exe_path, ts
-           FROM ranked WHERE row_number = 1
-           ORDER BY display_name COLLATE NOCASE"#,
+           SELECT 'process:' || ranked.process_key, ranked.process_name,
+                  COALESCE(friendly.display_name, ranked.display_name), ranked.exe_path, ranked.ts
+           FROM ranked
+           LEFT JOIN friendly ON friendly.process_key = ranked.process_key
+           WHERE ranked.row_number = 1
+           ORDER BY COALESCE(friendly.display_name, ranked.display_name) COLLATE NOCASE"#,
     )?;
     let rows = stmt.query_map([], |r| {
         Ok(ResourceApp {
@@ -321,7 +339,7 @@ pub fn app_resource_history(
 
 fn app_resource_predicate(app_key: &str) -> (&'static str, &str) {
     if let Some(process_name) = app_key.strip_prefix("process:") {
-        ("LOWER(a.display_name) = LOWER(?3)", process_name)
+        ("LOWER(a.process_name) = LOWER(?3)", process_name)
     } else {
         ("a.stable_key = ?3", app_key)
     }

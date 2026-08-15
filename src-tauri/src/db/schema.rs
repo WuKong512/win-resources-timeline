@@ -1,9 +1,12 @@
-use rusqlite::{params, Connection, Transaction};
+use rusqlite::{params, Connection, OptionalExtension, Transaction};
 use std::{
     fs,
     path::{Path, PathBuf},
+    sync::atomic::{AtomicU64, Ordering},
     time::{SystemTime, UNIX_EPOCH},
 };
+
+static MIGRATION_RUN_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 const SCHEMA_V1: &str = r#"
 CREATE TABLE app_identity (
@@ -57,7 +60,7 @@ CREATE TABLE IF NOT EXISTS migration_journal (
     to_version INTEGER NOT NULL,
     stage TEXT NOT NULL CHECK (stage IN ('preflight','backup','create','identity_backfill','usage_backfill','resource_backfill','verify','commit','postflight')),
     status TEXT NOT NULL CHECK (status IN ('pending','started','completed','failed','interrupted')),
-    started_at_ms INTEGER NOT NULL,
+    started_at_ms INTEGER,
     completed_at_ms INTEGER,
     detail_json TEXT,
     error_text TEXT,
@@ -100,7 +103,7 @@ CREATE TABLE IF NOT EXISTS collection_session_metric (
     CHECK(interval_ms IS NULL OR interval_ms > 0)
 );
 CREATE TABLE IF NOT EXISTS app (
-    id INTEGER PRIMARY KEY AUTOINCREMENT, stable_key TEXT NOT NULL UNIQUE, display_name TEXT NOT NULL, publisher TEXT, category TEXT,
+    id INTEGER PRIMARY KEY AUTOINCREMENT, stable_key TEXT NOT NULL UNIQUE, process_name TEXT NOT NULL, display_name TEXT NOT NULL, publisher TEXT, category TEXT,
     is_hidden INTEGER NOT NULL DEFAULT 0 CHECK(is_hidden IN (0,1)), first_seen_at_ms INTEGER NOT NULL, last_seen_at_ms INTEGER NOT NULL
 );
 CREATE TABLE IF NOT EXISTS app_executable (
@@ -254,6 +257,62 @@ CREATE TABLE IF NOT EXISTS v7_legacy_frame_map (
 );
 "#;
 
+const V7_COMPATIBILITY_DDL: &str = r#"
+CREATE INDEX IF NOT EXISTS idx_app_process_name ON app(process_name);
+CREATE TRIGGER IF NOT EXISTS trg_provider_null_version_insert
+    BEFORE INSERT ON provider
+    WHEN NEW.version IS NULL AND EXISTS(
+        SELECT 1 FROM provider WHERE kind = NEW.kind AND name = NEW.name AND version IS NULL
+    )
+BEGIN
+    SELECT RAISE(ABORT, 'duplicate provider with NULL version');
+END;
+CREATE TRIGGER IF NOT EXISTS trg_provider_null_version_update
+    BEFORE UPDATE OF kind, name, version ON provider
+    WHEN NEW.version IS NULL AND EXISTS(
+        SELECT 1 FROM provider WHERE id <> OLD.id AND kind = NEW.kind AND name = NEW.name AND version IS NULL
+    )
+BEGIN
+    SELECT RAISE(ABORT, 'duplicate provider with NULL version');
+END;
+CREATE TRIGGER IF NOT EXISTS trg_collection_session_metric_system_insert
+    BEFORE INSERT ON collection_session_metric
+    WHEN NEW.device_id IS NULL AND EXISTS(
+        SELECT 1 FROM collection_session_metric
+        WHERE session_id = NEW.session_id AND metric_key = NEW.metric_key AND device_id IS NULL
+    )
+BEGIN
+    SELECT RAISE(ABORT, 'duplicate system collection metric');
+END;
+CREATE TRIGGER IF NOT EXISTS trg_collection_session_metric_system_update
+    BEFORE UPDATE OF session_id, metric_key, device_id ON collection_session_metric
+    WHEN NEW.device_id IS NULL AND EXISTS(
+        SELECT 1 FROM collection_session_metric
+        WHERE rowid <> OLD.rowid AND session_id = NEW.session_id AND metric_key = NEW.metric_key AND device_id IS NULL
+    )
+BEGIN
+    SELECT RAISE(ABORT, 'duplicate system collection metric');
+END;
+CREATE TRIGGER IF NOT EXISTS trg_system_rollup_1m_system_insert
+    BEFORE INSERT ON system_rollup_1m
+    WHEN NEW.device_id IS NULL AND EXISTS(
+        SELECT 1 FROM system_rollup_1m
+        WHERE bucket_start_ms = NEW.bucket_start_ms AND metric_key = NEW.metric_key AND device_id IS NULL
+    )
+BEGIN
+    SELECT RAISE(ABORT, 'duplicate system rollup');
+END;
+CREATE TRIGGER IF NOT EXISTS trg_system_rollup_1m_system_update
+    BEFORE UPDATE OF bucket_start_ms, metric_key, device_id ON system_rollup_1m
+    WHEN NEW.device_id IS NULL AND EXISTS(
+        SELECT 1 FROM system_rollup_1m
+        WHERE rowid <> OLD.rowid AND bucket_start_ms = NEW.bucket_start_ms AND metric_key = NEW.metric_key AND device_id IS NULL
+    )
+BEGIN
+    SELECT RAISE(ABORT, 'duplicate system rollup');
+END;
+"#;
+
 const STAGES: &[&str] = &[
     "preflight",
     "backup",
@@ -273,6 +332,8 @@ pub struct MigrationPreflight {
     pub wal_bytes: u64,
     pub shm_bytes: u64,
     pub backup_parent_exists: bool,
+    pub available_bytes: Option<u64>,
+    pub required_bytes: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -385,12 +446,25 @@ pub fn migrate_with_path(
     if version < 7 {
         migrate_v6_to_v7(conn, database_path)?;
     }
+    let final_version: i64 = conn.pragma_query_value(None, "user_version", |row| row.get(0))?;
+    if final_version == 7 {
+        validate_v7_open(conn)?;
+    }
     Ok(())
 }
 
+#[allow(dead_code)]
 pub fn preflight(
     conn: &Connection,
     database_path: Option<&Path>,
+) -> rusqlite::Result<MigrationPreflight> {
+    preflight_with_available_space(conn, database_path, None)
+}
+
+fn preflight_with_available_space(
+    conn: &Connection,
+    database_path: Option<&Path>,
+    available_override: Option<u64>,
 ) -> rusqlite::Result<MigrationPreflight> {
     check_pragma_ok(conn, "quick_check")?;
     check_pragma_ok(conn, "integrity_check")?;
@@ -406,16 +480,34 @@ pub fn preflight(
     if !backup_parent_exists {
         return Err(invalid_schema("database backup directory does not exist"));
     }
+    let database_bytes = database_path.map(file_size).unwrap_or(0);
+    let wal_bytes = database_path
+        .map(|p| file_size(&sidecar(p, "-wal")))
+        .unwrap_or(0);
+    let shm_bytes = database_path
+        .map(|p| file_size(&sidecar(p, "-shm")))
+        .unwrap_or(0);
+    let required_bytes = required_migration_space(database_bytes, wal_bytes, shm_bytes);
+    let available_bytes = available_override.or_else(|| {
+        database_path
+            .and_then(Path::parent)
+            .and_then(available_space_bytes)
+    });
+    if let Some(available) = available_bytes {
+        if available < required_bytes {
+            return Err(invalid_schema(&format!(
+                "insufficient free space for v6 to v7 migration: available={available}, required={required_bytes}"
+            )));
+        }
+    }
     Ok(MigrationPreflight {
         user_version: conn.pragma_query_value(None, "user_version", |row| row.get(0))?,
-        database_bytes: database_path.map(file_size).unwrap_or(0),
-        wal_bytes: database_path
-            .map(|p| file_size(&sidecar(p, "-wal")))
-            .unwrap_or(0),
-        shm_bytes: database_path
-            .map(|p| file_size(&sidecar(p, "-shm")))
-            .unwrap_or(0),
+        database_bytes,
+        wal_bytes,
+        shm_bytes,
         backup_parent_exists,
+        available_bytes,
+        required_bytes,
     })
 }
 
@@ -435,17 +527,57 @@ pub fn create_consistent_backup(conn: &Connection, destination: &Path) -> rusqli
 }
 
 fn migrate_v6_to_v7(conn: &mut Connection, database_path: Option<&Path>) -> rusqlite::Result<()> {
-    conn.execute_batch(MIGRATION_JOURNAL_DDL)?;
-    let run_id = format!("v6-v7-{}-{}", now_ms(), std::process::id());
-    conn.execute("UPDATE migration_journal SET status='interrupted', completed_at_ms=?1, error_text='previous migration did not complete' WHERE to_version=7 AND status IN ('pending','started')", [now_ms()])?;
+    migrate_v6_to_v7_with_options(conn, database_path, None, None)
+}
+
+#[cfg(test)]
+pub(crate) fn migrate_v6_to_v7_fail_at(
+    conn: &mut Connection,
+    database_path: Option<&Path>,
+    stage: &str,
+) -> rusqlite::Result<()> {
+    migrate_v6_to_v7_with_options(conn, database_path, Some(stage), None)
+}
+
+#[cfg(test)]
+pub(crate) fn migrate_v6_to_v7_with_available_space(
+    conn: &mut Connection,
+    database_path: Option<&Path>,
+    available_bytes: u64,
+) -> rusqlite::Result<()> {
+    migrate_v6_to_v7_with_options(conn, database_path, None, Some(available_bytes))
+}
+
+fn migrate_v6_to_v7_with_options(
+    conn: &mut Connection,
+    database_path: Option<&Path>,
+    failure_stage: Option<&str>,
+    available_override: Option<u64>,
+) -> rusqlite::Result<()> {
+    ensure_migration_journal_schema(conn)?;
+    let run_id = format!(
+        "v6-v7-{}-{}-{}",
+        now_ms(),
+        std::process::id(),
+        MIGRATION_RUN_COUNTER.fetch_add(1, Ordering::Relaxed)
+    );
+    conn.execute("UPDATE migration_journal SET status='interrupted', completed_at_ms=?1, error_text='previous migration was interrupted' WHERE to_version=7 AND status = 'started'", [now_ms()])?;
     start_run(conn, &run_id)?;
-    let preflight = match preflight(conn, database_path) {
+    mark_stage(conn, &run_id, "preflight", "started", None, None)?;
+    let preflight = match preflight_with_available_space(conn, database_path, available_override) {
         Ok(v) => {
             mark_stage(conn, &run_id, "preflight", "completed", None, None)?;
             v
         }
         Err(e) => {
-            mark_failed(conn, &run_id, &e.to_string());
+            mark_stage(
+                conn,
+                &run_id,
+                "preflight",
+                "failed",
+                None,
+                Some(&e.to_string()),
+            )?;
             return Err(e);
         }
     };
@@ -462,7 +594,14 @@ fn migrate_v6_to_v7(conn: &mut Connection, database_path: Option<&Path>) -> rusq
     });
     if let Some(path) = backup_path.as_deref() {
         if let Err(e) = create_consistent_backup(conn, path) {
-            mark_failed(conn, &run_id, &e.to_string());
+            mark_stage(
+                conn,
+                &run_id,
+                "backup",
+                "failed",
+                None,
+                Some(&e.to_string()),
+            )?;
             return Err(e);
         }
     }
@@ -472,62 +611,111 @@ fn migrate_v6_to_v7(conn: &mut Connection, database_path: Option<&Path>) -> rusq
         "backup",
         "completed",
         Some(&format!(
-            "{{\"database_bytes\":{},\"wal_bytes\":{},\"shm_bytes\":{}}}",
-            preflight.database_bytes, preflight.wal_bytes, preflight.shm_bytes
+            "{{\"database_bytes\":{},\"wal_bytes\":{},\"shm_bytes\":{},\"available_bytes\":{},\"required_bytes\":{}}}",
+            preflight.database_bytes,
+            preflight.wal_bytes,
+            preflight.shm_bytes,
+            preflight
+                .available_bytes
+                .map(|value| value.to_string())
+                .unwrap_or_else(|| "null".into()),
+            preflight.required_bytes
         )),
         None,
     )?;
     let legacy = legacy_summary(conn)?;
-    for stage in [
-        "create",
-        "identity_backfill",
-        "usage_backfill",
-        "resource_backfill",
-        "verify",
-        "commit",
-    ] {
-        mark_stage(conn, &run_id, stage, "started", None, None)?;
-    }
+    mark_stage(conn, &run_id, "create", "started", None, None)?;
+    let mut current_stage = "create";
+    let mut completed_stages = Vec::new();
     let result = (|| {
         let tx = conn.transaction()?;
+        mark_stage_tx(&tx, &run_id, "create", "started", None, None)?;
+        inject_failure(failure_stage, "create")?;
         rename_legacy_tables(&tx)?;
         tx.execute_batch(SCHEMA_V7)?;
+        tx.execute_batch(V7_COMPATIBILITY_DDL)?;
+        install_v7_nullable_constraints(&tx)?;
         let (boot, collection) = ensure_legacy_session(&tx, &legacy)?;
+        mark_stage_tx(&tx, &run_id, "create", "completed", None, None)?;
+        completed_stages.push("create");
+
+        current_stage = "identity_backfill";
+        mark_stage_tx(&tx, &run_id, current_stage, "started", None, None)?;
+        inject_failure(failure_stage, current_stage)?;
         backfill_identity(&tx)?;
+        mark_stage_tx(&tx, &run_id, current_stage, "completed", None, None)?;
+        completed_stages.push(current_stage);
+
+        current_stage = "usage_backfill";
+        mark_stage_tx(&tx, &run_id, current_stage, "started", None, None)?;
+        inject_failure(failure_stage, current_stage)?;
         backfill_usage(&tx, boot)?;
+        mark_stage_tx(&tx, &run_id, current_stage, "completed", None, None)?;
+        completed_stages.push(current_stage);
+
+        current_stage = "resource_backfill";
+        mark_stage_tx(&tx, &run_id, current_stage, "started", None, None)?;
+        inject_failure(failure_stage, current_stage)?;
         backfill_resources(&tx, collection)?;
+        mark_stage_tx(&tx, &run_id, current_stage, "completed", None, None)?;
+        completed_stages.push(current_stage);
+
+        current_stage = "verify";
+        mark_stage_tx(&tx, &run_id, current_stage, "started", None, None)?;
+        inject_failure(failure_stage, current_stage)?;
         let verification = verify_v7(&tx, &legacy)?;
         verify_database_integrity(&tx)?;
+        mark_stage_tx(
+            &tx,
+            &run_id,
+            current_stage,
+            "completed",
+            Some(&format!(
+                "{{\"foreground_rows\":{},\"frame_rows\":{},\"process_rows\":{}}}",
+                verification.foreground_rows, verification.frame_rows, verification.process_rows
+            )),
+            None,
+        )?;
+        completed_stages.push(current_stage);
+
+        current_stage = "commit";
+        mark_stage_tx(&tx, &run_id, current_stage, "started", None, None)?;
+        inject_failure(failure_stage, current_stage)?;
         tx.pragma_update(None, "user_version", 7)?;
+        mark_stage_tx(&tx, &run_id, current_stage, "completed", None, None)?;
+        completed_stages.push(current_stage);
         tx.commit()?;
         Ok::<_, rusqlite::Error>(verification)
     })();
     let verification = match result {
         Ok(v) => v,
         Err(e) => {
-            mark_failed(conn, &run_id, &e.to_string());
+            for stage in &completed_stages {
+                mark_stage(conn, &run_id, stage, "completed", None, None)?;
+            }
+            mark_stage(
+                conn,
+                &run_id,
+                current_stage,
+                "failed",
+                None,
+                Some(&e.to_string()),
+            )?;
             return Err(e);
         }
     };
-    mark_stage(
-        conn,
-        &run_id,
-        "verify",
-        "completed",
-        Some(&format!(
-            "{{\"foreground_rows\":{},\"frame_rows\":{},\"process_rows\":{}}}",
-            verification.foreground_rows, verification.frame_rows, verification.process_rows
-        )),
-        None,
-    )?;
-    mark_stage(conn, &run_id, "commit", "completed", None, None)?;
-    for stage in [
-        "create",
-        "identity_backfill",
-        "usage_backfill",
-        "resource_backfill",
-    ] {
-        mark_stage(conn, &run_id, stage, "completed", None, None)?;
+    debug_assert_eq!(verification.frame_rows, legacy.frame_rows);
+    mark_stage(conn, &run_id, "postflight", "started", None, None)?;
+    if let Err(e) = inject_failure(failure_stage, "postflight") {
+        mark_stage(
+            conn,
+            &run_id,
+            "postflight",
+            "failed",
+            None,
+            Some(&e.to_string()),
+        )?;
+        return Err(e);
     }
     if let Err(e) = postflight(conn) {
         mark_stage(
@@ -547,14 +735,61 @@ fn migrate_v6_to_v7(conn: &mut Connection, database_path: Option<&Path>) -> rusq
 fn start_run(conn: &Connection, run_id: &str) -> rusqlite::Result<()> {
     let tx = conn.unchecked_transaction()?;
     for stage in STAGES {
-        tx.execute("INSERT INTO migration_journal(run_id,from_version,to_version,stage,status,started_at_ms) VALUES (?1,6,7,?2,'pending',?3)", params![run_id, *stage, now_ms()])?;
+        tx.execute("INSERT INTO migration_journal(run_id,from_version,to_version,stage,status) VALUES (?1,6,7,?2,'pending')", params![run_id, *stage])?;
     }
-    tx.execute(
-        "UPDATE migration_journal SET status='started' WHERE run_id=?1 AND stage='preflight'",
-        [run_id],
-    )?;
     tx.commit()
 }
+
+fn ensure_migration_journal_schema(conn: &Connection) -> rusqlite::Result<()> {
+    conn.execute_batch(MIGRATION_JOURNAL_DDL)?;
+    let started_at_not_null = {
+        let mut statement = conn.prepare("PRAGMA table_info(migration_journal)")?;
+        let mut rows = statement.query([])?;
+        let mut not_null = None;
+        while let Some(row) = rows.next()? {
+            let name: String = row.get(1)?;
+            if name == "started_at_ms" {
+                not_null = Some(row.get::<_, i64>(3)? != 0);
+                break;
+            }
+        }
+        not_null.ok_or_else(|| invalid_schema("migration journal is missing started_at_ms"))?
+    };
+    if !started_at_not_null {
+        return Ok(());
+    }
+
+    // Early PR-01 builds made pending stages carry a non-null start timestamp. Rebuild only
+    // this internal journal table while preserving every row so a failed v6 migration remains
+    // retryable without inventing timestamps for stages that never started.
+    let legacy_name = format!(
+        "migration_journal_legacy_{}_{}",
+        std::process::id(),
+        MIGRATION_RUN_COUNTER.fetch_add(1, Ordering::Relaxed)
+    );
+    let tx = conn.unchecked_transaction()?;
+    tx.execute_batch(
+        "DROP INDEX IF EXISTS idx_migration_journal_run;
+         DROP INDEX IF EXISTS idx_migration_journal_pending;",
+    )?;
+    tx.execute_batch(&format!(
+        "ALTER TABLE migration_journal RENAME TO {legacy_name};"
+    ))?;
+    tx.execute_batch(MIGRATION_JOURNAL_DDL)?;
+    tx.execute(
+        &format!(
+            "INSERT INTO migration_journal(
+                 id,run_id,from_version,to_version,stage,status,started_at_ms,completed_at_ms,detail_json,error_text
+             )
+             SELECT id,run_id,from_version,to_version,stage,status,started_at_ms,completed_at_ms,detail_json,error_text
+             FROM {legacy_name}"
+        ),
+        [],
+    )?;
+    tx.execute_batch(&format!("DROP TABLE {legacy_name};"))?;
+    tx.commit()
+}
+
 fn mark_stage(
     conn: &Connection,
     run_id: &str,
@@ -563,11 +798,32 @@ fn mark_stage(
     detail: Option<&str>,
     error: Option<&str>,
 ) -> rusqlite::Result<()> {
-    conn.execute("UPDATE migration_journal SET status=?1,completed_at_ms=CASE WHEN ?1 IN ('completed','failed','interrupted') THEN ?2 ELSE completed_at_ms END,detail_json=COALESCE(?3,detail_json),error_text=COALESCE(?4,error_text) WHERE run_id=?5 AND stage=?6",params![status,now_ms(),detail,error,run_id,stage])?;
+    let timestamp = now_ms();
+    let changed = conn.execute("UPDATE migration_journal SET status=?1,started_at_ms=CASE WHEN ?1='started' THEN COALESCE(started_at_ms,?2) ELSE started_at_ms END,completed_at_ms=CASE WHEN ?1 IN ('completed','failed','interrupted') THEN ?2 ELSE completed_at_ms END,detail_json=COALESCE(?3,detail_json),error_text=COALESCE(?4,error_text) WHERE run_id=?5 AND stage=?6",params![status,timestamp,detail,error,run_id,stage])?;
+    if changed != 1 {
+        return Err(invalid_schema(&format!(
+            "migration journal stage not found: run_id={run_id}, stage={stage}"
+        )));
+    }
     Ok(())
 }
-fn mark_failed(conn: &Connection, run_id: &str, error: &str) {
-    let _=conn.execute("UPDATE migration_journal SET status='failed',completed_at_ms=?1,error_text=?2 WHERE run_id=?3 AND status <> 'completed'",params![now_ms(),error,run_id]);
+
+fn mark_stage_tx(
+    tx: &Transaction<'_>,
+    run_id: &str,
+    stage: &str,
+    status: &str,
+    detail: Option<&str>,
+    error: Option<&str>,
+) -> rusqlite::Result<()> {
+    let timestamp = now_ms();
+    let changed = tx.execute("UPDATE migration_journal SET status=?1,started_at_ms=CASE WHEN ?1='started' THEN COALESCE(started_at_ms,?2) ELSE started_at_ms END,completed_at_ms=CASE WHEN ?1 IN ('completed','failed','interrupted') THEN ?2 ELSE completed_at_ms END,detail_json=COALESCE(?3,detail_json),error_text=COALESCE(?4,error_text) WHERE run_id=?5 AND stage=?6",params![status,timestamp,detail,error,run_id,stage])?;
+    if changed != 1 {
+        return Err(invalid_schema(&format!(
+            "migration journal stage not found: run_id={run_id}, stage={stage}"
+        )));
+    }
+    Ok(())
 }
 
 fn rename_legacy_tables(tx: &Transaction<'_>) -> rusqlite::Result<()> {
@@ -623,9 +879,9 @@ fn ensure_legacy_session(
 fn backfill_identity(tx: &Transaction<'_>) -> rusqlite::Result<()> {
     if table_exists(tx, "legacy_v6_app_identity")? {
         tx.execute_batch(r#"
-        INSERT INTO app(stable_key,display_name,publisher,is_hidden,first_seen_at_ms,last_seen_at_ms)
-        SELECT identity_key,display_name,publisher,COALESCE(is_hidden,0),first_seen_at_ms,last_seen_at_ms FROM legacy_v6_app_identity WHERE 1
-        ON CONFLICT(stable_key) DO UPDATE SET display_name=excluded.display_name,publisher=excluded.publisher,is_hidden=excluded.is_hidden,first_seen_at_ms=MIN(app.first_seen_at_ms,excluded.first_seen_at_ms),last_seen_at_ms=MAX(app.last_seen_at_ms,excluded.last_seen_at_ms);
+        INSERT INTO app(stable_key,process_name,display_name,publisher,is_hidden,first_seen_at_ms,last_seen_at_ms)
+        SELECT identity_key,COALESCE(NULLIF(TRIM(process_name),''),'unresolved'),COALESCE(NULLIF(TRIM(display_name),''),'Unresolved'),publisher,COALESCE(is_hidden,0),first_seen_at_ms,last_seen_at_ms FROM legacy_v6_app_identity WHERE 1
+        ON CONFLICT(stable_key) DO UPDATE SET process_name=COALESCE(excluded.process_name,app.process_name),publisher=excluded.publisher,is_hidden=excluded.is_hidden,first_seen_at_ms=MIN(app.first_seen_at_ms,excluded.first_seen_at_ms),last_seen_at_ms=MAX(app.last_seen_at_ms,excluded.last_seen_at_ms);
         INSERT INTO app_executable(app_id,normalized_path,first_seen_at_ms,last_seen_at_ms,source)
         SELECT a.id,CASE WHEN old.exe_path IS NOT NULL AND trim(old.exe_path)<>'' THEN 'path:'||lower(replace(trim(old.exe_path),'/','\\')) ELSE 'legacy:'||old.identity_key END,old.first_seen_at_ms,old.last_seen_at_ms,'legacy-v6'
         FROM legacy_v6_app_identity old JOIN app a ON a.stable_key=old.identity_key WHERE 1
@@ -638,9 +894,9 @@ fn backfill_identity(tx: &Transaction<'_>) -> rusqlite::Result<()> {
         && table_exists(tx, "legacy_v6_system_sample")?
     {
         tx.execute_batch(r#"
-        INSERT INTO app(stable_key,display_name,first_seen_at_ms,last_seen_at_ms)
-        SELECT old.app_key,MAX(old.process_name),COALESCE(MIN(s.timestamp_ms),0),COALESCE(MAX(s.timestamp_ms),0) FROM legacy_v6_app_resource_sample old LEFT JOIN legacy_v6_system_sample s ON s.id=old.system_sample_id WHERE 1 GROUP BY old.app_key
-        ON CONFLICT(stable_key) DO UPDATE SET display_name=COALESCE(app.display_name,excluded.display_name),first_seen_at_ms=MIN(app.first_seen_at_ms,excluded.first_seen_at_ms),last_seen_at_ms=MAX(app.last_seen_at_ms,excluded.last_seen_at_ms);
+        INSERT INTO app(stable_key,process_name,display_name,first_seen_at_ms,last_seen_at_ms)
+        SELECT old.app_key,COALESCE(MAX(NULLIF(TRIM(old.process_name),'')),'unresolved'),COALESCE(MAX(NULLIF(TRIM(old.process_name),'')),'Unresolved'),COALESCE(MIN(s.timestamp_ms),0),COALESCE(MAX(s.timestamp_ms),0) FROM legacy_v6_app_resource_sample old LEFT JOIN legacy_v6_system_sample s ON s.id=old.system_sample_id WHERE 1 GROUP BY old.app_key
+        ON CONFLICT(stable_key) DO UPDATE SET process_name=COALESCE(excluded.process_name,app.process_name),first_seen_at_ms=MIN(app.first_seen_at_ms,excluded.first_seen_at_ms),last_seen_at_ms=MAX(app.last_seen_at_ms,excluded.last_seen_at_ms);
         INSERT INTO app_executable(app_id,normalized_path,first_seen_at_ms,last_seen_at_ms,source)
         SELECT a.id,CASE WHEN old.exe_path IS NOT NULL AND trim(old.exe_path)<>'' THEN 'path:'||lower(replace(trim(old.exe_path),'/','\\')) ELSE 'legacy:'||old.app_key END,COALESCE(MIN(s.timestamp_ms),0),COALESCE(MAX(s.timestamp_ms),0),'legacy-v6'
         FROM legacy_v6_app_resource_sample old JOIN app a ON a.stable_key=old.app_key LEFT JOIN legacy_v6_system_sample s ON s.id=old.system_sample_id WHERE 1 GROUP BY a.id,old.app_key,old.exe_path
@@ -688,9 +944,9 @@ fn backfill_resources(tx: &Transaction<'_>, collection: Option<i64>) -> rusqlite
     if table_exists(tx, "legacy_v6_app_resource_sample")? {
         tx.execute_batch(r#"
         INSERT INTO process_instance(app_executable_id,stable_key,source)
-        SELECT e.id,'legacy-v6:'||o.app_key,'legacy-v6' FROM (SELECT DISTINCT app_key,exe_path FROM legacy_v6_app_resource_sample) o JOIN app a ON a.stable_key=o.app_key JOIN app_executable e ON e.app_id=a.id AND e.normalized_path=CASE WHEN o.exe_path IS NOT NULL AND trim(o.exe_path)<>'' THEN 'path:'||lower(replace(trim(o.exe_path),'/','\\')) ELSE 'legacy:'||o.app_key END WHERE 1 ON CONFLICT(stable_key) DO NOTHING;
+        SELECT e.id,'legacy-v6:'||o.app_key||':'||CASE WHEN o.exe_path IS NOT NULL AND trim(o.exe_path)<>'' THEN 'path:'||lower(replace(trim(o.exe_path),'/','\\')) ELSE 'legacy:'||o.app_key END,'legacy-v6' FROM (SELECT DISTINCT app_key,exe_path FROM legacy_v6_app_resource_sample) o JOIN app a ON a.stable_key=o.app_key JOIN app_executable e ON e.app_id=a.id AND e.normalized_path=CASE WHEN o.exe_path IS NOT NULL AND trim(o.exe_path)<>'' THEN 'path:'||lower(replace(trim(o.exe_path),'/','\\')) ELSE 'legacy:'||o.app_key END WHERE 1 ON CONFLICT(stable_key) DO NOTHING;
         INSERT INTO process_sample(frame_id,process_instance_id,cpu_pct,working_set_bytes,process_count,read_bps,write_bps,source,legacy_v6_id)
-        SELECT m.frame_id,i.id,o.cpu_percent,o.memory_used_bytes,o.process_count,o.io_read_bytes_per_sec,o.io_write_bytes_per_sec,'legacy-v6',o.id FROM legacy_v6_app_resource_sample o JOIN v7_legacy_frame_map m ON m.legacy_system_sample_id=o.system_sample_id JOIN process_instance i ON i.stable_key='legacy-v6:'||o.app_key WHERE 1 ON CONFLICT(legacy_v6_id) DO NOTHING;
+        SELECT m.frame_id,i.id,o.cpu_percent,o.memory_used_bytes,o.process_count,o.io_read_bytes_per_sec,o.io_write_bytes_per_sec,'legacy-v6',o.id FROM legacy_v6_app_resource_sample o JOIN v7_legacy_frame_map m ON m.legacy_system_sample_id=o.system_sample_id JOIN process_instance i ON i.stable_key='legacy-v6:'||o.app_key||':'||CASE WHEN o.exe_path IS NOT NULL AND trim(o.exe_path)<>'' THEN 'path:'||lower(replace(trim(o.exe_path),'/','\\')) ELSE 'legacy:'||o.app_key END WHERE 1 ON CONFLICT(legacy_v6_id) DO NOTHING;
         UPDATE sample_frame SET process_snapshot_present=1 WHERE legacy_v6_system_sample_id IN (SELECT system_sample_id FROM legacy_v6_app_resource_sample);
     "#)?;
     }
@@ -759,6 +1015,179 @@ fn postflight(conn: &Connection) -> rusqlite::Result<()> {
         return Err(invalid_schema("postflight user_version is not 7"));
     }
     verify_database_integrity(conn)
+}
+
+fn validate_v7_open(conn: &mut Connection) -> rusqlite::Result<()> {
+    ensure_v7_compatibility(conn)?;
+    let latest_postflight = latest_postflight(conn)?;
+    match verify_database_integrity(conn) {
+        Ok(()) => {
+            if let Some((run_id, status)) = latest_postflight {
+                if status != "completed" {
+                    mark_stage(
+                        conn,
+                        &run_id,
+                        "postflight",
+                        "completed",
+                        Some("revalidated successfully on database open"),
+                        None,
+                    )?;
+                }
+            }
+            Ok(())
+        }
+        Err(error) => {
+            if let Some((run_id, _)) = latest_postflight {
+                mark_stage(
+                    conn,
+                    &run_id,
+                    "postflight",
+                    "failed",
+                    None,
+                    Some(&error.to_string()),
+                )?;
+            }
+            Err(error)
+        }
+    }
+}
+
+fn ensure_v7_compatibility(conn: &mut Connection) -> rusqlite::Result<()> {
+    let tx = conn.transaction()?;
+    if table_exists(&tx, "app")? && !has_column(&tx, "app", "process_name")? {
+        tx.execute("ALTER TABLE app ADD COLUMN process_name TEXT", [])?;
+    }
+    if table_exists(&tx, "app")?
+        && table_exists(&tx, "legacy_v6_app_identity")?
+        && table_exists(&tx, "v7_legacy_identity_map")?
+    {
+        tx.execute(
+            "UPDATE app
+             SET process_name = COALESCE(process_name, (
+                 SELECT NULLIF(TRIM(old.process_name), '')
+                 FROM legacy_v6_app_identity old
+                 JOIN v7_legacy_identity_map map ON map.legacy_app_id = old.id
+                 WHERE map.app_id = app.id
+                 ORDER BY old.id
+                 LIMIT 1
+             ))
+             WHERE process_name IS NULL",
+            [],
+        )?;
+    }
+    if table_exists(&tx, "app")? && table_exists(&tx, "legacy_v6_app_resource_sample")? {
+        tx.execute(
+            "UPDATE app
+             SET process_name = COALESCE(process_name, (
+                 SELECT NULLIF(TRIM(old.process_name), '')
+                 FROM legacy_v6_app_resource_sample old
+                 WHERE old.app_key = app.stable_key
+                 ORDER BY old.id
+                 LIMIT 1
+             ))
+             WHERE process_name IS NULL",
+            [],
+        )?;
+    }
+    if table_exists(&tx, "app")? {
+        tx.execute(
+            "UPDATE app SET process_name = NULLIF(substr(stable_key, 6), '')
+             WHERE process_name IS NULL AND stable_key LIKE 'name:%'",
+            [],
+        )?;
+    }
+    let missing_process_name: i64 = tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM app WHERE process_name IS NULL OR trim(process_name) = '')",
+        [],
+        |row| row.get(0),
+    )?;
+    if missing_process_name != 0 {
+        return Err(invalid_schema(
+            "v7 app rows are missing process_name and no authoritative legacy source is available",
+        ));
+    }
+    tx.execute_batch(V7_COMPATIBILITY_DDL)?;
+    install_v7_nullable_constraints(&tx)?;
+    tx.commit()
+}
+
+fn install_v7_nullable_constraints(tx: &Transaction<'_>) -> rusqlite::Result<()> {
+    let provider_has_duplicates: i64 = tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM provider WHERE version IS NULL GROUP BY kind, name HAVING COUNT(*) > 1)",
+        [],
+        |row| row.get(0),
+    )?;
+    if provider_has_duplicates != 0 {
+        return Err(invalid_schema(
+            "provider contains duplicate rows with NULL version",
+        ));
+    }
+    let metric_has_duplicates: i64 = tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM collection_session_metric WHERE device_id IS NULL GROUP BY session_id, metric_key HAVING COUNT(*) > 1)",
+        [],
+        |row| row.get(0),
+    )?;
+    if metric_has_duplicates != 0 {
+        return Err(invalid_schema(
+            "collection_session_metric contains duplicate system-level rows",
+        ));
+    }
+    let rollup_has_duplicates: i64 = tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM system_rollup_1m WHERE device_id IS NULL GROUP BY bucket_start_ms, metric_key HAVING COUNT(*) > 1)",
+        [],
+        |row| row.get(0),
+    )?;
+    if rollup_has_duplicates != 0 {
+        return Err(invalid_schema(
+            "system_rollup_1m contains duplicate system-level rows",
+        ));
+    }
+    tx.execute_batch(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_provider_kind_name_version ON provider(kind, name, version) WHERE version IS NOT NULL;
+         CREATE UNIQUE INDEX IF NOT EXISTS idx_provider_kind_name_without_version ON provider(kind, name) WHERE version IS NULL;
+         CREATE UNIQUE INDEX IF NOT EXISTS idx_collection_session_metric_device ON collection_session_metric(session_id, metric_key, device_id) WHERE device_id IS NOT NULL;
+         CREATE UNIQUE INDEX IF NOT EXISTS idx_collection_session_metric_system ON collection_session_metric(session_id, metric_key) WHERE device_id IS NULL;
+         CREATE UNIQUE INDEX IF NOT EXISTS idx_system_rollup_1m_device ON system_rollup_1m(bucket_start_ms, metric_key, device_id) WHERE device_id IS NOT NULL;
+         CREATE UNIQUE INDEX IF NOT EXISTS idx_system_rollup_1m_system ON system_rollup_1m(bucket_start_ms, metric_key) WHERE device_id IS NULL;",
+    )?;
+    Ok(())
+}
+
+fn latest_postflight(conn: &Connection) -> rusqlite::Result<Option<(String, String)>> {
+    if !table_exists(conn, "migration_journal")? {
+        return Ok(None);
+    }
+    conn.query_row(
+        "SELECT run_id, status
+         FROM migration_journal
+         WHERE to_version = 7 AND stage = 'postflight'
+         ORDER BY id DESC
+         LIMIT 1",
+        [],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )
+    .optional()
+}
+
+fn has_column(conn: &Connection, table: &str, column: &str) -> rusqlite::Result<bool> {
+    let mut statement = conn.prepare(&format!("PRAGMA table_info({table})"))?;
+    let mut rows = statement.query([])?;
+    while let Some(row) = rows.next()? {
+        let name: String = row.get(1)?;
+        if name == column {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+fn inject_failure(failure_stage: Option<&str>, stage: &str) -> rusqlite::Result<()> {
+    if failure_stage == Some(stage) {
+        return Err(invalid_schema(&format!(
+            "injected migration failure at stage {stage}"
+        )));
+    }
+    Ok(())
 }
 
 fn verify_database_integrity(conn: &Connection) -> rusqlite::Result<()> {
@@ -878,6 +1307,47 @@ fn configure_connection(conn: &Connection) -> rusqlite::Result<()> {
 fn file_size(path: &Path) -> u64 {
     fs::metadata(path).map(|m| m.len()).unwrap_or(0)
 }
+
+pub fn database_size_bytes(path: &Path) -> u64 {
+    file_size(path)
+        .saturating_add(file_size(&sidecar(path, "-wal")))
+        .saturating_add(file_size(&sidecar(path, "-shm")))
+}
+
+fn required_migration_space(database_bytes: u64, wal_bytes: u64, shm_bytes: u64) -> u64 {
+    const MINIMUM_MIGRATION_SPACE: u64 = 1 << 20;
+    let live_bytes = database_bytes
+        .saturating_add(wal_bytes)
+        .saturating_add(shm_bytes);
+    live_bytes
+        .saturating_add(database_bytes.max(1))
+        .max(MINIMUM_MIGRATION_SPACE)
+}
+
+#[cfg(windows)]
+fn available_space_bytes(path: &Path) -> Option<u64> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows::{core::PCWSTR, Win32::Storage::FileSystem::GetDiskFreeSpaceExW};
+
+    let directory = path.parent().unwrap_or_else(|| Path::new("."));
+    let wide: Vec<u16> = directory
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+    let mut free = 0;
+    unsafe {
+        GetDiskFreeSpaceExW(PCWSTR::from_raw(wide.as_ptr()), Some(&mut free), None, None)
+            .ok()
+            .map(|_| free)
+    }
+}
+
+#[cfg(not(windows))]
+fn available_space_bytes(_path: &Path) -> Option<u64> {
+    None
+}
+
 fn sidecar(path: &Path, suffix: &str) -> PathBuf {
     PathBuf::from(format!("{}{}", path.display(), suffix))
 }

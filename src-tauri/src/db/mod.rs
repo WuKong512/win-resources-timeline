@@ -55,7 +55,7 @@ impl Database {
     }
 
     pub fn size_bytes(&self) -> u64 {
-        std::fs::metadata(&self.path).map(|m| m.len()).unwrap_or(0)
+        schema::database_size_bytes(&self.path)
     }
 }
 
@@ -77,6 +77,7 @@ mod tests {
         },
     };
     use rusqlite::params;
+    use std::{cell::Cell, rc::Rc};
 
     fn test_path(name: &str) -> PathBuf {
         let nonce = std::time::SystemTime::now()
@@ -340,6 +341,14 @@ mod tests {
         db.read(|conn| {
             assert_eq!(conn.pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))?, 7);
             assert_eq!(conn.query_row("SELECT COUNT(*) FROM app", [], |row| row.get::<_, i64>(0))?, 1);
+            assert_eq!(
+                conn.query_row(
+                    "SELECT process_name, display_name FROM app",
+                    [],
+                    |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+                )?,
+                ("Editor.exe".to_string(), "Editor".to_string())
+            );
             assert_eq!(conn.query_row("SELECT COUNT(*) FROM foreground_interval", [], |row| row.get::<_, i64>(0))?, 2);
             assert_eq!(conn.query_row("SELECT COUNT(*) FROM sample_frame", [], |row| row.get::<_, i64>(0))?, 2);
             assert_eq!(conn.query_row("SELECT COUNT(*) FROM process_sample", [], |row| row.get::<_, i64>(0))?, 2);
@@ -402,6 +411,62 @@ mod tests {
     }
 
     #[test]
+    fn resource_sampling_preserves_display_name_and_process_name() {
+        let path = test_path("resource-display-process-name");
+        cleanup_test_files(&path);
+        let db = Database::open(path.clone()).unwrap();
+        let foreground = ForegroundApp {
+            identity_key: "path:c:\\friendly-editor.exe".into(),
+            process_name: "editor.exe".into(),
+            exe_path: Some("C:\\friendly-editor.exe".into()),
+            display_name: "Friendly Editor".into(),
+        };
+        db.with_writer(|conn| writer::upsert_app(conn, &foreground, 1_000))
+            .unwrap();
+        db.with_writer(|conn| {
+            writer::insert_resource_snapshot(
+                conn,
+                &ResourceSnapshot {
+                    system: SystemSample {
+                        timestamp_ms: 2_000,
+                        sample_duration_ms: 1_000,
+                        cpu_percent: Some(10.0),
+                        memory_percent: None,
+                        memory_used_bytes: None,
+                        memory_total_bytes: None,
+                        disk_read_bytes_per_sec: None,
+                        disk_write_bytes_per_sec: None,
+                        has_app_snapshot: true,
+                    },
+                    apps: vec![AppResourceSample {
+                        app_key: foreground.identity_key.clone(),
+                        process_name: foreground.process_name.clone(),
+                        exe_path: foreground.exe_path.clone(),
+                        process_count: 1,
+                        cpu_percent: 5.0,
+                        memory_used_bytes: 10,
+                        io_read_bytes_per_sec: 1,
+                        io_write_bytes_per_sec: 2,
+                    }],
+                },
+            )
+        })
+        .unwrap();
+
+        let listed = db.read(query::list_apps).unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].process_name, "editor.exe");
+        assert_eq!(listed[0].display_name, "Friendly Editor");
+        let resources = db.read(query::resource_apps).unwrap();
+        assert_eq!(resources.len(), 1);
+        assert_eq!(resources[0].process_name, "editor.exe");
+        assert_eq!(resources[0].display_name, "Friendly Editor");
+
+        drop(db);
+        cleanup_test_files(&path);
+    }
+
+    #[test]
     fn opening_v7_again_does_not_backfill_legacy_rows_twice() {
         let path = test_path("repeat-v7-open");
         cleanup_test_files(&path);
@@ -455,6 +520,120 @@ mod tests {
     }
 
     #[test]
+    fn migration_journal_records_only_reached_failure_stage_and_recovers() {
+        let path = test_path("migration-journal-recovery");
+        cleanup_test_files(&path);
+        create_v6_fixture(&path, true);
+
+        let mut conn = Connection::open(&path).unwrap();
+        assert!(
+            schema::migrate_v6_to_v7_fail_at(&mut conn, Some(&path), "usage_backfill").is_err()
+        );
+        assert_eq!(
+            conn.pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))
+                .unwrap(),
+            6
+        );
+        let run_id: String = conn
+            .query_row(
+                "SELECT run_id FROM migration_journal ORDER BY id DESC LIMIT 1",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let statuses: Vec<(String, String)> = conn
+            .prepare("SELECT stage, status FROM migration_journal WHERE run_id = ?1 ORDER BY id")
+            .unwrap()
+            .query_map([&run_id], |row| Ok((row.get(0)?, row.get(1)?)))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        assert_eq!(
+            statuses,
+            vec![
+                ("preflight".into(), "completed".into()),
+                ("backup".into(), "completed".into()),
+                ("create".into(), "completed".into()),
+                ("identity_backfill".into(), "completed".into()),
+                ("usage_backfill".into(), "failed".into()),
+                ("resource_backfill".into(), "pending".into()),
+                ("verify".into(), "pending".into()),
+                ("commit".into(), "pending".into()),
+                ("postflight".into(), "pending".into()),
+            ]
+        );
+        drop(conn);
+
+        let db = Database::open(path.clone()).unwrap();
+        db.read(|conn| {
+            assert_eq!(
+                conn.query_row("SELECT COUNT(*) FROM app", [], |row| row.get::<_, i64>(0))?,
+                1
+            );
+            assert_eq!(
+                conn.query_row("SELECT COUNT(*) FROM sample_frame", [], |row| row
+                    .get::<_, i64>(0))?,
+                2
+            );
+            Ok(())
+        })
+        .unwrap();
+        drop(db);
+        cleanup_test_files(&path);
+    }
+
+    #[test]
+    fn failed_postflight_blocks_open_until_integrity_is_repaired() {
+        let path = test_path("postflight-repair");
+        cleanup_test_files(&path);
+        create_v6_fixture(&path, true);
+        let mut conn = Connection::open(&path).unwrap();
+        assert!(schema::migrate_v6_to_v7_fail_at(&mut conn, Some(&path), "postflight").is_err());
+        assert_eq!(
+            conn.query_row(
+                "SELECT status FROM migration_journal WHERE stage = 'postflight' ORDER BY id DESC LIMIT 1",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .unwrap(),
+            "failed"
+        );
+        conn.pragma_update(None, "foreign_keys", "OFF").unwrap();
+        conn.execute(
+            "INSERT INTO process_sample(frame_id, process_instance_id, process_count) VALUES (999999, 999999, 1)",
+            [],
+        )
+        .unwrap();
+        drop(conn);
+
+        assert!(Database::open(path.clone()).is_err());
+
+        let repair = Connection::open(&path).unwrap();
+        repair.pragma_update(None, "foreign_keys", "OFF").unwrap();
+        repair
+            .execute("DELETE FROM process_sample WHERE frame_id = 999999", [])
+            .unwrap();
+        drop(repair);
+        let db = Database::open(path.clone()).unwrap();
+        db.read(|conn| {
+            assert_eq!(pragma_text(conn, "quick_check")?, "ok");
+            assert_eq!(foreign_key_error_count(conn)?, 0);
+            assert_eq!(
+                conn.query_row(
+                    "SELECT status FROM migration_journal WHERE stage = 'postflight' ORDER BY id DESC LIMIT 1",
+                    [],
+                    |row| row.get::<_, String>(0),
+                )?,
+                "completed"
+            );
+            Ok(())
+        })
+        .unwrap();
+        drop(db);
+        cleanup_test_files(&path);
+    }
+
+    #[test]
     fn failed_v6_to_v7_migration_rolls_back_legacy_schema() {
         let path = test_path("failed-v6-migration");
         cleanup_test_files(&path);
@@ -494,6 +673,64 @@ mod tests {
             .unwrap(),
             0
         );
+        cleanup_test_files(&path);
+    }
+
+    #[test]
+    fn old_migration_journal_schema_is_upgraded_and_retryable() {
+        let path = test_path("old-migration-journal");
+        cleanup_test_files(&path);
+        create_v6_fixture(&path, true);
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch(
+                r#"
+                CREATE TABLE migration_journal (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    run_id TEXT NOT NULL,
+                    from_version INTEGER NOT NULL,
+                    to_version INTEGER NOT NULL,
+                    stage TEXT NOT NULL CHECK (stage IN ('preflight','backup','create','identity_backfill','usage_backfill','resource_backfill','verify','commit','postflight')),
+                    status TEXT NOT NULL CHECK (status IN ('pending','started','completed','failed','interrupted')),
+                    started_at_ms INTEGER NOT NULL,
+                    completed_at_ms INTEGER,
+                    detail_json TEXT,
+                    error_text TEXT,
+                    UNIQUE(run_id, stage)
+                );
+                CREATE INDEX idx_migration_journal_run ON migration_journal(run_id, id);
+                CREATE INDEX idx_migration_journal_pending ON migration_journal(to_version, status, id);
+                INSERT INTO migration_journal(run_id,from_version,to_version,stage,status,started_at_ms)
+                VALUES ('old-run',6,7,'preflight','pending',0);
+                "#,
+            )
+            .unwrap();
+        }
+
+        let db = Database::open(path.clone()).unwrap();
+        db.read(|conn| {
+            assert_eq!(
+                conn.pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))?,
+                7
+            );
+            let started_at_not_null: i64 = conn.query_row(
+                "SELECT \"notnull\" FROM pragma_table_info('migration_journal') WHERE name = 'started_at_ms'",
+                [],
+                |row| row.get(0),
+            )?;
+            assert_eq!(started_at_not_null, 0);
+            assert_eq!(
+                conn.query_row(
+                    "SELECT COUNT(*) FROM migration_journal WHERE run_id = 'old-run'",
+                    [],
+                    |row| row.get::<_, i64>(0)
+                )?,
+                1
+            );
+            Ok(())
+        })
+        .unwrap();
+        drop(db);
         cleanup_test_files(&path);
     }
 
@@ -626,6 +863,21 @@ mod tests {
         let path = test_path("resource-app-version-merge");
         let _ = std::fs::remove_file(&path);
         let db = Database::open(path.clone()).unwrap();
+        db.with_writer(|conn| {
+            writer::upsert_app(
+                conn,
+                &ForegroundApp {
+                    identity_key: r"path:c:\program files\windowsapps\openai_26.1\chatgpt.exe"
+                        .into(),
+                    process_name: "ChatGPT.exe".into(),
+                    exe_path: Some(r"C:\Program Files\WindowsApps\OpenAI_26.1\ChatGPT.exe".into()),
+                    display_name: "ChatGPT Desktop".into(),
+                },
+                9_000,
+            )
+            .map(|_| ())
+        })
+        .unwrap();
         for (timestamp_ms, version, cpu_percent) in [(10_000, "26.1", 10.0), (20_000, "26.2", 20.0)]
         {
             let exe_path = format!(r"C:\Program Files\WindowsApps\OpenAI_{version}\ChatGPT.exe");
@@ -659,6 +911,7 @@ mod tests {
         let apps = db.read(query::resource_apps).unwrap();
         assert_eq!(apps.len(), 1);
         assert_eq!(apps[0].app_key, "process:chatgpt.exe");
+        assert_eq!(apps[0].display_name, "ChatGPT Desktop");
         assert!(apps[0]
             .exe_path
             .as_deref()
@@ -680,6 +933,220 @@ mod tests {
 
         drop(db);
         let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn nullable_logical_keys_are_unique_for_system_and_provider_rows() {
+        let path = test_path("nullable-keys");
+        cleanup_test_files(&path);
+        let db = Database::open(path.clone()).unwrap();
+
+        db.with_writer(|conn| {
+            let session_id: i64 = conn.query_row(
+                "SELECT CAST(value AS INTEGER) FROM settings WHERE key = 'runtime_collection_session_id'",
+                [],
+                |row| row.get(0),
+            )?;
+            conn.execute(
+                "INSERT INTO provider(kind, name, version) VALUES (?1, ?2, NULL)",
+                params!["system", "builtin"],
+            )?;
+            assert!(conn
+                .execute(
+                    "INSERT INTO provider(kind, name, version) VALUES (?1, ?2, NULL)",
+                    params!["system", "builtin"],
+                )
+                .is_err());
+            conn.execute(
+                "INSERT INTO provider(kind, name, version) VALUES (?1, ?2, ?3)",
+                params!["system", "builtin", "1"],
+            )?;
+            conn.execute(
+                "INSERT INTO provider(kind, name, version) VALUES (?1, ?2, ?3)",
+                params!["system", "builtin", "2"],
+            )?;
+
+            conn.execute(
+                "INSERT INTO collection_session_metric(session_id, metric_key, device_id, enabled, support_status, interval_ms) VALUES (?1, ?2, NULL, 1, 'supported', 1000)",
+                params![session_id, "cpu"],
+            )?;
+            assert!(conn
+                .execute(
+                    "INSERT INTO collection_session_metric(session_id, metric_key, device_id, enabled, support_status, interval_ms) VALUES (?1, ?2, NULL, 1, 'supported', 1000)",
+                    params![session_id, "cpu"],
+                )
+                .is_err());
+
+            conn.execute(
+                "INSERT INTO hardware_device(stable_key, category, first_seen_at_ms, last_seen_at_ms) VALUES (?1, 'cpu', 0, 0)",
+                ["test:cpu:one"],
+            )?;
+            let device_one = conn.last_insert_rowid();
+            conn.execute(
+                "INSERT INTO hardware_device(stable_key, category, first_seen_at_ms, last_seen_at_ms) VALUES (?1, 'cpu', 0, 0)",
+                ["test:cpu:two"],
+            )?;
+            let device_two = conn.last_insert_rowid();
+            for device_id in [device_one, device_two] {
+                conn.execute(
+                    "INSERT INTO collection_session_metric(session_id, metric_key, device_id, enabled, support_status, interval_ms) VALUES (?1, ?2, ?3, 1, 'supported', 1000)",
+                    params![session_id, "cpu", device_id],
+                )?;
+            }
+
+            conn.execute(
+                "INSERT INTO system_rollup_1m(bucket_start_ms, metric_key, device_id, avg_value, min_value, max_value, sample_count, quality_count, processing_version) VALUES (1000, 'cpu', NULL, 1.0, 1.0, 1.0, 1, 0, 'test')",
+                [],
+            )?;
+            assert!(conn
+                .execute(
+                    "INSERT INTO system_rollup_1m(bucket_start_ms, metric_key, device_id, avg_value, min_value, max_value, sample_count, quality_count, processing_version) VALUES (1000, 'cpu', NULL, 1.0, 1.0, 1.0, 1, 0, 'test')",
+                    [],
+                )
+                .is_err());
+            for device_id in [device_one, device_two] {
+                conn.execute(
+                    "INSERT INTO system_rollup_1m(bucket_start_ms, metric_key, device_id, avg_value, min_value, max_value, sample_count, quality_count, processing_version) VALUES (1000, 'cpu', ?1, 1.0, 1.0, 1.0, 1, 0, 'test')",
+                    [device_id],
+                )?;
+            }
+            Ok(())
+        })
+        .unwrap();
+
+        drop(db);
+        let db = Database::open(path.clone()).unwrap();
+        db.read(|conn| {
+            assert_eq!(
+                conn.query_row("SELECT COUNT(*) FROM provider", [], |row| row
+                    .get::<_, i64>(0))?,
+                3
+            );
+            assert_eq!(
+                conn.query_row(
+                    "SELECT COUNT(*) FROM collection_session_metric",
+                    [],
+                    |row| row.get::<_, i64>(0)
+                )?,
+                3
+            );
+            assert_eq!(
+                conn.query_row("SELECT COUNT(*) FROM system_rollup_1m", [], |row| row
+                    .get::<_, i64>(0))?,
+                3
+            );
+            Ok(())
+        })
+        .unwrap();
+        drop(db);
+        cleanup_test_files(&path);
+    }
+
+    #[test]
+    fn database_size_includes_main_wal_and_shm_and_handles_missing_files() {
+        let path = test_path("database-size");
+        cleanup_test_files(&path);
+        std::fs::write(&path, b"abc").unwrap();
+        std::fs::write(format!("{}-wal", path.display()), b"12345").unwrap();
+        std::fs::write(format!("{}-shm", path.display()), b"1234567").unwrap();
+        assert_eq!(schema::database_size_bytes(&path), 15);
+        std::fs::remove_file(format!("{}-wal", path.display())).unwrap();
+        std::fs::remove_file(format!("{}-shm", path.display())).unwrap();
+        assert_eq!(schema::database_size_bytes(&path), 3);
+        std::fs::remove_file(&path).unwrap();
+        assert_eq!(schema::database_size_bytes(&path), 0);
+    }
+
+    #[test]
+    fn insufficient_space_preflight_leaves_v6_data_untouched_and_journaled() {
+        let path = test_path("migration-space-preflight");
+        cleanup_test_files(&path);
+        create_v6_fixture(&path, true);
+        let mut conn = Connection::open(&path).unwrap();
+        assert!(schema::migrate_v6_to_v7_with_available_space(&mut conn, Some(&path), 0).is_err());
+        assert_eq!(
+            conn.pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))
+                .unwrap(),
+            6
+        );
+        assert_eq!(
+            conn.query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'app_identity'",
+                [],
+                |row| row.get::<_, i64>(0)
+            )
+            .unwrap(),
+            1
+        );
+        assert_eq!(
+            conn.query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'legacy_v6_app_identity'",
+                [],
+                |row| row.get::<_, i64>(0)
+            )
+            .unwrap(),
+            0
+        );
+        assert_eq!(
+            conn.query_row(
+                "SELECT status FROM migration_journal WHERE stage = 'preflight' ORDER BY id DESC LIMIT 1",
+                [],
+                |row| row.get::<_, String>(0)
+            )
+            .unwrap(),
+            "failed"
+        );
+        assert_eq!(
+            conn.query_row(
+                "SELECT status FROM migration_journal WHERE stage = 'backup' ORDER BY id DESC LIMIT 1",
+                [],
+                |row| row.get::<_, String>(0)
+            )
+            .unwrap(),
+            "pending"
+        );
+        drop(conn);
+        cleanup_test_files(&path);
+    }
+
+    #[test]
+    fn runtime_session_is_closed_after_final_flush_boundary() {
+        let path = test_path("runtime-session-close");
+        cleanup_test_files(&path);
+        let db = Database::open(path.clone()).unwrap();
+        let (collection_id, started_at): (i64, i64) = db
+            .read(|conn| {
+                conn.query_row(
+                    "SELECT CAST(value AS INTEGER), started_at_ms FROM settings JOIN collection_session ON collection_session.id = CAST(settings.value AS INTEGER) WHERE settings.key = 'runtime_collection_session_id'",
+                    [],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+            })
+            .unwrap();
+        db.with_writer(|conn| writer::finish_runtime_session(conn, started_at + 1_000, "clean"))
+            .unwrap();
+        db.read(|conn| {
+            assert_eq!(
+                conn.query_row(
+                    "SELECT ended_at_ms FROM collection_session WHERE id = ?1",
+                    [collection_id],
+                    |row| row.get::<_, Option<i64>>(0)
+                )?,
+                Some(started_at + 1_000)
+            );
+            assert_eq!(
+                conn.query_row(
+                    "SELECT shutdown_kind FROM boot_session WHERE id = (SELECT boot_session_id FROM collection_session WHERE id = ?1)",
+                    [collection_id],
+                    |row| row.get::<_, String>(0)
+                )?,
+                "clean"
+            );
+            Ok(())
+        })
+        .unwrap();
+        drop(db);
+        cleanup_test_files(&path);
     }
 
     #[test]
@@ -708,23 +1175,69 @@ mod tests {
         assert_eq!(frame_writer.health().queue_depth, 2);
         assert_eq!(frame_writer.health().drop_count, 1);
 
-        let readonly = Connection::open_with_flags(
-            &path,
-            OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
-        )
-        .unwrap();
-        assert!(frame_writer.write_next(&readonly).is_err());
+        let remaining_failures = Rc::new(Cell::new(2_u32));
+        let first_attempt = remaining_failures.clone();
+        assert!(db
+            .with_writer(
+                |conn| frame_writer.write_next_with(conn, false, move |conn, snapshot| {
+                    let failures = first_attempt.get();
+                    if failures > 0 {
+                        first_attempt.set(failures - 1);
+                        Err(rusqlite::Error::InvalidQuery)
+                    } else {
+                        writer::insert_resource_snapshot(conn, snapshot)
+                    }
+                })
+            )
+            .is_err());
         assert_eq!(frame_writer.health().queue_depth, 2);
         assert_eq!(frame_writer.health().front_retry_attempts, Some(1));
+        assert!(frame_writer
+            .health()
+            .front_retry_backoff_ms
+            .is_some_and(|delay| delay > 0));
         assert!(frame_writer.health().last_error.is_some());
-        assert!(frame_writer.write_next(&readonly).is_err());
-        assert!(frame_writer.write_next(&readonly).is_err());
-        assert_eq!(frame_writer.health().front_retry_attempts, Some(2));
-        drop(readonly);
 
-        assert!(db
-            .with_writer(|conn| frame_writer.write_next(conn))
+        assert!(!db
+            .with_writer(|conn| {
+                frame_writer.write_next_with(conn, false, |_conn, _snapshot| {
+                    Err(rusqlite::Error::InvalidQuery)
+                })
+            })
             .unwrap());
+        assert_eq!(frame_writer.health().front_retry_attempts, Some(1));
+
+        let second_attempt = remaining_failures.clone();
+        assert!(db
+            .with_writer(
+                |conn| frame_writer.write_next_with(conn, true, move |conn, snapshot| {
+                    let failures = second_attempt.get();
+                    if failures > 0 {
+                        second_attempt.set(failures - 1);
+                        Err(rusqlite::Error::InvalidQuery)
+                    } else {
+                        writer::insert_resource_snapshot(conn, snapshot)
+                    }
+                })
+            )
+            .is_err());
+        assert_eq!(frame_writer.health().front_retry_attempts, Some(2));
+
+        let final_attempt = remaining_failures.clone();
+        assert!(db
+            .with_writer(
+                |conn| frame_writer.write_next_with(conn, true, move |conn, snapshot| {
+                    let failures = final_attempt.get();
+                    if failures > 0 {
+                        final_attempt.set(failures - 1);
+                        Err(rusqlite::Error::InvalidQuery)
+                    } else {
+                        writer::insert_resource_snapshot(conn, snapshot)
+                    }
+                })
+            )
+            .unwrap());
+
         assert_eq!(frame_writer.health().queue_depth, 1);
         assert_eq!(
             db.read(
@@ -751,6 +1264,114 @@ mod tests {
             frame_writer.health().last_committed_timestamp_ms,
             Some(20_000)
         );
+        drop(db);
+        cleanup_test_files(&path);
+    }
+
+    #[test]
+    fn frame_writer_retry_limits_zero_and_one_are_terminal_and_observable() {
+        let path = test_path("frame-writer-limits");
+        cleanup_test_files(&path);
+        let db = Database::open(path.clone()).unwrap();
+        let snapshot = |timestamp_ms| ResourceSnapshot {
+            system: SystemSample {
+                timestamp_ms,
+                sample_duration_ms: 5_000,
+                cpu_percent: Some(25.0),
+                memory_percent: None,
+                memory_used_bytes: None,
+                memory_total_bytes: None,
+                disk_read_bytes_per_sec: None,
+                disk_write_bytes_per_sec: None,
+                has_app_snapshot: false,
+            },
+            apps: Vec::new(),
+        };
+
+        let mut zero = writer::FrameWriter::new(2, 0);
+        assert!(zero.enqueue(snapshot(10_000)));
+        assert!(db
+            .with_writer(|conn| zero.write_next_with(conn, true, |_conn, _snapshot| {
+                Err(rusqlite::Error::InvalidQuery)
+            }))
+            .is_err());
+        let zero_health = zero.health();
+        assert_eq!(zero_health.queue_depth, 0);
+        assert_eq!(zero_health.drop_count, 1);
+        assert_eq!(zero_health.terminal_failure_count, 1);
+        assert!(zero_health.last_error.is_some());
+
+        let mut one = writer::FrameWriter::new(2, 1);
+        assert!(one.enqueue(snapshot(20_000)));
+        assert!(db
+            .with_writer(|conn| one.write_next_with(conn, true, |_conn, _snapshot| {
+                Err(rusqlite::Error::InvalidQuery)
+            }))
+            .is_err());
+        assert_eq!(one.health().front_retry_attempts, Some(1));
+        assert!(db
+            .with_writer(|conn| one.write_next_with(conn, true, |_conn, _snapshot| {
+                Err(rusqlite::Error::InvalidQuery)
+            }))
+            .is_err());
+        let one_health = one.health();
+        assert_eq!(one_health.queue_depth, 0);
+        assert_eq!(one_health.drop_count, 1);
+        assert_eq!(one_health.terminal_failure_count, 1);
+        assert!(one_health.last_error.is_some());
+
+        drop(db);
+        cleanup_test_files(&path);
+    }
+
+    #[test]
+    fn frame_writer_flush_continues_after_terminal_failure_and_reports_error() {
+        let path = test_path("frame-writer-flush-failure");
+        cleanup_test_files(&path);
+        let db = Database::open(path.clone()).unwrap();
+        let snapshot = |timestamp_ms| ResourceSnapshot {
+            system: SystemSample {
+                timestamp_ms,
+                sample_duration_ms: 5_000,
+                cpu_percent: Some(25.0),
+                memory_percent: None,
+                memory_used_bytes: None,
+                memory_total_bytes: None,
+                disk_read_bytes_per_sec: None,
+                disk_write_bytes_per_sec: None,
+                has_app_snapshot: false,
+            },
+            apps: Vec::new(),
+        };
+        let mut frame_writer = writer::FrameWriter::new(4, 0);
+        assert!(frame_writer.enqueue(snapshot(10_000)));
+        assert!(frame_writer.enqueue(snapshot(20_000)));
+
+        let result = db.with_writer(|conn| {
+            frame_writer.flush_all_with(conn, |conn, snapshot| {
+                if snapshot.system.timestamp_ms == 10_000 {
+                    Err(rusqlite::Error::InvalidQuery)
+                } else {
+                    writer::insert_resource_snapshot(conn, snapshot)
+                }
+            })
+        });
+        assert!(result.is_err());
+        let health = frame_writer.health();
+        assert_eq!(health.queue_depth, 0);
+        assert_eq!(health.drop_count, 1);
+        assert_eq!(health.terminal_failure_count, 1);
+        assert!(health.last_error.is_some());
+        assert_eq!(health.last_committed_timestamp_ms, Some(20_000));
+        assert_eq!(
+            db.read(
+                |conn| conn.query_row("SELECT COUNT(*) FROM sample_frame", [], |row| row
+                    .get::<_, i64>(0))
+            )
+            .unwrap(),
+            1
+        );
+
         drop(db);
         cleanup_test_files(&path);
     }

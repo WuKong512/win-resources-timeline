@@ -2,7 +2,7 @@ use crate::models::{CollectionSettings, ForegroundApp, ResourceSnapshot, SystemS
 use rusqlite::{params, Connection, OptionalExtension};
 use std::{
     collections::{HashSet, VecDeque},
-    time::{Instant, SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -11,7 +11,9 @@ pub struct WriterHealth {
     pub writer_delay_ms: i64,
     pub drop_count: u64,
     pub retry_count: u64,
+    pub terminal_failure_count: u64,
     pub front_retry_attempts: Option<u32>,
+    pub front_retry_backoff_ms: Option<u64>,
     pub last_commit_duration_ms: u64,
     pub last_committed_timestamp_ms: Option<i64>,
     pub last_error: Option<String>,
@@ -20,6 +22,7 @@ pub struct WriterHealth {
 struct QueuedFrame {
     snapshot: ResourceSnapshot,
     attempts: u32,
+    next_attempt_at: Instant,
 }
 
 pub struct FrameWriter {
@@ -33,82 +36,189 @@ impl FrameWriter {
     pub fn new(max_queue_depth: usize, retry_limit: u32) -> Self {
         Self {
             queue: VecDeque::with_capacity(max_queue_depth),
-            max_queue_depth: max_queue_depth.max(1),
-            retry_limit: retry_limit.max(1),
+            max_queue_depth,
+            // retry_limit counts retries after the initial write attempt. Zero means one attempt.
+            retry_limit: retry_limit.min(MAX_RETRY_LIMIT),
             health: WriterHealth::default(),
         }
     }
 
     pub fn enqueue(&mut self, snapshot: ResourceSnapshot) -> bool {
         if self.queue.len() >= self.max_queue_depth {
-            self.health.drop_count += 1;
+            self.health.drop_count = self.health.drop_count.saturating_add(1);
             self.health.queue_depth = self.queue.len();
             return false;
         }
         self.queue.push_back(QueuedFrame {
             snapshot,
             attempts: 0,
+            next_attempt_at: Instant::now(),
         });
         self.health.queue_depth = self.queue.len();
         true
     }
 
+    /// Attempts the queue front once.
+    ///
+    /// `Ok(true)` means a frame committed and was removed. `Ok(false)` means no frame was
+    /// committed because the queue is empty or the front frame is still in backoff. A write
+    /// failure is returned as `Err`; terminal failures are also removed and recorded in health,
+    /// so callers can distinguish them from a deferred retry using `terminal_failure_count`.
     pub fn write_next(&mut self, conn: &Connection) -> rusqlite::Result<bool> {
+        self.write_next_inner(conn, false, insert_resource_snapshot)
+    }
+
+    fn write_next_inner<F>(
+        &mut self,
+        conn: &Connection,
+        ignore_backoff: bool,
+        write: F,
+    ) -> rusqlite::Result<bool>
+    where
+        F: FnOnce(&Connection, &ResourceSnapshot) -> rusqlite::Result<()>,
+    {
         let Some(item) = self.queue.front() else {
             self.health.queue_depth = 0;
+            self.health.front_retry_attempts = None;
+            self.health.front_retry_backoff_ms = None;
             return Ok(false);
         };
+        if !ignore_backoff && Instant::now() < item.next_attempt_at {
+            self.health.queue_depth = self.queue.len();
+            self.health.front_retry_attempts = Some(item.attempts);
+            self.health.front_retry_backoff_ms = Some(remaining_backoff_ms(item.next_attempt_at));
+            return Ok(false);
+        }
         let timestamp_ms = item.snapshot.system.timestamp_ms;
         let started = Instant::now();
-        match insert_resource_snapshot(conn, &item.snapshot) {
+        match write(conn, &item.snapshot) {
             Ok(()) => {
                 self.queue.pop_front();
                 self.health.queue_depth = self.queue.len();
                 self.health.writer_delay_ms = now_ms().saturating_sub(timestamp_ms).max(0);
-                self.health.last_commit_duration_ms = started.elapsed().as_millis() as u64;
+                self.health.last_commit_duration_ms =
+                    u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
                 self.health.last_committed_timestamp_ms = Some(timestamp_ms);
-                self.health.front_retry_attempts = None;
-                self.health.last_error = None;
+                // last_error is the most recent observed write error and remains visible until a
+                // newer error replaces it, including when a later frame commits successfully.
+                self.refresh_front_health();
                 Ok(true)
             }
             Err(error) => {
-                if let Some(item) = self.queue.front_mut() {
-                    item.attempts = item.attempts.saturating_add(1).min(self.retry_limit);
-                }
-                self.health.retry_count += 1;
+                let attempts = if let Some(item) = self.queue.front_mut() {
+                    item.attempts = item.attempts.saturating_add(1);
+                    item.next_attempt_at = Instant::now()
+                        .checked_add(retry_backoff(item.attempts))
+                        .unwrap_or_else(Instant::now);
+                    item.attempts
+                } else {
+                    0
+                };
+                self.health.retry_count = self.health.retry_count.saturating_add(1);
                 self.health.queue_depth = self.queue.len();
-                self.health.front_retry_attempts = self.queue.front().map(|queued| queued.attempts);
+                self.health.front_retry_attempts = Some(attempts);
+                self.health.front_retry_backoff_ms = self
+                    .queue
+                    .front()
+                    .map(|queued| remaining_backoff_ms(queued.next_attempt_at));
                 self.health.last_error = Some(error.to_string());
+                if attempts > self.retry_limit {
+                    self.queue.pop_front();
+                    self.health.drop_count = self.health.drop_count.saturating_add(1);
+                    self.health.terminal_failure_count =
+                        self.health.terminal_failure_count.saturating_add(1);
+                    self.refresh_front_health();
+                }
                 Err(error)
             }
         }
     }
 
     pub fn flush_all(&mut self, conn: &Connection) -> rusqlite::Result<usize> {
+        self.flush_all_inner(conn, insert_resource_snapshot)
+    }
+
+    fn flush_all_inner<F>(&mut self, conn: &Connection, mut write: F) -> rusqlite::Result<usize>
+    where
+        F: FnMut(&Connection, &ResourceSnapshot) -> rusqlite::Result<()>,
+    {
         let mut committed = 0;
+        let mut last_error = None;
         while self.queue.front().is_some() {
-            if self.write_next(conn)? {
-                committed += 1;
+            match self.write_next_inner(conn, true, &mut write) {
+                Ok(true) => committed += 1,
+                Ok(false) => break,
+                Err(error) => last_error = Some(error),
             }
+        }
+        if let Some(error) = last_error {
+            return Err(error);
         }
         Ok(committed)
     }
 
     pub fn discard_for_explicit_clear(&mut self) {
-        self.health.drop_count += self.queue.len() as u64;
+        self.health.drop_count = self
+            .health
+            .drop_count
+            .saturating_add(u64::try_from(self.queue.len()).unwrap_or(u64::MAX));
         self.queue.clear();
         self.health.queue_depth = 0;
+        self.health.front_retry_attempts = None;
+        self.health.front_retry_backoff_ms = None;
     }
 
     pub fn health(&self) -> WriterHealth {
         let mut health = self.health.clone();
         health.queue_depth = self.queue.len();
-        health.front_retry_attempts = self.queue.front().map(|queued| queued.attempts);
+        if let Some(queued) = self.queue.front() {
+            health.front_retry_attempts = Some(queued.attempts);
+            health.front_retry_backoff_ms = Some(remaining_backoff_ms(queued.next_attempt_at));
+        } else {
+            health.front_retry_attempts = None;
+            health.front_retry_backoff_ms = None;
+        }
         health
     }
 
     pub fn queue_depth(&self) -> usize {
         self.queue.len()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn write_next_with<F>(
+        &mut self,
+        conn: &Connection,
+        ignore_backoff: bool,
+        write: F,
+    ) -> rusqlite::Result<bool>
+    where
+        F: FnOnce(&Connection, &ResourceSnapshot) -> rusqlite::Result<()>,
+    {
+        self.write_next_inner(conn, ignore_backoff, write)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn flush_all_with<F>(
+        &mut self,
+        conn: &Connection,
+        write: F,
+    ) -> rusqlite::Result<usize>
+    where
+        F: FnMut(&Connection, &ResourceSnapshot) -> rusqlite::Result<()>,
+    {
+        self.flush_all_inner(conn, write)
+    }
+
+    fn refresh_front_health(&mut self) {
+        self.health.queue_depth = self.queue.len();
+        if let Some(queued) = self.queue.front() {
+            self.health.front_retry_attempts = Some(queued.attempts);
+            self.health.front_retry_backoff_ms = Some(remaining_backoff_ms(queued.next_attempt_at));
+        } else {
+            self.health.front_retry_attempts = None;
+            self.health.front_retry_backoff_ms = None;
+        }
     }
 }
 
@@ -158,9 +268,48 @@ pub fn ensure_runtime_session(conn: &Connection, now: i64) -> rusqlite::Result<(
     Ok(())
 }
 
+pub fn finish_runtime_session(
+    conn: &Connection,
+    now: i64,
+    shutdown_kind: &str,
+) -> rusqlite::Result<()> {
+    let tx = conn.unchecked_transaction()?;
+    let collection_id: Option<i64> = tx
+        .query_row(
+            "SELECT CAST(value AS INTEGER) FROM settings WHERE key = 'runtime_collection_session_id'",
+            [],
+            |row| row.get(0),
+        )
+        .optional()?;
+    if let Some(collection_id) = collection_id {
+        let boot_id: Option<i64> = tx
+            .query_row(
+                "SELECT boot_session_id FROM collection_session WHERE id = ?1",
+                [collection_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        tx.execute(
+            "UPDATE collection_session
+             SET ended_at_ms = MAX(started_at_ms, ?1)
+             WHERE id = ?2 AND ended_at_ms IS NULL",
+            params![now, collection_id],
+        )?;
+        if let Some(boot_id) = boot_id {
+            tx.execute(
+                "UPDATE boot_session
+                 SET observed_end_ms = MAX(COALESCE(observed_end_ms, 0), ?1), shutdown_kind = ?2
+                 WHERE id = ?3",
+                params![now, shutdown_kind, boot_id],
+            )?;
+        }
+    }
+    tx.commit()
+}
+
 pub fn upsert_app(conn: &Connection, app: &ForegroundApp, now: i64) -> rusqlite::Result<i64> {
     let tx = conn.unchecked_transaction()?;
-    let app_id = upsert_app_tx(&tx, app, now)?;
+    let app_id = upsert_app_tx(&tx, app, now, true)?;
     let executable_id = tx.query_row(
         "SELECT id FROM app_executable WHERE app_id = ?1 AND normalized_path = ?2",
         params![app_id, normalized_path(app)],
@@ -296,10 +445,33 @@ fn upsert_app_tx(
     tx: &rusqlite::Transaction<'_>,
     app: &ForegroundApp,
     now: i64,
+    overwrite_display_name: bool,
 ) -> rusqlite::Result<i64> {
+    let process_name = app.process_name.trim();
+    if process_name.is_empty() {
+        return Err(rusqlite::Error::InvalidParameterName(
+            "process_name must be present for an app identity".into(),
+        ));
+    }
+    let display_name = if app.display_name.trim().is_empty() {
+        process_name
+    } else {
+        app.display_name.trim()
+    };
     tx.execute(
-        "INSERT INTO app(stable_key, display_name, first_seen_at_ms, last_seen_at_ms) VALUES (?1, ?2, ?3, ?3) ON CONFLICT(stable_key) DO UPDATE SET display_name = excluded.display_name, last_seen_at_ms = excluded.last_seen_at_ms",
-        params![app.identity_key, app.display_name, now],
+        "INSERT INTO app(stable_key, process_name, display_name, first_seen_at_ms, last_seen_at_ms)
+         VALUES (?1, ?2, ?3, ?4, ?4)
+         ON CONFLICT(stable_key) DO UPDATE SET
+            process_name = COALESCE(excluded.process_name, app.process_name),
+            display_name = CASE WHEN ?5 THEN excluded.display_name ELSE app.display_name END,
+            last_seen_at_ms = excluded.last_seen_at_ms",
+        params![
+            app.identity_key,
+            process_name,
+            display_name,
+            now,
+            overwrite_display_name as i64
+        ],
     )?;
     let app_id: i64 = tx.query_row(
         "SELECT id FROM app WHERE stable_key = ?1",
@@ -325,7 +497,7 @@ fn upsert_resource_app_tx(
         exe_path: app.exe_path.clone(),
         display_name: app.process_name.clone(),
     };
-    upsert_app_tx(tx, &foreground, now)?;
+    upsert_app_tx(tx, &foreground, now, false)?;
     tx.query_row(
         "SELECT e.id FROM app_executable e JOIN app a ON a.id = e.app_id WHERE a.stable_key = ?1 AND e.normalized_path = ?2",
         params![app.app_key, normalized_path(&foreground)],
@@ -347,6 +519,31 @@ fn normalized_path(app: &ForegroundApp) -> String {
             )
         })
         .unwrap_or_else(|| format!("legacy:{}", app.identity_key))
+}
+
+const RETRY_BASE_DELAY_MS: u64 = 25;
+const RETRY_MAX_DELAY_MS: u64 = 5_000;
+const MAX_RETRY_LIMIT: u32 = 32;
+
+fn retry_backoff(attempt: u32) -> Duration {
+    if attempt == 0 {
+        return Duration::ZERO;
+    }
+    let shift = attempt.saturating_sub(1).min(8);
+    let multiplier = 1_u64.checked_shl(shift).unwrap_or(u64::MAX);
+    let delay_ms = RETRY_BASE_DELAY_MS
+        .saturating_mul(multiplier)
+        .min(RETRY_MAX_DELAY_MS);
+    Duration::from_millis(delay_ms)
+}
+
+fn remaining_backoff_ms(next_attempt_at: Instant) -> u64 {
+    u64::try_from(
+        next_attempt_at
+            .saturating_duration_since(Instant::now())
+            .as_millis(),
+    )
+    .unwrap_or(u64::MAX)
 }
 
 fn ensure_device_tx(
@@ -472,4 +669,18 @@ fn now_ms() -> i64 {
         .duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_millis() as i64)
         .unwrap_or(0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::retry_backoff;
+    use std::time::Duration;
+
+    #[test]
+    fn retry_backoff_is_bounded_and_exponential() {
+        assert_eq!(retry_backoff(1), Duration::from_millis(25));
+        assert_eq!(retry_backoff(2), Duration::from_millis(50));
+        assert_eq!(retry_backoff(8), Duration::from_millis(3_200));
+        assert_eq!(retry_backoff(u32::MAX), Duration::from_secs(5));
+    }
 }
