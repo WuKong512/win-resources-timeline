@@ -489,6 +489,7 @@ fn run_collector(
         .with_writer(writer::collection_settings)
         .unwrap_or_default();
     let mut provider_host = ProviderHost::new(vec![Box::new(WindowsBaselineProvider::new())]);
+    provider_host.probe_all_for_settings(Instant::now() + Duration::from_secs(2), &settings);
     provider_host.apply_plan(
         CollectionPlan::build(&settings, &provider_host.descriptors()),
         Instant::now(),
@@ -506,6 +507,7 @@ fn run_collector(
     let mut pending_controls = VecDeque::new();
     let mut pending_shutdown: Option<ShutdownRequest> = None;
     let mut shutdown_platform_drained = false;
+    let mut provider_shutdown_deadline = None;
 
     loop {
         if pending_shutdown.is_none() {
@@ -657,7 +659,7 @@ fn run_collector(
             match rx.recv_timeout(wait) {
                 Ok(control) => Some(control),
                 Err(crossbeam_channel::RecvTimeoutError::Disconnected) => {
-                    provider_host.stop_all();
+                    let _ = provider_host.stop_all(Instant::now() + Duration::from_secs(2));
                     sync_provider_status(&status, provider_host.statuses());
                     break;
                 }
@@ -720,7 +722,10 @@ fn run_collector(
                     value.last_heartbeat_at_ms = Some(now);
                 }
                 if paused {
-                    provider_host.pause();
+                    if let Err(error) = provider_host.pause(Instant::now() + Duration::from_secs(2))
+                    {
+                        eprintln!("collector provider pause failed: {error:?}");
+                    }
                 } else {
                     provider_host.resume(Instant::now());
                     last_observation_ms = Some(now);
@@ -736,6 +741,8 @@ fn run_collector(
                     .with_writer(|conn| writer::save_collection_settings(conn, &next, now))
                     .map_err(|error| error.to_string());
                 if result.is_ok() {
+                    provider_host
+                        .probe_all_for_settings(Instant::now() + Duration::from_secs(2), &next);
                     provider_host.apply_plan(
                         CollectionPlan::build(&next, &provider_host.descriptors()),
                         Instant::now(),
@@ -777,8 +784,12 @@ fn run_collector(
                 reply,
                 done,
             }) => {
-                provider_host.stop_all();
+                provider_shutdown_deadline = Some(deadline);
+                let provider_stop_result = provider_host.stop_all(deadline);
                 sync_provider_status(&status, provider_host.statuses());
+                if let Err(error) = &provider_stop_result {
+                    eprintln!("collector provider shutdown failed: {error:?}");
+                }
                 let shutdown_at = now_ms();
                 let action_result = if pending_platform_events.has_pending_work() {
                     Err("shutdown deadline expired with uncommitted platform state".to_string())
@@ -820,6 +831,9 @@ fn run_collector(
                     .map_err(|error| format!("final collection session close failed: {error}"))
                 };
                 let result = [
+                    provider_stop_result
+                        .err()
+                        .map(|error| format!("provider shutdown failed: {error:?}")),
                     action_result.err(),
                     rollup_result.err(),
                     flush_result.err(),
@@ -942,7 +956,9 @@ fn run_collector(
             value.last_heartbeat_at_ms = Some(now);
         }
     }
-    provider_host.stop_all();
+    let final_provider_deadline =
+        provider_shutdown_deadline.unwrap_or_else(|| Instant::now() + Duration::from_secs(2));
+    let _ = provider_host.stop_all(final_provider_deadline);
     sync_provider_status(&status, provider_host.statuses());
     if let Ok(mut value) = status.lock() {
         value.running = false;

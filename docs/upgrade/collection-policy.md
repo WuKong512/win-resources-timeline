@@ -78,3 +78,5 @@ PR-03 的启停语义如下：
 - 关闭类别时，CollectionPlan 不再为该类别调度采样；如果 provider 已无启用类别，则调用 `stop` 并释放采集资源，而不是只跳过数据库写入。
 - `unsupported` 表示当前机器或来源不提供该能力；`failed` 表示能力存在但最近启动或采样失败；二者都不能伪装成用户 `disabled`。
 - 采样失败产生缺失/不可用样本和有界重试状态，不把失败写成 `0`。`0` 只表示真实且合法的数值。
+- Provider 的 probe、sample 和 stop 都在 bounded deadline/cancellation 边界内执行；startup/reconfigure failure 使用有界指数退避，shutdown 使用同一个绝对 deadline，超时不拖住其他 Provider 或使用时间线。
+- Windows baseline 的 Disk 只有在当前 settings 请求该类别且 PDH query/counter 初始化 probe 成功时才进入 active plan；用户禁用 Disk 时不建立 PDH Disk query。probe 失败显示明确不可用原因，不用永久 `None` 或 `0` 冒充磁盘数据，CPU、memory、process 不因 Disk 缺失而停止。

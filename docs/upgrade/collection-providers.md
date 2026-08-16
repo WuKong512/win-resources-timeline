@@ -22,25 +22,27 @@ Windows 原生 API 能稳定提供 CPU、内存、进程和磁盘基础指标，
 
 ## 统一接口
 
-Provider 至少实现：
+Provider 至少实现以下项目内部 contract：
 
-- `probe()`：返回设备、指标、权限、建议最小周期和预估成本。
-- `start(plan)` / `reconfigure(plan)` / `stop()`：按 CollectionPlan 管理资源。
-- `sample(deadline)`：返回值、时间、来源、quality 和错误类别。
-- `health()`：暴露最近成功、连续失败、平均耗时和降级状态。
+- `probe(context, requested_categories)`：在受控调用边界内返回实际 capability/reason 结果。
+- `start(plan, context)` / `reconfigure(plan, context)`：按 CollectionPlan 建立或调整采集资源。
+- `sample(context, timestamp, tracked_apps)`：context 携带绝对 deadline 和 cancellation signal。
+- `stop(context) -> Result`：同样受 deadline/cancellation 约束，能报告 `StopFailed` 或 `Timeout`。
+- `health()`：暴露最近成功、failure count 和简短错误摘要。
 
-Provider 必须支持取消，不能在主采样线程无限阻塞。厂商 DLL 的加载、符号解析和调用封装在独立边界，故障不得带崩整个采集服务。
+`ProviderHost` 通过每个 provider 的轻量 worker executor 调用这些同步 trait 方法。collector 只在绝对 deadline 内等待 reply；超时会取消 context、保留待完成调用并把 provider 标为 failed，不能无限阻塞采样主循环或 shutdown。Provider 若能合作，应在 OS/驱动调用前后检查 context；不合作的调用被隔离，不能在同一 provider 上并发发起下一次调用。这里不是动态插件系统，也不引入新的 async runtime。
 
 ## CollectionPlan
 
-CollectionPlan 由以下输入生成：
+PR-03 的 CollectionPlan 由以下输入生成：
 
 1. 用户的类别/指标开关与采样周期。
-2. Capability Registry 的探测结果。
-3. Provider 优先级、可靠性和最近健康状态。
-4. 电池模式、系统压力等可选运行策略。
+2. provider `probe` 返回的 capability support/reason 结果。
+3. 当前产品采集 policy。
 
-输出明确到 `(device, metric) -> provider, interval`。同一设备的同一指标同一时刻只允许一个 active source，避免重复轮询。若首选来源连续失败，可切换到已探测的备用来源并开启新的 collection session，以保持历史可解释。
+输出到 provider enable/category/interval。未支持的 capability 不进入 active sample plan；provider identity 与 metric category 保持分离。device routing、provider priority/fallback 和多设备 source 选择仍是后续硬件 Provider 工作，不由 PR-03 假定。
+
+Plan 只在 startup、settings reload 或相关 capability 变化时重建；sample hot path 消费已编译的 plan，不每次 heartbeat 全量重建。
 
 普通用户只选择轻量、均衡、详细预设；高级模式才覆盖类别或指标周期。系统进入 Windows 节能模式时，默认将均衡计划切换为轻量计划；退出节能模式后恢复。此自动行为可以关闭，事件类采集不因计划降频。
 
@@ -89,11 +91,12 @@ Windows 原始进程 CPU time 保留为内部单调累计计数，采样时计�
 
 PR-03 提供项目内部的 Provider contract，而不是动态插件系统：
 
-- `ProviderDescriptor` 声明 provider identity、采样 schedule 和每个 `MetricCategory` 的 support status/reason code。
-- `CollectionPlan` 将 `CollectionSettings` 与 descriptor capabilities 编译为确定性的 provider enable/category/interval 计划；未请求或用户禁用的类别不会触发 sample。
-- `ProviderHost` 只对受影响的 provider 应用 start/stop/reconfigure delta。未变化的 settings 不重复启动或停止 provider；暂停会释放已启动资源，恢复时重新 start。
-- health 由 runtime DTO 暴露 provider lifecycle、last success、failure count 和简短 error code/message。failure 使用 interval-based bounded backoff，避免 busy-loop 和高频数据库写入。
-- fake provider tests 覆盖 supported/disabled/unsupported/failed、真正停止采样、重新启用、失败隔离、pause 语义和 shutdown 幂等停止。
+- `ProviderHost` 在编译 CollectionPlan 前执行 provider `probe`，并用实际 capability 结果生成 plan；静态 descriptor 只是 probe 的初始 contract，不是最终可用性结论。Probe 可接收当前 settings 请求的类别范围，因此用户禁用的可选类别不会为了 capability 检查而建立采集 query；重新启用时再进行 probe。
+- executor worker 为 `probe/start/reconfigure/sample/stop` 提供 bounded wait；sample、startup、reconfigure 使用 bounded exponential backoff，最大 60 秒；不合作的超时调用不会拖住 collector 或 foreground/computer-state timeline。
+- `ProviderHost` 只对受影响的 provider 应用 start/stop/reconfigure delta。未变化的 settings 不重复启动或停止 provider；pause 会取消 retry、释放已启动资源，resume 按用户仍启用的 plan 重新 start。
+- stop 返回结果并进入 health/status；shutdown 把同一个绝对 deadline 传给所有 provider，stop failure 不无限重试，也不能被伪装成正常 `Stopped`。
+- Windows baseline 按当前 settings 请求的类别在 probe 阶段验证 PDH disk query/counter 初始化；不可用时仅 disk 进入 unsupported/reason，CPU、memory、process 仍可运行。合法磁盘吞吐 `0` 仍是值，不表示 unavailable。
+- fake provider tests 覆盖 supported/disabled/unsupported/failed、真正停止采样、重新启用、startup/reconfigure retry、timeout 隔离、stop failure/timeout、Disk probe、pause 语义和 shutdown 幂等停止。
 - 既有 Windows baseline sampler 通过 `windows-baseline` adapter 进入该框架，FrameWriter/SQLite 仍由 collector/writer 层负责。
 
 本 PR 明确不新增 NVML production provider、`nvidia-smi` 调用、GPU 温度/功耗/频率、CPU 温度/功耗或任何新的硬件采集源。Spike-01 probe 仍是独立工具，PR-04 才负责真实硬件接入。

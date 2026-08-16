@@ -67,7 +67,8 @@ PR-03 已在现有 schema v7 和 runtime settings storage 上落地 Provider fra
 - collector 通过 `windows-baseline` adapter 运行既有 CPU、内存、磁盘、进程 production sampler。
 - settings DTO 支持 `enabledCategories` 与 `disabledProviders`；collector status 暴露 provider capability/lifecycle/health。
 - CollectionPlan 在 startup 和 settings reload 时编译，apply delta 只影响变化的 provider；pause、resume、shutdown 复用既有 collector 生命周期。
-- fake provider tests 覆盖 capability state、plan determinism、disable/re-enable、unsupported、startup/sample failure isolation、pause、shutdown 和 DTO 区分。
+- provider probe 在 startup 生成实际 capability；executor 为 probe/start/reconfigure/sample/stop 提供 bounded deadline/cancellation 边界，startup/reconfigure failure 自动指数退避，stop failure/timeout 进入 health 且不阻塞 shutdown。
+- fake provider tests 覆盖 capability state、plan determinism、disable/re-enable、unsupported、startup/reconfigure retry、sample timeout isolation、Disk probe/unavailable、pause、shutdown 和 DTO 区分。
 - 本 PR 没有 schema v8、NVML production integration、`nvidia-smi`、CPU sensor 或新硬件指标；`tools/metric-probe` 保持独立且未修改。
 
 ## 架构基线完成定义
