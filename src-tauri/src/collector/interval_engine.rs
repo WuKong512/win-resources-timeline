@@ -3,6 +3,17 @@ use crate::models::ComputerState;
 const DEFAULT_HEARTBEAT_MS: i64 = 20_000;
 const GAP_MULTIPLIER: i64 = 3;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TimestampPolicy {
+    /// A platform/lifecycle boundary is trusted even when delivery is delayed.
+    TrustedBoundary,
+    /// Platform ordering is trusted; forward silence may still require observation recovery,
+    /// but a source-clock inversion must not manufacture a gap.
+    OrderedObservation,
+    /// Heartbeat/resync timestamps describe a continuously observed timeline.
+    ContinuousObservation,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum UsageEvent {
     Foreground {
@@ -159,7 +170,11 @@ impl IntervalEngine {
             self.last_event_ms = Some(at_ms);
             at_ms
         } else {
-            self.prepare_timestamp(event_timestamp(&event), &mut actions)
+            self.prepare_timestamp(
+                event_timestamp(&event),
+                timestamp_policy(&event),
+                &mut actions,
+            )
         };
         match event {
             UsageEvent::Foreground {
@@ -277,25 +292,54 @@ impl IntervalEngine {
         (next, actions)
     }
 
-    fn prepare_timestamp(&mut self, timestamp_ms: i64, actions: &mut Vec<IntervalAction>) -> i64 {
+    fn prepare_timestamp(
+        &mut self,
+        timestamp_ms: i64,
+        policy: TimestampPolicy,
+        actions: &mut Vec<IntervalAction>,
+    ) -> i64 {
         let at_ms = self
             .last_event_ms
             .map_or(timestamp_ms, |last| timestamp_ms.max(last));
         let gap = self.last_event_ms.is_some_and(|last| {
-            timestamp_ms < last
-                || timestamp_ms.saturating_sub(last)
-                    > self.expected_heartbeat_ms.saturating_mul(GAP_MULTIPLIER)
+            let forward_gap = timestamp_ms >= last
+                && timestamp_ms.saturating_sub(last)
+                    > self.expected_heartbeat_ms.saturating_mul(GAP_MULTIPLIER);
+            let timestamp_inversion = timestamp_ms < last;
+            match policy {
+                TimestampPolicy::TrustedBoundary => false,
+                TimestampPolicy::OrderedObservation => forward_gap,
+                TimestampPolicy::ContinuousObservation => forward_gap || timestamp_inversion,
+            }
         });
         if gap {
-            if let Some(recovery_at) = self.foreground.as_ref().map(|open| open.last_seen_ms) {
-                self.close_foreground(recovery_at, "clock-gap", actions);
+            if !self.explicit_exclusion_active() {
+                if let Some(recovery_at) = self.foreground.as_ref().map(|open| open.last_seen_ms) {
+                    self.close_foreground(recovery_at, "clock-gap", actions);
+                }
             }
-            if let Some(recovery_at) = self.computer_state.as_ref().map(|open| open.last_seen_ms) {
-                self.close_computer_state(recovery_at, "clock-gap", actions);
+            if self
+                .current_computer_state()
+                .is_some_and(|state| matches!(state, ComputerState::Active | ComputerState::Idle))
+            {
+                if let Some(recovery_at) =
+                    self.computer_state.as_ref().map(|open| open.last_seen_ms)
+                {
+                    self.close_computer_state(recovery_at, "clock-gap", actions);
+                }
             }
         }
         self.last_event_ms = Some(at_ms);
         at_ms
+    }
+
+    fn explicit_exclusion_active(&self) -> bool {
+        self.current_computer_state().is_some_and(|state| {
+            matches!(
+                state,
+                ComputerState::Locked | ComputerState::Sleep | ComputerState::Disconnected
+            )
+        })
     }
 
     fn observe_foreground(
@@ -619,6 +663,30 @@ fn event_timestamp(event: &UsageEvent) -> i64 {
     }
 }
 
+fn timestamp_policy(event: &UsageEvent) -> TimestampPolicy {
+    match event {
+        UsageEvent::Foreground { .. } | UsageEvent::ForegroundUnavailable { .. } => {
+            TimestampPolicy::OrderedObservation
+        }
+        UsageEvent::ComputerState { .. }
+        | UsageEvent::IdleThresholdCrossed { .. }
+        | UsageEvent::UserActive { .. }
+        | UsageEvent::Heartbeat { .. }
+        | UsageEvent::Resync { .. } => TimestampPolicy::ContinuousObservation,
+        UsageEvent::Locked { .. }
+        | UsageEvent::Unlocked { .. }
+        | UsageEvent::Suspend { .. }
+        | UsageEvent::Resume { .. }
+        | UsageEvent::Disconnected { .. }
+        | UsageEvent::Connected { .. }
+        | UsageEvent::ObserverGap { .. }
+        | UsageEvent::Pause { .. }
+        | UsageEvent::ResumeCollection { .. }
+        | UsageEvent::Shutdown { .. }
+        | UsageEvent::WindowsShutdown { .. } => TimestampPolicy::TrustedBoundary,
+    }
+}
+
 fn state_rank(state: ComputerState) -> u8 {
     match state {
         ComputerState::Sleep => 5,
@@ -782,10 +850,276 @@ mod tests {
         )));
         assert!(actions.iter().any(|action| matches!(
             action,
+            IntervalAction::CloseComputerState {
+                at_ms: 1_000,
+                reason: "clock-gap"
+            }
+        )));
+        assert!(actions.iter().any(|action| matches!(
+            action,
             IntervalAction::StartForeground {
                 app_executable_id: 1,
                 at_ms: 40_000
             }
+        )));
+        assert!(actions.iter().any(|action| matches!(
+            action,
+            IntervalAction::StartComputerState {
+                state: ComputerState::Active,
+                at_ms: 40_000,
+                ..
+            }
+        )));
+    }
+
+    #[test]
+    fn long_sleep_remains_open_until_resume() {
+        let mut engine = IntervalEngine::default();
+        heartbeat(&mut engine, 1_000, Some(1), ComputerState::Active);
+        engine.handle(UsageEvent::Suspend { at_ms: 5_000 });
+        let actions = engine.handle(UsageEvent::Resume {
+            at_ms: 95_000,
+            state: ComputerState::Active,
+            foreground_app_executable_id: Some(2),
+        });
+
+        assert!(actions.iter().any(|action| matches!(
+            action,
+            IntervalAction::CloseComputerState { at_ms: 95_000, .. }
+        )));
+        assert!(!actions.iter().any(|action| matches!(
+            action,
+            IntervalAction::CloseComputerState { at_ms: 5_000, .. }
+        )));
+        assert_eq!(
+            engine.open_computer_state(),
+            Some((ComputerState::Active, 95_000))
+        );
+        assert_eq!(engine.open_foreground(), Some((2, 95_000)));
+    }
+
+    #[test]
+    fn very_long_sleep_remains_open_until_resume() {
+        let mut engine = IntervalEngine::default();
+        heartbeat(&mut engine, 1_000, Some(1), ComputerState::Active);
+        engine.handle(UsageEvent::Suspend { at_ms: 5_000 });
+        let actions = engine.handle(UsageEvent::Resume {
+            at_ms: 3_605_000,
+            state: ComputerState::Active,
+            foreground_app_executable_id: None,
+        });
+
+        assert!(actions.iter().any(|action| matches!(
+            action,
+            IntervalAction::CloseComputerState {
+                at_ms: 3_605_000,
+                ..
+            }
+        )));
+        assert!(!actions.iter().any(|action| matches!(
+            action,
+            IntervalAction::CloseComputerState { at_ms: 5_000, .. }
+        )));
+    }
+
+    #[test]
+    fn long_locked_interval_remains_open_until_unlock() {
+        let mut engine = IntervalEngine::default();
+        heartbeat(&mut engine, 1_000, Some(1), ComputerState::Active);
+        engine.handle(UsageEvent::Locked { at_ms: 5_000 });
+        let actions = engine.handle(UsageEvent::Unlocked {
+            at_ms: 125_000,
+            state: ComputerState::Active,
+            foreground_app_executable_id: None,
+        });
+
+        assert!(actions.iter().any(|action| matches!(
+            action,
+            IntervalAction::CloseComputerState { at_ms: 125_000, .. }
+        )));
+        assert!(!actions.iter().any(|action| matches!(
+            action,
+            IntervalAction::CloseComputerState { at_ms: 5_000, .. }
+        )));
+        assert_eq!(
+            engine.open_computer_state(),
+            Some((ComputerState::Active, 125_000))
+        );
+    }
+
+    #[test]
+    fn long_disconnected_interval_remains_open_until_connect() {
+        let mut engine = IntervalEngine::default();
+        heartbeat(&mut engine, 1_000, Some(1), ComputerState::Active);
+        engine.handle(UsageEvent::Disconnected { at_ms: 5_000 });
+        let actions = engine.handle(UsageEvent::Connected {
+            at_ms: 125_000,
+            state: ComputerState::Active,
+            foreground_app_executable_id: None,
+        });
+
+        assert!(actions.iter().any(|action| matches!(
+            action,
+            IntervalAction::CloseComputerState { at_ms: 125_000, .. }
+        )));
+        assert!(!actions.iter().any(|action| matches!(
+            action,
+            IntervalAction::CloseComputerState { at_ms: 5_000, .. }
+        )));
+        assert_eq!(
+            engine.open_computer_state(),
+            Some((ComputerState::Active, 125_000))
+        );
+    }
+
+    #[test]
+    fn later_platform_sequence_with_older_timestamp_does_not_create_gap() {
+        let mut engine = IntervalEngine::default();
+        heartbeat(&mut engine, 0, Some(1), ComputerState::Active);
+        engine.handle(UsageEvent::Locked { at_ms: 1_000 });
+
+        let inversion = engine.handle(UsageEvent::Foreground {
+            app_executable_id: 2,
+            at_ms: 998,
+        });
+        assert!(!inversion
+            .iter()
+            .any(|action| matches!(action, IntervalAction::CloseComputerState { .. })));
+        assert_eq!(
+            engine.open_computer_state(),
+            Some((ComputerState::Locked, 1_000))
+        );
+
+        let unlock = engine.handle(UsageEvent::Unlocked {
+            at_ms: 15_000,
+            state: ComputerState::Active,
+            foreground_app_executable_id: None,
+        });
+        assert!(unlock.iter().any(|action| matches!(
+            action,
+            IntervalAction::CloseComputerState { at_ms: 15_000, .. }
+        )));
+        assert!(!unlock.iter().any(|action| matches!(
+            action,
+            IntervalAction::CloseComputerState { at_ms: 1_000, .. }
+        )));
+    }
+
+    #[test]
+    fn multiple_platform_timestamp_inversions_keep_effective_time_monotonic() {
+        let mut engine = IntervalEngine::default();
+        heartbeat(&mut engine, 0, Some(1), ComputerState::Active);
+        engine.handle(UsageEvent::Locked { at_ms: 1_000 });
+
+        for at_ms in [999, 998, 1_005] {
+            let actions = engine.handle(UsageEvent::Foreground {
+                app_executable_id: 2,
+                at_ms,
+            });
+            assert!(!actions
+                .iter()
+                .any(|action| matches!(action, IntervalAction::CloseComputerState { .. })));
+        }
+
+        let unlock = engine.handle(UsageEvent::Unlocked {
+            at_ms: 15_000,
+            state: ComputerState::Active,
+            foreground_app_executable_id: None,
+        });
+        assert!(unlock.iter().any(|action| matches!(
+            action,
+            IntervalAction::CloseComputerState { at_ms: 15_000, .. }
+        )));
+    }
+
+    #[test]
+    fn ordered_platform_timestamp_inversion_uses_effective_time() {
+        let mut engine = IntervalEngine::default();
+        heartbeat(&mut engine, 1_000, Some(1), ComputerState::Active);
+        let actions = engine.handle(UsageEvent::Foreground {
+            app_executable_id: 2,
+            at_ms: 998,
+        });
+
+        assert!(actions.iter().any(|action| matches!(
+            action,
+            IntervalAction::CloseForeground {
+                at_ms: 1_000,
+                reason: "app-switch"
+            }
+        )));
+        assert!(actions.iter().any(|action| matches!(
+            action,
+            IntervalAction::StartForeground {
+                app_executable_id: 2,
+                at_ms: 1_000
+            }
+        )));
+        assert!(!actions
+            .iter()
+            .any(|action| matches!(action, IntervalAction::CloseComputerState { .. })));
+    }
+
+    #[test]
+    fn observer_gap_still_overrides_explicit_exclusion_state() {
+        let mut engine = IntervalEngine::default();
+        heartbeat(&mut engine, 1_000, Some(1), ComputerState::Active);
+        engine.handle(UsageEvent::Locked { at_ms: 5_000 });
+        let actions = engine.handle(UsageEvent::ObserverGap { at_ms: 20_000 });
+
+        assert!(actions.iter().any(|action| matches!(
+            action,
+            IntervalAction::CloseComputerState {
+                at_ms: 5_000,
+                reason: "observer-gap"
+            }
+        )));
+        assert!(actions.iter().any(|action| matches!(
+            action,
+            IntervalAction::StartComputerState {
+                state: ComputerState::Unknown,
+                at_ms: 5_000,
+                ..
+            }
+        )));
+        assert_eq!(
+            engine.open_computer_state(),
+            Some((ComputerState::Unknown, 5_000))
+        );
+    }
+
+    #[test]
+    fn manual_smoke_timestamp_shapes_are_not_zero_length() {
+        let mut engine = IntervalEngine::default();
+        heartbeat(&mut engine, 0, Some(1), ComputerState::Active);
+        engine.handle(UsageEvent::Locked { at_ms: 1_000 });
+        let unlock = engine.handle(UsageEvent::Unlocked {
+            at_ms: 16_072,
+            state: ComputerState::Active,
+            foreground_app_executable_id: None,
+        });
+        assert!(unlock.iter().any(|action| matches!(
+            action,
+            IntervalAction::CloseComputerState { at_ms: 16_072, .. }
+        )));
+        assert!(!unlock.iter().any(|action| matches!(
+            action,
+            IntervalAction::CloseComputerState { at_ms: 1_000, .. }
+        )));
+
+        engine.handle(UsageEvent::Suspend { at_ms: 20_000 });
+        let resume = engine.handle(UsageEvent::Resume {
+            at_ms: 106_242,
+            state: ComputerState::Active,
+            foreground_app_executable_id: None,
+        });
+        assert!(resume.iter().any(|action| matches!(
+            action,
+            IntervalAction::CloseComputerState { at_ms: 106_242, .. }
+        )));
+        assert!(!resume.iter().any(|action| matches!(
+            action,
+            IntervalAction::CloseComputerState { at_ms: 20_000, .. }
         )));
     }
 

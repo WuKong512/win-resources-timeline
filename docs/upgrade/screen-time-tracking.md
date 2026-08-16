@@ -35,6 +35,8 @@ collector 将 platform pending 状态分为 raw event、captured snapshot、prep
 
 foreground 与 computer state 是两个独立时间轴。可信的前台切换、无前台、暂停、锁定、休眠、断开、退出和 clock/gap recovery 会封口 foreground；active↔idle 只切换 computer state，不拆分 foreground。重复事件去抖；短暂无法解析的窗口进入明确的 unknown/gap，不会归入上一应用。
 
+`locked`、`sleep` 和 `disconnected` 是 explicit exclusion state：它们从可信的开始边界持续到对应的 unlock/resume/connect 或明确的 ObserverGap。睡眠期间没有 heartbeat 不会自动结束 `sleep`；heartbeat/resync 的长 gap 只对依赖连续观察的 `active`/`idle` 做保守封口。平台事件按 process-wide sequence 处理，后到但 source timestamp 略早的事件使用不倒退的 effective timestamp，不会被误判为 clock gap；真正无法证明的区间只由 ObserverGap/recovery barrier 表达为 `unknown`。
+
 应用启动时恢复未封口区间：最多延伸到上次可信 heartbeat/last_seen，不能直接延伸到本次启动时间。锁定和休眠期间不属于任何应用的 active usage；恢复后重新确认当前状态和前台应用。
 
 同一批 foreground/computer-state Close、Start、Checkpoint action 在一个短事务中提交，事务成功后才确认 collector 内存状态。SQLite busy/deadline 使用有界重试，失败、重试和最后错误通过 collector health 计数/字段可见；失败的恢复 gap 会保留到后续重试。

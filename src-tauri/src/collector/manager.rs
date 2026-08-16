@@ -1585,6 +1585,92 @@ mod tests {
     }
 
     #[test]
+    fn manual_smoke_long_exclusion_states_persist_full_boundaries() {
+        let mut harness = UsageHarness::new("manual-smoke-boundaries");
+        harness.apply(UsageEvent::Locked { at_ms: 5_000 }).unwrap();
+        harness
+            .apply(UsageEvent::Unlocked {
+                at_ms: 16_072,
+                state: ComputerState::Active,
+                foreground_app_executable_id: None,
+            })
+            .unwrap();
+        harness
+            .apply(UsageEvent::Suspend { at_ms: 20_000 })
+            .unwrap();
+        harness
+            .apply(UsageEvent::Resume {
+                at_ms: 106_242,
+                state: ComputerState::Active,
+                foreground_app_executable_id: None,
+            })
+            .unwrap();
+
+        harness
+            .db
+            .read(|conn| {
+                let states: Vec<(String, i64, Option<i64>)> = conn
+                    .prepare(
+                        "SELECT state, start_ts, end_ts
+                         FROM computer_state_interval
+                         ORDER BY start_ts, id",
+                    )?
+                    .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?
+                    .collect::<Result<_, _>>()?;
+                assert_eq!(
+                    states,
+                    vec![
+                        ("active".to_string(), 1_000, Some(5_000)),
+                        ("locked".to_string(), 5_000, Some(16_072)),
+                        ("active".to_string(), 16_072, Some(20_000)),
+                        ("sleep".to_string(), 20_000, Some(106_242)),
+                        ("active".to_string(), 106_242, None),
+                    ]
+                );
+                Ok::<_, rusqlite::Error>(())
+            })
+            .unwrap();
+        harness.assert_open_intervals_are_non_overlapping();
+        harness.finish();
+    }
+
+    #[test]
+    fn timestamp_inversion_does_not_persist_zero_length_locked_state() {
+        let mut harness = UsageHarness::new("timestamp-inversion");
+        harness.apply(UsageEvent::Locked { at_ms: 2_000 }).unwrap();
+        harness
+            .apply(UsageEvent::Foreground {
+                app_executable_id: harness.executable_id,
+                at_ms: 1_998,
+            })
+            .unwrap();
+        harness
+            .apply(UsageEvent::Unlocked {
+                at_ms: 15_000,
+                state: ComputerState::Active,
+                foreground_app_executable_id: None,
+            })
+            .unwrap();
+
+        harness
+            .db
+            .read(|conn| {
+                let locked: (i64, i64) = conn.query_row(
+                    "SELECT start_ts, end_ts
+                     FROM computer_state_interval
+                     WHERE state = 'locked'",
+                    [],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )?;
+                assert_eq!(locked, (2_000, 15_000));
+                Ok::<_, rusqlite::Error>(())
+            })
+            .unwrap();
+        harness.assert_open_intervals_are_non_overlapping();
+        harness.finish();
+    }
+
+    #[test]
     fn failed_suspend_blocks_resume_until_sleep_boundary_commits() {
         let mut harness = UsageHarness::new("suspend-retry");
         let suspend = envelope(20, PlatformEvent::Suspended { at_ms: 2_000 });
