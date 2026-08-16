@@ -1946,6 +1946,31 @@ mod tests {
             )?;
             assert_eq!(boot_count, 1);
             assert_eq!(collection_count, 2);
+            let sessions: Vec<(i64, Option<i64>)> = conn
+                .prepare(
+                    "SELECT started_at_ms, ended_at_ms
+                     FROM collection_session
+                     WHERE boot_session_id = (SELECT id FROM boot_session WHERE boot_id = ?1)
+                     ORDER BY started_at_ms",
+                )?
+                .query_map([&identity.boot_id], |row| Ok((row.get(0)?, row.get(1)?)))?
+                .collect::<rusqlite::Result<_>>()?;
+            assert_eq!(sessions.len(), 2);
+            assert_eq!(sessions[0], (10_000, Some(15_000)));
+            assert_eq!(sessions[1], (200_000, None));
+            assert!(sessions[0].1.unwrap() < sessions[1].0);
+            assert_eq!(
+                conn.query_row(
+                    "SELECT COUNT(*)
+                     FROM collection_session
+                     WHERE boot_session_id = (SELECT id FROM boot_session WHERE boot_id = ?1)
+                       AND started_at_ms < 200000
+                       AND COALESCE(ended_at_ms, 200000) > 15000",
+                    [&identity.boot_id],
+                    |row| row.get::<_, i64>(0),
+                )?,
+                0
+            );
             Ok(())
         })
         .unwrap();
@@ -2065,6 +2090,245 @@ mod tests {
             .unwrap();
         assert_eq!(alpha.foreground_total_ms, 2_000);
         assert_eq!(alpha.launch_count, 1);
+
+        drop(db);
+        cleanup_test_files(&path);
+    }
+
+    #[test]
+    fn pr02_usage_transaction_rolls_back_close_when_start_fails() {
+        let path = test_path("pr02-usage-transaction-rollback");
+        cleanup_test_files(&path);
+        let db = Database::open(path.clone()).unwrap();
+        let app = ForegroundApp {
+            identity_key: "name:transaction.exe".into(),
+            process_name: "transaction.exe".into(),
+            exe_path: Some("C:\\Transaction.exe".into()),
+            display_name: "Transaction".into(),
+            pid: Some(505),
+            process_creation_time_ms: Some(1_000),
+        };
+
+        let (interval_id, executable_id) = db
+            .with_writer(|conn| {
+                let executable_id =
+                    writer::resolve_foreground_app(conn, &app, 1_000)?.app_executable_id;
+                let interval_id = writer::begin_foreground_interval(conn, executable_id, 1_000)?;
+                Ok((interval_id, executable_id))
+            })
+            .unwrap();
+        let current = writer::UsagePersistenceState {
+            open_foreground_id: Some(interval_id),
+            ..Default::default()
+        };
+        let actions = [
+            writer::UsageWriteAction::CloseForeground {
+                at_ms: 2_000,
+                reason: "app-switch",
+            },
+            writer::UsageWriteAction::StartForeground {
+                app_executable_id: executable_id + 1_000_000,
+                at_ms: 2_000,
+            },
+        ];
+        let result = db
+            .with_writer(|conn| {
+                writer::apply_usage_actions_with_retry(
+                    conn,
+                    &actions,
+                    current,
+                    15_000,
+                    Some(Instant::now() + Duration::from_secs(1)),
+                )
+            })
+            .unwrap_err();
+        assert!(!writer::is_transient_usage_error(&result));
+
+        db.read(|conn| {
+            assert_eq!(
+                conn.query_row(
+                    "SELECT end_time_ms FROM foreground_interval WHERE id = ?1",
+                    [interval_id],
+                    |row| row.get::<_, Option<i64>>(0),
+                )?,
+                None
+            );
+            assert_eq!(
+                conn.query_row(
+                    "SELECT COUNT(*) FROM foreground_interval WHERE start_time_ms = 2000",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )?,
+                0
+            );
+            Ok(())
+        })
+        .unwrap();
+
+        drop(db);
+        cleanup_test_files(&path);
+    }
+
+    #[test]
+    fn pr02_usage_transaction_preserves_engine_state_when_close_fails() {
+        let path = test_path("pr02-usage-close-failure");
+        cleanup_test_files(&path);
+        let db = Database::open(path.clone()).unwrap();
+        let actions = [writer::UsageWriteAction::CloseForeground {
+            at_ms: 2_000,
+            reason: "test",
+        }];
+        let current = writer::UsagePersistenceState {
+            open_foreground_id: Some(999_999),
+            ..Default::default()
+        };
+        let result = db
+            .with_writer(|conn| {
+                writer::apply_usage_actions_with_retry(
+                    conn,
+                    &actions,
+                    current,
+                    15_000,
+                    Some(Instant::now() + Duration::from_secs(1)),
+                )
+            })
+            .unwrap_err();
+        assert!(!writer::is_transient_usage_error(&result));
+        assert_eq!(
+            db.read(|conn| conn.query_row(
+                "SELECT COUNT(*) FROM foreground_interval WHERE end_time_ms IS NULL",
+                [],
+                |row| row.get::<_, i64>(0),
+            ))
+            .unwrap(),
+            0
+        );
+        drop(db);
+        cleanup_test_files(&path);
+    }
+
+    #[test]
+    fn pr02_computer_state_transition_rolls_back_on_injected_failure() {
+        let path = test_path("pr02-computer-state-rollback");
+        cleanup_test_files(&path);
+        let db = Database::open(path.clone()).unwrap();
+        let state_id = db
+            .with_writer(|conn| {
+                let state_id = writer::begin_computer_state_interval(
+                    conn,
+                    ComputerState::Active,
+                    1_000,
+                    "test",
+                    1,
+                )?;
+                conn.execute_batch(
+                    "CREATE TRIGGER test_fail_idle_state
+                     BEFORE INSERT ON computer_state_interval
+                     WHEN NEW.state = 'idle'
+                     BEGIN
+                         SELECT RAISE(ABORT, 'injected computer state failure');
+                     END;",
+                )?;
+                Ok(state_id)
+            })
+            .unwrap();
+        let current = writer::UsagePersistenceState {
+            open_computer_state_id: Some(state_id),
+            ..Default::default()
+        };
+        let actions = [
+            writer::UsageWriteAction::CloseComputerState {
+                at_ms: 2_000,
+                reason: "state-change",
+            },
+            writer::UsageWriteAction::StartComputerState {
+                state: ComputerState::Idle,
+                at_ms: 2_000,
+                source: "test",
+                quality: 1,
+            },
+        ];
+        let result = db
+            .with_writer(|conn| {
+                writer::apply_usage_actions_with_retry(
+                    conn,
+                    &actions,
+                    current,
+                    15_000,
+                    Some(Instant::now() + Duration::from_secs(1)),
+                )
+            })
+            .unwrap_err();
+        assert!(!writer::is_transient_usage_error(&result));
+        db.read(|conn| {
+            assert_eq!(
+                conn.query_row(
+                    "SELECT end_ts FROM computer_state_interval WHERE id = ?1",
+                    [state_id],
+                    |row| row.get::<_, Option<i64>>(0),
+                )?,
+                None
+            );
+            assert_eq!(
+                conn.query_row(
+                    "SELECT COUNT(*) FROM computer_state_interval WHERE state = 'idle'",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )?,
+                0
+            );
+            Ok(())
+        })
+        .unwrap();
+        drop(db);
+        cleanup_test_files(&path);
+    }
+
+    #[test]
+    fn pr02_busy_usage_write_retries_and_recovers() {
+        let path = test_path("pr02-usage-busy-retry");
+        cleanup_test_files(&path);
+        let db = Database::open(path.clone()).unwrap();
+        let (ready_tx, ready_rx) = mpsc::sync_channel(0);
+        let holder_path = path.clone();
+        let holder = thread::spawn(move || {
+            let holder = Connection::open(holder_path).unwrap();
+            holder.execute_batch("BEGIN IMMEDIATE;").unwrap();
+            ready_tx.send(()).unwrap();
+            thread::sleep(Duration::from_millis(100));
+            holder.execute_batch("ROLLBACK;").unwrap();
+        });
+        ready_rx.recv().unwrap();
+
+        let actions = [writer::UsageWriteAction::StartComputerState {
+            state: ComputerState::Active,
+            at_ms: 2_000,
+            source: "test",
+            quality: 1,
+        }];
+        let result = db.with_writer(|conn| {
+            writer::apply_usage_actions_with_retry_for_test(
+                conn,
+                &actions,
+                Default::default(),
+                15_000,
+                Some(Instant::now() + Duration::from_secs(1)),
+                8,
+                Duration::from_millis(10),
+            )
+        });
+        holder.join().unwrap();
+        let (_, retries) = result.unwrap();
+        assert!(retries > 0);
+        assert_eq!(
+            db.read(|conn| conn.query_row(
+                "SELECT COUNT(*) FROM computer_state_interval WHERE start_ts = 2000",
+                [],
+                |row| row.get::<_, i64>(0),
+            ))
+            .unwrap(),
+            1
+        );
 
         drop(db);
         cleanup_test_files(&path);

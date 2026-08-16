@@ -3,9 +3,10 @@ use crate::{
     platform::{now_ms, PlatformEvent},
 };
 use crossbeam_channel::Sender;
+use std::collections::VecDeque;
 use std::sync::{
     atomic::{AtomicBool, Ordering},
-    OnceLock,
+    Mutex, OnceLock,
 };
 use windows::{
     core::{w, PCWSTR},
@@ -30,13 +31,21 @@ use windows::{
 };
 
 static CONTROL: OnceLock<Sender<Control>> = OnceLock::new();
+static CRITICAL_CONTROL: OnceLock<Sender<PlatformEvent>> = OnceLock::new();
+static CRITICAL_FALLBACK: OnceLock<Mutex<VecDeque<PlatformEvent>>> = OnceLock::new();
 static OBSERVER_DIRTY: AtomicBool = AtomicBool::new(false);
+static CRITICAL_OVERFLOW: AtomicBool = AtomicBool::new(false);
 pub const OPEN_WINDOW_MESSAGE: u32 = WM_APP + 42;
+const CRITICAL_FALLBACK_CAPACITY: usize = 32;
 
-pub fn start(tx: Sender<Control>) {
+pub fn start(tx: Sender<Control>, critical_tx: Sender<PlatformEvent>) {
     if CONTROL.set(tx).is_err() {
         return;
     }
+    let _ = CRITICAL_CONTROL.set(critical_tx);
+    let _ = CRITICAL_FALLBACK.set(Mutex::new(VecDeque::with_capacity(
+        CRITICAL_FALLBACK_CAPACITY,
+    )));
     std::thread::spawn(message_loop);
 }
 
@@ -103,36 +112,26 @@ unsafe extern "system" fn window_proc(
 ) -> LRESULT {
     match message {
         WM_WTSSESSION_CHANGE => match wparam.0 as u32 {
-            WTS_SESSION_LOCK => send(Control::Platform(PlatformEvent::Locked { at_ms: now_ms() })),
-            WTS_SESSION_UNLOCK => send(Control::Platform(PlatformEvent::Unlocked {
-                at_ms: now_ms(),
-            })),
+            WTS_SESSION_LOCK => send_critical(PlatformEvent::Locked { at_ms: now_ms() }),
+            WTS_SESSION_UNLOCK => send_critical(PlatformEvent::Unlocked { at_ms: now_ms() }),
             WTS_CONSOLE_DISCONNECT | WTS_REMOTE_DISCONNECT => {
-                send(Control::Platform(PlatformEvent::Disconnected {
-                    at_ms: now_ms(),
-                }))
+                send_critical(PlatformEvent::Disconnected { at_ms: now_ms() })
             }
             WTS_CONSOLE_CONNECT | WTS_REMOTE_CONNECT => {
-                send(Control::Platform(PlatformEvent::Connected {
-                    at_ms: now_ms(),
-                }))
+                send_critical(PlatformEvent::Connected { at_ms: now_ms() })
             }
             _ => {}
         },
         WM_POWERBROADCAST => match wparam.0 as u32 {
-            PBT_APMSUSPEND => send(Control::Platform(PlatformEvent::Suspended {
-                at_ms: now_ms(),
-            })),
+            PBT_APMSUSPEND => send_critical(PlatformEvent::Suspended { at_ms: now_ms() }),
             PBT_APMRESUMEAUTOMATIC | PBT_APMRESUMECRITICAL | PBT_APMRESUMESUSPEND => {
-                send(Control::Platform(PlatformEvent::Resumed {
-                    at_ms: now_ms(),
-                }))
+                send_critical(PlatformEvent::Resumed { at_ms: now_ms() })
             }
             _ => {}
         },
-        WM_ENDSESSION if wparam.0 != 0 => send(Control::Platform(PlatformEvent::WindowsShutdown {
-            at_ms: now_ms(),
-        })),
+        WM_ENDSESSION if wparam.0 != 0 => {
+            send_critical(PlatformEvent::WindowsShutdown { at_ms: now_ms() })
+        }
         OPEN_WINDOW_MESSAGE => send(Control::OpenWindow),
         _ => {}
     }
@@ -147,6 +146,40 @@ pub(crate) fn send(event: Control) {
     }
 }
 
+pub(crate) fn send_critical(event: PlatformEvent) {
+    let Some(tx) = CRITICAL_CONTROL.get() else {
+        return;
+    };
+    if tx.try_send(event).is_ok() {
+        return;
+    }
+    OBSERVER_DIRTY.store(true, Ordering::Release);
+    let Some(fallback) = CRITICAL_FALLBACK.get() else {
+        CRITICAL_OVERFLOW.store(true, Ordering::Release);
+        return;
+    };
+    match fallback.try_lock() {
+        Ok(mut pending) if pending.len() < CRITICAL_FALLBACK_CAPACITY => pending.push_back(event),
+        _ => CRITICAL_OVERFLOW.store(true, Ordering::Release),
+    }
+}
+
 pub fn take_dirty() -> bool {
     OBSERVER_DIRTY.swap(false, Ordering::AcqRel)
+}
+
+pub fn take_recovery() -> crate::platform::ObserverRecovery {
+    let events = CRITICAL_FALLBACK
+        .get()
+        .and_then(|fallback| {
+            fallback
+                .try_lock()
+                .ok()
+                .map(|mut pending| pending.drain(..).collect())
+        })
+        .unwrap_or_default();
+    crate::platform::ObserverRecovery {
+        events,
+        overflowed: CRITICAL_OVERFLOW.swap(false, Ordering::AcqRel),
+    }
 }

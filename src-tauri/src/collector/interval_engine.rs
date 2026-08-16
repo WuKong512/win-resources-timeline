@@ -46,10 +46,19 @@ pub enum UsageEvent {
         at_ms: i64,
         state: ComputerState,
     },
+    #[allow(dead_code)]
     Heartbeat {
         at_ms: i64,
         foreground_app_executable_id: Option<i64>,
         state: ComputerState,
+    },
+    Resync {
+        at_ms: i64,
+        foreground_app_executable_id: Option<i64>,
+        state: ComputerState,
+    },
+    ObserverGap {
+        at_ms: i64,
     },
     Pause {
         at_ms: i64,
@@ -110,6 +119,7 @@ struct OpenComputerState {
     last_seen_ms: i64,
 }
 
+#[derive(Clone)]
 pub struct IntervalEngine {
     foreground: Option<OpenForeground>,
     computer_state: Option<OpenComputerState>,
@@ -137,7 +147,17 @@ impl IntervalEngine {
 
     pub fn handle(&mut self, event: UsageEvent) -> Vec<IntervalAction> {
         let mut actions = Vec::new();
-        let at_ms = self.prepare_timestamp(event_timestamp(&event), &mut actions);
+        let is_observer_gap = matches!(&event, UsageEvent::ObserverGap { .. });
+        let at_ms = if is_observer_gap {
+            let at_ms = self.last_event_ms.map_or_else(
+                || event_timestamp(&event),
+                |last| event_timestamp(&event).max(last),
+            );
+            self.last_event_ms = Some(at_ms);
+            at_ms
+        } else {
+            self.prepare_timestamp(event_timestamp(&event), &mut actions)
+        };
         match event {
             UsageEvent::Foreground {
                 app_executable_id, ..
@@ -198,6 +218,12 @@ impl IntervalEngine {
                     }
                 }
             }
+            UsageEvent::Resync {
+                foreground_app_executable_id,
+                state,
+                ..
+            } => self.resync(foreground_app_executable_id, state, at_ms, &mut actions),
+            UsageEvent::ObserverGap { .. } => self.observer_gap(at_ms, &mut actions),
             UsageEvent::Pause { .. } => self.pause(at_ms, &mut actions),
             UsageEvent::ResumeCollection {
                 foreground_app_executable_id,
@@ -219,6 +245,12 @@ impl IntervalEngine {
             }
         }
         actions
+    }
+
+    pub fn preview(&self, event: UsageEvent) -> (Self, Vec<IntervalAction>) {
+        let mut next = self.clone();
+        let actions = next.handle(event);
+        (next, actions)
     }
 
     fn prepare_timestamp(&mut self, timestamp_ms: i64, actions: &mut Vec<IntervalAction>) -> i64 {
@@ -326,7 +358,7 @@ impl IntervalEngine {
 
     fn lock(&mut self, at_ms: i64, actions: &mut Vec<IntervalAction>) {
         self.close_foreground(at_ms, "lock", actions);
-        self.observe_computer_state(ComputerState::Locked, at_ms, "wts-lock", 0, actions);
+        self.observe_computer_state_forced(ComputerState::Locked, at_ms, "wts-lock", 0, actions);
     }
 
     fn unlock(&mut self, at_ms: i64, state: ComputerState, actions: &mut Vec<IntervalAction>) {
@@ -335,7 +367,13 @@ impl IntervalEngine {
 
     fn suspend(&mut self, at_ms: i64, actions: &mut Vec<IntervalAction>) {
         self.close_foreground(at_ms, "sleep", actions);
-        self.observe_computer_state(ComputerState::Sleep, at_ms, "power-suspend", 0, actions);
+        self.observe_computer_state_forced(
+            ComputerState::Sleep,
+            at_ms,
+            "power-suspend",
+            0,
+            actions,
+        );
     }
 
     fn resume(&mut self, at_ms: i64, state: ComputerState, actions: &mut Vec<IntervalAction>) {
@@ -344,7 +382,7 @@ impl IntervalEngine {
 
     fn disconnect(&mut self, at_ms: i64, actions: &mut Vec<IntervalAction>) {
         self.close_foreground(at_ms, "disconnected", actions);
-        self.observe_computer_state(
+        self.observe_computer_state_forced(
             ComputerState::Disconnected,
             at_ms,
             "wts-disconnect",
@@ -355,6 +393,61 @@ impl IntervalEngine {
 
     fn connect(&mut self, at_ms: i64, state: ComputerState, actions: &mut Vec<IntervalAction>) {
         self.observe_computer_state_forced(state, at_ms, "wts-connect", 0, actions);
+    }
+
+    fn resync(
+        &mut self,
+        foreground_app_executable_id: Option<i64>,
+        state: ComputerState,
+        at_ms: i64,
+        actions: &mut Vec<IntervalAction>,
+    ) {
+        if self.paused {
+            return;
+        }
+        if !matches!(state, ComputerState::Active | ComputerState::Idle) {
+            self.close_foreground(at_ms, "resync-system-state", actions);
+        }
+        self.observe_computer_state_forced(state, at_ms, "heartbeat-resync", 1, actions);
+        if self.foreground_allowed() {
+            match foreground_app_executable_id {
+                Some(app_executable_id) => {
+                    self.observe_foreground(app_executable_id, at_ms, actions)
+                }
+                None => self.close_foreground(at_ms, "resync-no-foreground", actions),
+            }
+        } else {
+            self.close_foreground(at_ms, "resync-system-state", actions);
+        }
+    }
+
+    fn observer_gap(&mut self, at_ms: i64, actions: &mut Vec<IntervalAction>) {
+        if self.paused {
+            return;
+        }
+
+        let foreground_cutoff = self.foreground.as_ref().map(|open| open.last_seen_ms);
+        let state_cutoff = self.computer_state.as_ref().map(|open| open.last_seen_ms);
+        let unknown_start = foreground_cutoff
+            .into_iter()
+            .chain(state_cutoff)
+            .min()
+            .unwrap_or(at_ms)
+            .min(at_ms);
+
+        if let Some(cutoff) = foreground_cutoff {
+            self.close_foreground(cutoff, "observer-gap", actions);
+        }
+        if let Some(cutoff) = state_cutoff {
+            self.close_computer_state(cutoff, "observer-gap", actions);
+        }
+        self.observe_computer_state_forced(
+            ComputerState::Unknown,
+            unknown_start,
+            "observer-gap",
+            -1,
+            actions,
+        );
     }
 
     fn observe_computer_state_forced(
@@ -439,7 +532,12 @@ impl IntervalEngine {
         !self.paused
             && !matches!(
                 self.current_computer_state(),
-                Some(ComputerState::Locked | ComputerState::Sleep | ComputerState::Disconnected)
+                Some(
+                    ComputerState::Locked
+                        | ComputerState::Sleep
+                        | ComputerState::Disconnected
+                        | ComputerState::Unknown,
+                )
             )
     }
 
@@ -476,6 +574,8 @@ fn event_timestamp(event: &UsageEvent) -> i64 {
         | UsageEvent::Disconnected { at_ms }
         | UsageEvent::Connected { at_ms, .. }
         | UsageEvent::Heartbeat { at_ms, .. }
+        | UsageEvent::Resync { at_ms, .. }
+        | UsageEvent::ObserverGap { at_ms }
         | UsageEvent::Pause { at_ms }
         | UsageEvent::ResumeCollection { at_ms, .. }
         | UsageEvent::Shutdown { at_ms }
@@ -511,6 +611,19 @@ mod tests {
         state: ComputerState,
     ) -> Vec<IntervalAction> {
         engine.handle(UsageEvent::Heartbeat {
+            at_ms,
+            foreground_app_executable_id: app_executable_id,
+            state,
+        })
+    }
+
+    fn resync(
+        engine: &mut IntervalEngine,
+        at_ms: i64,
+        app_executable_id: Option<i64>,
+        state: ComputerState,
+    ) -> Vec<IntervalAction> {
+        engine.handle(UsageEvent::Resync {
             at_ms,
             foreground_app_executable_id: app_executable_id,
             state,
@@ -652,5 +765,170 @@ mod tests {
             }
         )));
         assert_eq!(engine.open_foreground(), Some((99, 1_000)));
+    }
+
+    #[test]
+    fn preview_does_not_commit_memory_before_persistence() {
+        let engine = IntervalEngine::default();
+        let (next, actions) = engine.preview(UsageEvent::Resync {
+            at_ms: 1_000,
+            foreground_app_executable_id: Some(1),
+            state: ComputerState::Active,
+        });
+        assert!(engine.open_foreground().is_none());
+        assert_eq!(next.open_foreground(), Some((1, 1_000)));
+        assert!(actions.iter().any(|action| matches!(
+            action,
+            IntervalAction::StartForeground {
+                app_executable_id: 1,
+                at_ms: 1_000
+            }
+        )));
+    }
+
+    #[test]
+    fn dropped_unlock_is_recovered_by_trusted_resync() {
+        let mut engine = IntervalEngine::default();
+        heartbeat(&mut engine, 0, Some(1), ComputerState::Active);
+        engine.handle(UsageEvent::Locked { at_ms: 5_000 });
+        let actions = resync(&mut engine, 10_000, Some(2), ComputerState::Active);
+        assert!(actions.iter().any(|action| matches!(
+            action,
+            IntervalAction::CloseComputerState { at_ms: 10_000, .. }
+        )));
+        assert_eq!(
+            engine.open_computer_state(),
+            Some((ComputerState::Active, 10_000))
+        );
+        assert_eq!(engine.open_foreground(), Some((2, 10_000)));
+    }
+
+    #[test]
+    fn dropped_lock_is_recovered_without_attributing_gap_to_app() {
+        let mut engine = IntervalEngine::default();
+        heartbeat(&mut engine, 0, Some(1), ComputerState::Active);
+        let actions = resync(&mut engine, 5_000, None, ComputerState::Locked);
+        assert!(actions
+            .iter()
+            .any(|action| matches!(action, IntervalAction::CloseForeground { at_ms: 5_000, .. })));
+        assert_eq!(engine.open_foreground(), None);
+        assert_eq!(
+            engine.open_computer_state(),
+            Some((ComputerState::Locked, 5_000))
+        );
+    }
+
+    #[test]
+    fn dropped_resume_is_recovered_by_trusted_resync() {
+        let mut engine = IntervalEngine::default();
+        heartbeat(&mut engine, 0, Some(1), ComputerState::Active);
+        engine.handle(UsageEvent::Suspend { at_ms: 5_000 });
+        resync(&mut engine, 15_000, Some(2), ComputerState::Active);
+        assert_eq!(
+            engine.open_computer_state(),
+            Some((ComputerState::Active, 15_000))
+        );
+        assert_eq!(engine.open_foreground(), Some((2, 15_000)));
+    }
+
+    #[test]
+    fn dropped_suspend_is_recovered_as_sleep() {
+        let mut engine = IntervalEngine::default();
+        heartbeat(&mut engine, 0, Some(1), ComputerState::Active);
+        resync(&mut engine, 5_000, None, ComputerState::Sleep);
+        assert_eq!(engine.open_foreground(), None);
+        assert_eq!(
+            engine.open_computer_state(),
+            Some((ComputerState::Sleep, 5_000))
+        );
+    }
+
+    #[test]
+    fn dropped_connect_is_recovered_by_trusted_resync() {
+        let mut engine = IntervalEngine::default();
+        heartbeat(&mut engine, 0, Some(1), ComputerState::Active);
+        engine.handle(UsageEvent::Disconnected { at_ms: 5_000 });
+        resync(&mut engine, 10_000, Some(2), ComputerState::Active);
+        assert_eq!(
+            engine.open_computer_state(),
+            Some((ComputerState::Active, 10_000))
+        );
+        assert_eq!(engine.open_foreground(), Some((2, 10_000)));
+    }
+
+    #[test]
+    fn dropped_disconnect_is_recovered_as_disconnected() {
+        let mut engine = IntervalEngine::default();
+        heartbeat(&mut engine, 0, Some(1), ComputerState::Active);
+        resync(&mut engine, 5_000, None, ComputerState::Disconnected);
+        assert_eq!(engine.open_foreground(), None);
+        assert_eq!(
+            engine.open_computer_state(),
+            Some((ComputerState::Disconnected, 5_000))
+        );
+    }
+
+    #[test]
+    fn observer_gap_before_resume_does_not_bridge_lost_sleep() {
+        let mut engine = IntervalEngine::default();
+        heartbeat(&mut engine, 0, Some(1), ComputerState::Active);
+        engine.handle(UsageEvent::ObserverGap { at_ms: 15_000 });
+        assert_eq!(engine.open_foreground(), None);
+        assert_eq!(
+            engine.open_computer_state(),
+            Some((ComputerState::Unknown, 0))
+        );
+
+        engine.handle(UsageEvent::Resume {
+            at_ms: 15_000,
+            state: ComputerState::Active,
+        });
+        assert_eq!(
+            engine.open_computer_state(),
+            Some((ComputerState::Active, 15_000))
+        );
+        assert_eq!(engine.open_foreground(), None);
+    }
+
+    #[test]
+    fn observer_gap_before_connect_does_not_bridge_lost_disconnect() {
+        let mut engine = IntervalEngine::default();
+        heartbeat(&mut engine, 0, Some(1), ComputerState::Active);
+        engine.handle(UsageEvent::ObserverGap { at_ms: 15_000 });
+        engine.handle(UsageEvent::Connected {
+            at_ms: 15_000,
+            state: ComputerState::Active,
+        });
+        assert_eq!(
+            engine.open_computer_state(),
+            Some((ComputerState::Active, 15_000))
+        );
+        assert_eq!(engine.open_foreground(), None);
+    }
+
+    #[test]
+    fn observer_gap_closes_at_last_trusted_boundary() {
+        let mut engine = IntervalEngine::default();
+        heartbeat(&mut engine, 1_000, Some(1), ComputerState::Active);
+        let actions = engine.handle(UsageEvent::ObserverGap { at_ms: 20_000 });
+        assert!(actions.iter().any(|action| matches!(
+            action,
+            IntervalAction::CloseForeground {
+                at_ms: 1_000,
+                reason: "observer-gap"
+            }
+        )));
+        assert!(actions.iter().any(|action| matches!(
+            action,
+            IntervalAction::CloseComputerState {
+                at_ms: 1_000,
+                reason: "observer-gap"
+            }
+        )));
+        assert_eq!(engine.open_foreground(), None);
+        assert_eq!(
+            engine.open_computer_state(),
+            Some((ComputerState::Unknown, 1_000))
+        );
     }
 }

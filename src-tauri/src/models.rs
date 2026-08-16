@@ -194,6 +194,9 @@ pub struct CollectorStatus {
     pub last_foreground_sample_at_ms: Option<i64>,
     pub last_system_sample_at_ms: Option<i64>,
     pub dropped_system_samples: u64,
+    pub usage_write_failures: u64,
+    pub usage_write_retries: u64,
+    pub last_usage_write_error: Option<String>,
     pub database_size_bytes: u64,
     pub database_path: String,
 }

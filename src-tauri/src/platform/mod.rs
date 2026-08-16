@@ -1,8 +1,14 @@
 #[cfg(windows)]
 mod windows;
 use crate::collector::manager::Control;
-use crate::models::{BootIdentity, ForegroundApp};
+use crate::models::{BootIdentity, ComputerState, ForegroundApp};
 use crossbeam_channel::Sender;
+
+#[derive(Debug, Default)]
+pub struct ObserverRecovery {
+    pub events: Vec<PlatformEvent>,
+    pub overflowed: bool,
+}
 
 #[derive(Debug, Clone, Copy)]
 pub enum PlatformEvent {
@@ -61,11 +67,14 @@ pub fn idle_for_ms() -> Option<u64> {
     }
 }
 
-pub fn start_session_observer(tx: Sender<Control>) {
+pub fn start_session_observer(tx: Sender<Control>, critical_tx: Sender<PlatformEvent>) {
     #[cfg(windows)]
-    windows::session::start(tx);
+    windows::session::start(tx, critical_tx);
     #[cfg(not(windows))]
-    drop(tx);
+    {
+        drop(tx);
+        drop(critical_tx);
+    }
 }
 
 pub fn take_observer_dirty() -> bool {
@@ -76,6 +85,29 @@ pub fn take_observer_dirty() -> bool {
     #[cfg(not(windows))]
     {
         false
+    }
+}
+
+pub fn take_observer_recovery() -> ObserverRecovery {
+    #[cfg(windows)]
+    {
+        windows::session::take_recovery()
+    }
+    #[cfg(not(windows))]
+    {
+        ObserverRecovery::default()
+    }
+}
+
+pub fn current_computer_state(idle_threshold_ms: u64) -> Option<ComputerState> {
+    #[cfg(windows)]
+    {
+        windows::activity::current_computer_state(idle_threshold_ms)
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = idle_threshold_ms;
+        None
     }
 }
 

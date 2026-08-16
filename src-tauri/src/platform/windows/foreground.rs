@@ -8,15 +8,18 @@ use windows::{
     core::PWSTR,
     Win32::{
         Foundation::{CloseHandle, FILETIME, HWND},
-        System::Threading::{
-            GetProcessTimes, OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_WIN32,
-            PROCESS_QUERY_LIMITED_INFORMATION,
+        System::{
+            SystemInformation::GetTickCount64,
+            Threading::{
+                GetProcessTimes, OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_WIN32,
+                PROCESS_QUERY_LIMITED_INFORMATION,
+            },
         },
-        UI::WindowsAndMessaging::{GetForegroundWindow, GetWindowThreadProcessId},
         UI::{
             Accessibility::{SetWinEventHook, UnhookWinEvent, WINEVENTPROC},
             WindowsAndMessaging::{
-                EVENT_SYSTEM_FOREGROUND, WINEVENT_OUTOFCONTEXT, WINEVENT_SKIPOWNPROCESS,
+                GetForegroundWindow, GetWindowThreadProcessId, EVENT_SYSTEM_FOREGROUND,
+                WINEVENT_OUTOFCONTEXT,
             },
         },
     },
@@ -123,7 +126,7 @@ pub fn install_hook() -> Option<windows::Win32::UI::Accessibility::HWINEVENTHOOK
             WINEVENTPROC::Some(foreground_event_callback),
             0,
             0,
-            WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNPROCESS,
+            WINEVENT_OUTOFCONTEXT,
         );
         (!hook.0.is_null()).then_some(hook)
     }
@@ -142,15 +145,32 @@ unsafe extern "system" fn foreground_event_callback(
     _id_object: i32,
     _id_child: i32,
     _event_thread: u32,
-    _event_time: u32,
+    event_time: u32,
 ) {
     if event != EVENT_SYSTEM_FOREGROUND {
         return;
     }
     super::session::send(Control::Platform(PlatformEvent::ForegroundWindow {
         hwnd: hwnd.0 as isize,
-        at_ms: now_ms(),
+        at_ms: event_timestamp_ms(event_time),
     }));
+}
+
+fn event_timestamp_ms(event_time: u32) -> i64 {
+    let now = now_ms();
+    if event_time == 0 {
+        return now;
+    }
+    let tick_now = unsafe { GetTickCount64() };
+    let modulus = 1_u64 << 32;
+    let mut event_tick = (tick_now & !(modulus - 1)) | u64::from(event_time);
+    if event_tick > tick_now.saturating_add(modulus / 2) {
+        event_tick = event_tick.saturating_sub(modulus);
+    } else if tick_now > event_tick.saturating_add(modulus / 2) {
+        event_tick = event_tick.saturating_add(modulus);
+    }
+    now.saturating_sub(i64::try_from(tick_now).unwrap_or(i64::MAX))
+        .saturating_add(i64::try_from(event_tick).unwrap_or(i64::MAX))
 }
 
 #[cfg(test)]
@@ -158,5 +178,12 @@ mod tests {
     #[test]
     fn windows_epoch_offset_is_positive_and_stable() {
         assert_eq!(super::WINDOWS_EPOCH_OFFSET_MS, 11_644_473_600_000);
+    }
+
+    #[test]
+    fn event_timestamp_uses_callback_tick_not_delivery_time() {
+        let timestamp = super::event_timestamp_ms(1);
+        let now = super::now_ms();
+        assert!(timestamp <= now.saturating_add(1_000));
     }
 }
