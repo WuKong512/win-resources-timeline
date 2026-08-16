@@ -78,6 +78,8 @@ PR-02 已落地 Windows 使用时间的双时间轴：
 - usage Close/Start/Checkpoint action batch 在一个短 SQLite 事务中提交，成功后才更新内存 persistence state；`SQLITE_BUSY`、writer deadline 和重试次数进入 collector health。原始区间即时落盘，日报只标记受影响日期并 debounce/限频重算，不在每次 heartbeat 或 app switch 中同步重建多日日报。
 - 查询层以 `foreground_interval ∩ computer_state_interval` 派生 `active_usage` 与 `idle_foreground`，并单独返回 foreground total 与 computer active time。日报按 local day 重算，保留 UTC epoch milliseconds，支持跨午夜和幂等重算。
 - platform event 在 normal foreground lane、critical lane 和 fallback recovery lane 进入 collector 时共享 process-wide sequence；collector 按 sequence 合并消费，失败的队首事件或 recovery gap 在成功提交前保持 pending，后续事件不能越过。
+- collector 的 platform pending 状态显式区分 raw/captured/prepared event、失败队首、coalesced recovery barrier 和当前时间 resync。overflow barrier 按第一个可能丢失的 sequence 排序，失败队首不会被 gap 阻塞；gap 自身写失败时保留 barrier 并以 bounded backoff 重试。shutdown 通过独立有界 lane 进入，并对所有平台 retry/SQLite write/最终 flush 使用一个绝对 deadline。
+- recovery event 的前台身份与 active/idle snapshot 只在第一次 prepare 时捕获；后续 SQLite retry 重放 prepared payload，不重新读取未来的 OS truth。窗口解析失败只保留 explicit unknown，不把无法解析的窗口归入前一个应用。
 - `boot_session` 使用 Windows 的 best-effort boot-time system source（不是永久稳定的公开 Win32 contract），不可用时回退到 uptime/wall-clock observation，并以小容差 reconciliation 复用；同一次 Windows boot 的应用重启只创建新的 `collection_session`，旧 session 以最后可信 checkpoint/last_seen 封口。
 - `EVENT_SYSTEM_FOREGROUND` 回调使用系统提供的 event tick timestamp（无法提供时才回退到 delivery time），包含 Resource Timeline 自身窗口；默认不保存窗口标题、文档标题、浏览器 URL 或网站名称。
 - 默认不保存窗口标题、文档标题、浏览器 URL 或网站名称；现有 context 预留保持未启用。

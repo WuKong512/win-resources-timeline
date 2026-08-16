@@ -30,9 +30,16 @@ pub(crate) enum Control {
 
 type ShutdownCompletion = (Sender<Result<(), String>>, Sender<()>, Result<(), String>);
 
+struct ShutdownRequest {
+    deadline: Instant,
+    reply: Sender<Result<(), String>>,
+    done: Sender<()>,
+}
+
 #[derive(Clone)]
 pub struct CollectorManager {
     tx: Sender<Control>,
+    shutdown_tx: Sender<ShutdownRequest>,
     status: Arc<Mutex<CollectorStatus>>,
 }
 
@@ -116,34 +123,143 @@ struct UsageApplyResult {
     retries: u32,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct RecoveryBarrier {
+    /// The first sequence that may be missing. `None` means the gap precedes all queued events.
+    first_unknown_sequence: Option<u64>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RetryTarget {
+    Event(u64),
+    RecoveryGap,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ForegroundSnapshot {
+    NoWindow,
+    Unresolved,
+    App(ForegroundApp),
+}
+
+#[derive(Debug, Clone)]
+struct CapturedPlatformEvent {
+    sequence: u64,
+    source: PlatformEvent,
+    foreground: Option<ForegroundSnapshot>,
+    state: Option<ComputerState>,
+}
+
+#[derive(Debug, Clone)]
+struct PreparedPlatformEvent {
+    sequence: u64,
+    source: PlatformEvent,
+    event: UsageEvent,
+}
+
+#[derive(Debug, Clone)]
+enum PendingPlatformEvent {
+    Raw(platform::PlatformEventEnvelope),
+    Captured(CapturedPlatformEvent),
+    Prepared(PreparedPlatformEvent),
+}
+
+impl PendingPlatformEvent {
+    fn sequence(&self) -> u64 {
+        match self {
+            Self::Raw(event) => event.sequence,
+            Self::Captured(event) => event.sequence,
+            Self::Prepared(event) => event.sequence,
+        }
+    }
+
+    fn source(&self) -> PlatformEvent {
+        match self {
+            Self::Raw(event) => event.event,
+            Self::Captured(event) => event.source,
+            Self::Prepared(event) => event.source,
+        }
+    }
+}
+
 #[derive(Debug, Default)]
 struct PendingPlatformEvents {
-    events: Vec<platform::PlatformEventEnvelope>,
+    events: Vec<PendingPlatformEvent>,
     last_applied_sequence: Option<u64>,
-    gap_pending: bool,
+    recovery_barrier: Option<RecoveryBarrier>,
     force_resync: bool,
-    failed_event_pending: bool,
+    retry_target: Option<RetryTarget>,
     retry_at: Option<Instant>,
 }
 
 impl PendingPlatformEvents {
     fn enqueue(&mut self, event: platform::PlatformEventEnvelope) {
         if self.events.len() >= PLATFORM_PENDING_CAPACITY {
-            self.gap_pending = true;
-            self.force_resync = true;
+            self.request_recovery(Some(event.sequence));
             return;
         }
-        self.events.push(event);
+        self.events.push(PendingPlatformEvent::Raw(event));
         self.sort();
     }
 
     fn sort(&mut self) {
-        self.events.sort_unstable_by_key(|event| event.sequence);
+        self.events
+            .sort_unstable_by_key(PendingPlatformEvent::sequence);
     }
 
-    fn mark_gap(&mut self) {
-        self.gap_pending = true;
+    fn request_recovery(&mut self, first_unknown_sequence: Option<u64>) {
+        self.recovery_barrier = Some(match self.recovery_barrier {
+            Some(current) => RecoveryBarrier {
+                first_unknown_sequence: merge_first_unknown(
+                    current.first_unknown_sequence,
+                    first_unknown_sequence,
+                ),
+            },
+            None => RecoveryBarrier {
+                first_unknown_sequence,
+            },
+        });
         self.force_resync = true;
+    }
+
+    fn gap_is_next(&self) -> bool {
+        let Some(barrier) = self.recovery_barrier else {
+            return false;
+        };
+        match barrier.first_unknown_sequence {
+            None => true,
+            Some(first_unknown) => self
+                .events
+                .first()
+                .is_none_or(|event| event.sequence() >= first_unknown),
+        }
+    }
+
+    fn next_event_index(&self) -> Option<usize> {
+        if let Some(RetryTarget::Event(sequence)) = self.retry_target {
+            return self
+                .events
+                .iter()
+                .position(|event| event.sequence() == sequence);
+        }
+        let event = self.events.first()?;
+        match self.recovery_barrier {
+            None => Some(0),
+            Some(RecoveryBarrier {
+                first_unknown_sequence: Some(first_unknown),
+            }) if event.sequence() < first_unknown => Some(0),
+            Some(RecoveryBarrier {
+                first_unknown_sequence: None,
+            })
+            | Some(RecoveryBarrier {
+                first_unknown_sequence: Some(_),
+            }) => None,
+        }
+    }
+
+    #[cfg(test)]
+    fn event_is_next(&self) -> bool {
+        self.next_event_index().is_some()
     }
 
     fn retry_ready(&self) -> bool {
@@ -163,12 +279,20 @@ impl PendingPlatformEvents {
             .unwrap_or_default()
     }
 
+    #[cfg(test)]
     fn mark_event_failure(&mut self) {
-        self.failed_event_pending = true;
+        if let Some(sequence) = self.events.first().map(PendingPlatformEvent::sequence) {
+            self.mark_event_failure_for(sequence);
+        }
+    }
+
+    fn mark_event_failure_for(&mut self, sequence: u64) {
+        self.retry_target = Some(RetryTarget::Event(sequence));
         self.retry_at = Some(Instant::now() + PLATFORM_RETRY_BACKOFF);
     }
 
     fn mark_recovery_failure(&mut self) {
+        self.retry_target = Some(RetryTarget::RecoveryGap);
         self.retry_at = Some(Instant::now() + PLATFORM_RETRY_BACKOFF);
     }
 
@@ -177,32 +301,94 @@ impl PendingPlatformEvents {
             self.last_applied_sequence
                 .map_or(sequence, |last| last.max(sequence)),
         );
-        self.failed_event_pending = false;
+        if self.retry_target == Some(RetryTarget::Event(sequence)) {
+            self.retry_target = None;
+        }
         self.retry_at = None;
     }
 
-    fn clear_retry(&mut self) {
+    fn mark_gap_success(&mut self) {
+        if let Some(barrier) = self.recovery_barrier.take() {
+            if let Some(first_unknown) = barrier.first_unknown_sequence {
+                let cutoff = first_unknown.saturating_sub(1);
+                self.last_applied_sequence = Some(
+                    self.last_applied_sequence
+                        .map_or(cutoff, |last| last.max(cutoff)),
+                );
+            }
+        }
+        self.retry_target = None;
         self.retry_at = None;
     }
 
-    fn has_pending_events(&self) -> bool {
-        !self.events.is_empty()
-    }
-
-    fn is_blocked_by_event_failure(&self) -> bool {
-        self.failed_event_pending
+    fn has_pending_work(&self) -> bool {
+        !self.events.is_empty() || self.recovery_barrier.is_some() || self.retry_target.is_some()
     }
 
     fn is_stale(&self, sequence: u64) -> bool {
         self.last_applied_sequence
             .is_some_and(|last| sequence <= last)
     }
+
+    #[cfg(test)]
+    fn is_blocked_by_event_failure(&self) -> bool {
+        matches!(self.retry_target, Some(RetryTarget::Event(_)))
+    }
+
+    #[cfg(test)]
+    fn mark_gap(&mut self) {
+        self.request_recovery(None);
+    }
+
+    #[cfg(test)]
+    fn gap_pending(&self) -> bool {
+        self.recovery_barrier.is_some()
+    }
+
+    #[cfg(test)]
+    fn clear_retry(&mut self) {
+        self.retry_target = None;
+        self.retry_at = None;
+    }
+}
+
+fn merge_first_unknown(current: Option<u64>, incoming: Option<u64>) -> Option<u64> {
+    match (current, incoming) {
+        (None, _) | (_, None) => None,
+        (Some(current), Some(incoming)) => Some(current.min(incoming)),
+    }
+}
+
+fn shutdown_platform_wait(
+    pending: &PendingPlatformEvents,
+    now: Instant,
+    deadline: Instant,
+) -> Duration {
+    let remaining = deadline.saturating_duration_since(now);
+    if remaining.is_zero() {
+        return Duration::ZERO;
+    }
+    pending
+        .retry_at
+        .map(|retry_at| retry_at.saturating_duration_since(now))
+        .unwrap_or(Duration::from_millis(1))
+        .min(Duration::from_millis(100))
+        .min(remaining)
+}
+
+fn shutdown_platform_ready(
+    pending: &PendingPlatformEvents,
+    now: Instant,
+    deadline: Instant,
+) -> bool {
+    !pending.has_pending_work() || now >= deadline
 }
 
 impl CollectorManager {
     pub fn start(db: Arc<Database>, app: tauri::AppHandle) -> Self {
         let (tx, rx) = bounded(32);
         let (critical_tx, critical_rx) = bounded(64);
+        let (shutdown_tx, shutdown_rx) = bounded(1);
         let status = Arc::new(Mutex::new(CollectorStatus {
             running: true,
             started_at_ms: Some(now_ms()),
@@ -211,8 +397,12 @@ impl CollectorManager {
         }));
         let thread_status = status.clone();
         crate::platform::start_session_observer(tx.clone(), critical_tx);
-        thread::spawn(move || run_collector(db, rx, critical_rx, thread_status, app));
-        Self { tx, status }
+        thread::spawn(move || run_collector(db, rx, critical_rx, shutdown_rx, thread_status, app));
+        Self {
+            tx,
+            shutdown_tx,
+            status,
+        }
     }
 
     pub fn status(&self, db_size: u64) -> CollectorStatus {
@@ -262,9 +452,9 @@ impl CollectorManager {
         let deadline = Instant::now() + SHUTDOWN_TIMEOUT;
         let (tx, rx) = bounded(1);
         let (done_tx, done_rx) = bounded(1);
-        self.tx
+        self.shutdown_tx
             .send_timeout(
-                Control::Shutdown {
+                ShutdownRequest {
                     deadline,
                     reply: tx,
                     done: done_tx,
@@ -286,6 +476,7 @@ fn run_collector(
     db: Arc<Database>,
     rx: Receiver<Control>,
     critical_rx: Receiver<platform::PlatformEventEnvelope>,
+    shutdown_rx: Receiver<ShutdownRequest>,
     status: Arc<Mutex<CollectorStatus>>,
     app: tauri::AppHandle,
 ) {
@@ -309,88 +500,137 @@ fn run_collector(
     let mut shutdown_completion: Option<ShutdownCompletion> = None;
     let mut pending_platform_events = PendingPlatformEvents::default();
     let mut pending_controls = VecDeque::new();
+    let mut pending_shutdown: Option<ShutdownRequest> = None;
+    let mut shutdown_platform_drained = false;
 
     loop {
-        let recovery = platform::take_observer_recovery();
-        if recovery.overflowed {
-            pending_platform_events.mark_gap();
-        }
-        for event in recovery.events {
-            pending_platform_events.enqueue(event);
-        }
-        collect_platform_events(
-            &rx,
-            &critical_rx,
-            &mut pending_platform_events,
-            &mut pending_controls,
-        );
-        if platform::take_observer_dirty() {
-            pending_platform_events.force_resync = true;
+        if pending_shutdown.is_none() {
+            if let Ok(request) = shutdown_rx.try_recv() {
+                pending_shutdown = Some(request);
+                shutdown_platform_drained = false;
+            }
         }
 
-        // An overflow means that one or more critical transitions may be missing. Establish an
-        // explicit unknown boundary before applying any later recovery event, otherwise a
-        // delivered Resume/Connect could bridge the lost Sleep/Disconnected interval.
-        if pending_platform_events.gap_pending
-            && !pending_platform_events.is_blocked_by_event_failure()
-            && pending_platform_events.retry_ready()
-        {
-            let result = apply_usage_event(
-                &db,
-                &mut engine,
-                &mut persistence,
-                &mut rollup_scheduler,
-                UsageEvent::ObserverGap { at_ms: now_ms() },
-                None,
-            );
-            record_usage_result(&status, &result);
-            if let Err(error) = result {
-                eprintln!("collector observer recovery failed: {error}");
-                pending_platform_events.mark_recovery_failure();
-                continue;
+        if pending_shutdown.is_none() || !shutdown_platform_drained {
+            let recovery = platform::take_observer_recovery();
+            if recovery.overflowed || recovery.overflow_after_sequence.is_some() {
+                pending_platform_events.request_recovery(recovery.overflow_after_sequence);
+            } else if recovery.dirty {
+                pending_platform_events.force_resync = true;
             }
-            pending_platform_events.gap_pending = false;
-            pending_platform_events.clear_retry();
+            for event in recovery.events {
+                pending_platform_events.enqueue(event);
+            }
+            collect_platform_events(
+                &rx,
+                &critical_rx,
+                &mut pending_platform_events,
+                &mut pending_controls,
+            );
+            if pending_shutdown.is_some() {
+                shutdown_platform_drained = true;
+            }
         }
 
-        while pending_platform_events.has_pending_events()
-            && !pending_platform_events.gap_pending
-            && pending_platform_events.retry_ready()
-        {
-            let event = pending_platform_events.events[0];
-            if pending_platform_events.is_stale(event.sequence) {
-                pending_platform_events.events.remove(0);
-                pending_platform_events.mark_gap();
-                continue;
-            }
-            let result = handle_platform_event(
-                &db,
-                &mut engine,
-                &mut persistence,
-                &mut rollup_scheduler,
-                &mut tracked_app_keys,
-                &settings,
-                event.event,
-                None,
-            );
-            record_usage_result(&status, &result);
-            if let Err(error) = result {
-                eprintln!("collector critical platform event failed: {error}");
-                pending_platform_events.mark_event_failure();
-                break;
-            }
-            pending_platform_events.events.remove(0);
-            pending_platform_events.mark_success(event.sequence);
-            if matches!(event.event, PlatformEvent::ForegroundWindow { .. }) {
-                if let Ok(mut value) = status.lock() {
-                    value.last_foreground_sample_at_ms = Some(now_ms());
+        let platform_deadline = pending_shutdown.as_ref().map(|request| request.deadline);
+        while pending_platform_events.retry_ready() {
+            if let Some(event_index) = pending_platform_events.next_event_index() {
+                let item = pending_platform_events.events[event_index].clone();
+                let sequence = item.sequence();
+                if pending_platform_events.is_stale(sequence) {
+                    pending_platform_events.events.remove(event_index);
+                    pending_platform_events.force_resync = true;
+                    continue;
                 }
+
+                let captured = capture_pending_platform_event(&item, &settings);
+                if !matches!(captured, PendingPlatformEvent::Prepared(_)) {
+                    pending_platform_events.events[event_index] = captured;
+                }
+                let captured = pending_platform_events.events[event_index].clone();
+                let prepared = match prepare_pending_platform_event(
+                    &db,
+                    &mut tracked_app_keys,
+                    &captured,
+                    platform_deadline,
+                ) {
+                    Ok(prepared) => {
+                        pending_platform_events.events[event_index] =
+                            PendingPlatformEvent::Prepared(prepared.clone());
+                        prepared
+                    }
+                    Err(error) => {
+                        let result: Result<UsageApplyResult, String> = Err(error);
+                        record_usage_result(&status, &result);
+                        pending_platform_events.mark_event_failure_for(sequence);
+                        break;
+                    }
+                };
+                let result = apply_usage_event(
+                    &db,
+                    &mut engine,
+                    &mut persistence,
+                    &mut rollup_scheduler,
+                    prepared.event.clone(),
+                    platform_deadline,
+                );
+                record_usage_result(&status, &result);
+                if let Err(error) = result {
+                    eprintln!("collector platform event failed: {error}");
+                    pending_platform_events.mark_event_failure_for(sequence);
+                    break;
+                }
+                let source = pending_platform_events.events[event_index].source();
+                pending_platform_events.events.remove(event_index);
+                pending_platform_events.mark_success(sequence);
+                if matches!(source, PlatformEvent::ForegroundWindow { .. }) {
+                    if let Ok(mut value) = status.lock() {
+                        value.last_foreground_sample_at_ms = Some(now_ms());
+                    }
+                }
+                continue;
             }
+
+            if pending_platform_events.gap_is_next() {
+                let result = apply_usage_event(
+                    &db,
+                    &mut engine,
+                    &mut persistence,
+                    &mut rollup_scheduler,
+                    UsageEvent::ObserverGap { at_ms: now_ms() },
+                    platform_deadline,
+                );
+                record_usage_result(&status, &result);
+                if let Err(error) = result {
+                    eprintln!("collector observer recovery failed: {error}");
+                    pending_platform_events.mark_recovery_failure();
+                    break;
+                }
+                pending_platform_events.mark_gap_success();
+                continue;
+            }
+            break;
         }
 
-        let next_control = if pending_platform_events.is_blocked_by_event_failure()
-            || pending_platform_events.gap_pending
-            || pending_platform_events.has_pending_events()
+        let next_control = if let Some(request) = pending_shutdown.as_ref() {
+            let now = Instant::now();
+            if shutdown_platform_ready(&pending_platform_events, now, request.deadline) {
+                let request = pending_shutdown
+                    .take()
+                    .expect("shutdown request disappeared before execution");
+                Some(Control::Shutdown {
+                    deadline: request.deadline,
+                    reply: request.reply,
+                    done: request.done,
+                })
+            } else {
+                let wait = shutdown_platform_wait(&pending_platform_events, now, request.deadline);
+                if !wait.is_zero() {
+                    thread::sleep(wait);
+                }
+                None
+            }
+        } else if pending_platform_events.has_pending_work()
             || !pending_platform_events.retry_ready()
         {
             let wait = pending_platform_events
@@ -425,9 +665,7 @@ fn run_collector(
                     &mut pending_platform_events,
                     &mut pending_controls,
                 );
-                if pending_platform_events.gap_pending
-                    || pending_platform_events.has_pending_events()
-                {
+                if pending_platform_events.has_pending_work() {
                     pending_controls.push_front(control);
                     None
                 } else {
@@ -527,14 +765,20 @@ fn run_collector(
                 done,
             }) => {
                 let shutdown_at = now_ms();
-                let action_result = apply_usage_event(
-                    &db,
-                    &mut engine,
-                    &mut persistence,
-                    &mut rollup_scheduler,
-                    UsageEvent::Shutdown { at_ms: shutdown_at },
-                    Some(deadline),
-                );
+                let action_result = if pending_platform_events.has_pending_work() {
+                    Err("shutdown deadline expired with uncommitted platform state".to_string())
+                } else if Instant::now() >= deadline {
+                    Err("shutdown deadline expired before usage boundary".to_string())
+                } else {
+                    apply_usage_event(
+                        &db,
+                        &mut engine,
+                        &mut persistence,
+                        &mut rollup_scheduler,
+                        UsageEvent::Shutdown { at_ms: shutdown_at },
+                        Some(deadline),
+                    )
+                };
                 record_usage_result(&status, &action_result);
                 let rollup_result =
                     run_daily_rollup(&db, &mut rollup_scheduler, Some(deadline), true)
@@ -579,12 +823,17 @@ fn run_collector(
             None => {}
         }
 
+        if pending_shutdown.is_some() {
+            if let Ok(mut value) = status.lock() {
+                value.last_heartbeat_at_ms = Some(now_ms());
+            }
+            continue;
+        }
+
         let now = now_ms();
         let paused = status.lock().map(|value| value.paused).unwrap_or(false);
         if !paused
-            && !pending_platform_events.is_blocked_by_event_failure()
-            && !pending_platform_events.gap_pending
-            && !pending_platform_events.has_pending_events()
+            && !pending_platform_events.has_pending_work()
             && pending_platform_events.retry_ready()
         {
             if pending_platform_events.force_resync
@@ -641,6 +890,7 @@ fn run_collector(
                         value.last_foreground_sample_at_ms = Some(now);
                     }
                 } else {
+                    pending_platform_events.request_recovery(None);
                     pending_platform_events.mark_recovery_failure();
                 }
             }
@@ -694,20 +944,32 @@ fn collect_platform_events(
     pending_platform_events: &mut PendingPlatformEvents,
     pending_controls: &mut VecDeque<Control>,
 ) {
-    while pending_platform_events.events.len() < PLATFORM_PENDING_CAPACITY {
-        match critical_rx.try_recv() {
-            Ok(event) => pending_platform_events.enqueue(event),
-            Err(TryRecvError::Empty | TryRecvError::Disconnected) => break,
+    for _ in 0..PLATFORM_PENDING_CAPACITY {
+        if pending_platform_events.events.len() >= PLATFORM_PENDING_CAPACITY {
+            break;
         }
-    }
-
-    while pending_platform_events.events.len() < PLATFORM_PENDING_CAPACITY
-        && pending_controls.len() < CONTROL_PENDING_CAPACITY
-    {
-        match rx.try_recv() {
-            Ok(Control::Platform(event)) => pending_platform_events.enqueue(event),
-            Ok(control) => pending_controls.push_back(control),
-            Err(TryRecvError::Empty | TryRecvError::Disconnected) => break,
+        let mut progressed = false;
+        if let Ok(event) = critical_rx.try_recv() {
+            pending_platform_events.enqueue(event);
+            progressed = true;
+        }
+        if pending_platform_events.events.len() < PLATFORM_PENDING_CAPACITY
+            && pending_controls.len() < CONTROL_PENDING_CAPACITY
+        {
+            match rx.try_recv() {
+                Ok(Control::Platform(event)) => {
+                    pending_platform_events.enqueue(event);
+                    progressed = true;
+                }
+                Ok(control) => {
+                    pending_controls.push_back(control);
+                    progressed = true;
+                }
+                Err(TryRecvError::Empty | TryRecvError::Disconnected) => {}
+            }
+        }
+        if !progressed {
+            break;
         }
     }
     pending_platform_events.sort();
@@ -720,115 +982,114 @@ fn control_requires_platform_barrier(control: &Control) -> bool {
     )
 }
 
-#[allow(clippy::too_many_arguments)]
-fn handle_platform_event(
-    db: &Database,
-    engine: &mut IntervalEngine,
-    persistence: &mut writer::UsagePersistenceState,
-    rollup_scheduler: &mut DailyRollupScheduler,
-    tracked_app_keys: &mut HashSet<String>,
+fn capture_pending_platform_event(
+    pending: &PendingPlatformEvent,
     settings: &CollectionSettings,
-    event: PlatformEvent,
+) -> PendingPlatformEvent {
+    let PendingPlatformEvent::Raw(envelope) = pending else {
+        return pending.clone();
+    };
+    let (foreground, state) = match envelope.event {
+        PlatformEvent::ForegroundWindow { hwnd, .. } => {
+            (Some(capture_foreground_window(hwnd)), None)
+        }
+        PlatformEvent::Unlocked { .. }
+        | PlatformEvent::Resumed { .. }
+        | PlatformEvent::Connected { .. } => (
+            Some(capture_current_foreground()),
+            Some(observed_computer_state(settings)),
+        ),
+        _ => (None, None),
+    };
+    PendingPlatformEvent::Captured(CapturedPlatformEvent {
+        sequence: envelope.sequence,
+        source: envelope.event,
+        foreground,
+        state,
+    })
+}
+
+fn capture_foreground_window(hwnd: isize) -> ForegroundSnapshot {
+    platform::resolve_foreground_window(hwnd)
+        .map(ForegroundSnapshot::App)
+        .unwrap_or(ForegroundSnapshot::Unresolved)
+}
+
+fn capture_current_foreground() -> ForegroundSnapshot {
+    let Some(hwnd) = platform::current_foreground_window() else {
+        return ForegroundSnapshot::NoWindow;
+    };
+    capture_foreground_window(hwnd)
+}
+
+fn prepare_pending_platform_event(
+    db: &Database,
+    tracked_app_keys: &mut HashSet<String>,
+    pending: &PendingPlatformEvent,
     deadline: Option<Instant>,
-) -> Result<UsageApplyResult, String> {
+) -> Result<PreparedPlatformEvent, String> {
+    let PendingPlatformEvent::Captured(captured) = pending else {
+        let PendingPlatformEvent::Prepared(prepared) = pending else {
+            return Err("platform event was not captured before preparation".to_string());
+        };
+        return Ok(prepared.clone());
+    };
+    let foreground_app_executable_id = match captured.foreground.as_ref() {
+        Some(ForegroundSnapshot::App(app)) => Some(resolve_app_with_deadline(
+            db,
+            tracked_app_keys,
+            app,
+            event_timestamp_ms(captured.source),
+            deadline,
+        )?),
+        Some(ForegroundSnapshot::NoWindow | ForegroundSnapshot::Unresolved) | None => None,
+    };
+    let at_ms = event_timestamp_ms(captured.source);
+    let event = match captured.source {
+        PlatformEvent::ForegroundWindow { .. } => match foreground_app_executable_id {
+            Some(app_executable_id) => UsageEvent::Foreground {
+                app_executable_id,
+                at_ms,
+            },
+            None => UsageEvent::ForegroundUnavailable { at_ms },
+        },
+        PlatformEvent::Locked { .. } => UsageEvent::Locked { at_ms },
+        PlatformEvent::Unlocked { .. } => UsageEvent::Unlocked {
+            at_ms,
+            state: captured.state.unwrap_or(ComputerState::Unknown),
+            foreground_app_executable_id,
+        },
+        PlatformEvent::Suspended { .. } => UsageEvent::Suspend { at_ms },
+        PlatformEvent::Resumed { .. } => UsageEvent::Resume {
+            at_ms,
+            state: captured.state.unwrap_or(ComputerState::Unknown),
+            foreground_app_executable_id,
+        },
+        PlatformEvent::Disconnected { .. } => UsageEvent::Disconnected { at_ms },
+        PlatformEvent::Connected { .. } => UsageEvent::Connected {
+            at_ms,
+            state: captured.state.unwrap_or(ComputerState::Unknown),
+            foreground_app_executable_id,
+        },
+        PlatformEvent::WindowsShutdown { .. } => UsageEvent::WindowsShutdown { at_ms },
+    };
+    Ok(PreparedPlatformEvent {
+        sequence: captured.sequence,
+        source: captured.source,
+        event,
+    })
+}
+
+fn event_timestamp_ms(event: PlatformEvent) -> i64 {
     match event {
-        PlatformEvent::ForegroundWindow { hwnd, at_ms } => {
-            let usage_event = match platform::resolve_foreground_window(hwnd) {
-                Some(app) => UsageEvent::Foreground {
-                    app_executable_id: resolve_app(db, tracked_app_keys, &app, at_ms)?,
-                    at_ms,
-                },
-                None => UsageEvent::ForegroundUnavailable { at_ms },
-            };
-            apply_usage_event_with_state(
-                db,
-                engine,
-                persistence,
-                rollup_scheduler,
-                usage_event,
-                deadline,
-            )
-        }
-        PlatformEvent::Locked { at_ms } => apply_usage_event_with_state(
-            db,
-            engine,
-            persistence,
-            rollup_scheduler,
-            UsageEvent::Locked { at_ms },
-            deadline,
-        ),
-        PlatformEvent::Unlocked { at_ms } => {
-            let foreground_app_executable_id =
-                resolve_current_foreground(db, tracked_app_keys, at_ms)?;
-            apply_usage_event_with_state(
-                db,
-                engine,
-                persistence,
-                rollup_scheduler,
-                UsageEvent::Unlocked {
-                    at_ms,
-                    state: observed_computer_state(settings),
-                    foreground_app_executable_id,
-                },
-                deadline,
-            )
-        }
-        PlatformEvent::Suspended { at_ms } => apply_usage_event_with_state(
-            db,
-            engine,
-            persistence,
-            rollup_scheduler,
-            UsageEvent::Suspend { at_ms },
-            deadline,
-        ),
-        PlatformEvent::Resumed { at_ms } => {
-            let foreground_app_executable_id =
-                resolve_current_foreground(db, tracked_app_keys, at_ms)?;
-            apply_usage_event_with_state(
-                db,
-                engine,
-                persistence,
-                rollup_scheduler,
-                UsageEvent::Resume {
-                    at_ms,
-                    state: observed_computer_state(settings),
-                    foreground_app_executable_id,
-                },
-                deadline,
-            )
-        }
-        PlatformEvent::Disconnected { at_ms } => apply_usage_event_with_state(
-            db,
-            engine,
-            persistence,
-            rollup_scheduler,
-            UsageEvent::Disconnected { at_ms },
-            deadline,
-        ),
-        PlatformEvent::Connected { at_ms } => {
-            let foreground_app_executable_id =
-                resolve_current_foreground(db, tracked_app_keys, at_ms)?;
-            apply_usage_event_with_state(
-                db,
-                engine,
-                persistence,
-                rollup_scheduler,
-                UsageEvent::Connected {
-                    at_ms,
-                    state: observed_computer_state(settings),
-                    foreground_app_executable_id,
-                },
-                deadline,
-            )
-        }
-        PlatformEvent::WindowsShutdown { at_ms } => apply_usage_event_with_state(
-            db,
-            engine,
-            persistence,
-            rollup_scheduler,
-            UsageEvent::WindowsShutdown { at_ms },
-            deadline,
-        ),
+        PlatformEvent::ForegroundWindow { at_ms, .. }
+        | PlatformEvent::Locked { at_ms }
+        | PlatformEvent::Unlocked { at_ms }
+        | PlatformEvent::Suspended { at_ms }
+        | PlatformEvent::Resumed { at_ms }
+        | PlatformEvent::Disconnected { at_ms }
+        | PlatformEvent::Connected { at_ms }
+        | PlatformEvent::WindowsShutdown { at_ms } => at_ms,
     }
 }
 
@@ -957,13 +1218,25 @@ fn resolve_app(
     app: &ForegroundApp,
     now: i64,
 ) -> Result<i64, String> {
+    resolve_app_with_deadline(db, tracked_app_keys, app, now, None)
+}
+
+fn resolve_app_with_deadline(
+    db: &Database,
+    tracked_app_keys: &mut HashSet<String>,
+    app: &ForegroundApp,
+    now: i64,
+    deadline: Option<Instant>,
+) -> Result<i64, String> {
     tracked_app_keys.insert(app.identity_key.clone());
     if let Some(path) = app.exe_path.as_deref() {
         tracked_app_keys.insert(format!("path:{}", normalize_path(path)));
     }
-    db.with_writer(|conn| writer::resolve_foreground_app(conn, app, now))
-        .map(|resolution| resolution.app_executable_id)
-        .map_err(|error| error.to_string())
+    with_writer_deadline(db, deadline, |conn| {
+        writer::resolve_foreground_app(conn, app, now)
+    })
+    .map(|resolution| resolution.app_executable_id)
+    .map_err(|error| error.to_string())
 }
 
 fn resolve_current_foreground(
@@ -1097,6 +1370,7 @@ mod tests {
         engine: IntervalEngine,
         persistence: writer::UsagePersistenceState,
         rollup_scheduler: DailyRollupScheduler,
+        app: ForegroundApp,
         executable_id: i64,
     }
 
@@ -1133,6 +1407,7 @@ mod tests {
                 engine: IntervalEngine::default(),
                 persistence: writer::UsagePersistenceState::default(),
                 rollup_scheduler: DailyRollupScheduler::default(),
+                app,
                 executable_id,
             };
             harness
@@ -1228,7 +1503,10 @@ mod tests {
         event: PlatformEventEnvelope,
         apply: impl FnOnce() -> Result<(), String>,
     ) {
-        assert_eq!(pending.events.first().copied(), Some(event));
+        assert_eq!(
+            pending.events.first().map(PendingPlatformEvent::sequence),
+            Some(event.sequence)
+        );
         if apply().is_ok() {
             pending.events.remove(0);
             pending.mark_success(event.sequence);
@@ -1265,7 +1543,10 @@ mod tests {
         );
         assert!(first.is_err());
         pending.mark_event_failure();
-        assert_eq!(pending.events.first().copied(), Some(event));
+        assert_eq!(
+            pending.events.first().map(PendingPlatformEvent::sequence),
+            Some(event.sequence)
+        );
         assert!(pending.is_blocked_by_event_failure());
         drop(blocker);
 
@@ -1318,8 +1599,8 @@ mod tests {
         );
         assert!(first.is_err());
         pending.mark_event_failure();
-        assert_eq!(pending.events[0].sequence, 20);
-        assert_eq!(pending.events[1].sequence, 21);
+        assert_eq!(pending.events[0].sequence(), 20);
+        assert_eq!(pending.events[1].sequence(), 21);
         drop(blocker);
 
         process_event_after_failure(&mut pending, suspend, || {
@@ -1420,16 +1701,16 @@ mod tests {
         );
         assert!(first.is_err());
         pending.mark_recovery_failure();
-        assert!(pending.gap_pending);
+        assert!(pending.gap_pending());
         assert!(!pending.is_blocked_by_event_failure());
         drop(blocker);
 
         assert!(harness
             .apply(UsageEvent::ObserverGap { at_ms: 2_000 })
             .is_ok());
-        pending.gap_pending = false;
+        pending.mark_gap_success();
         pending.clear_retry();
-        assert!(!pending.gap_pending);
+        assert!(!pending.gap_pending());
         assert!(harness
             .apply(UsageEvent::Resume {
                 at_ms: 3_000,
@@ -1467,7 +1748,7 @@ mod tests {
             pending.enqueue(foreground(sequence, sequence as i64));
         }
         assert_eq!(pending.events.len(), PLATFORM_PENDING_CAPACITY);
-        assert!(pending.gap_pending);
+        assert!(pending.gap_pending());
         assert!(pending.force_resync);
 
         let before = Instant::now();
@@ -1502,7 +1783,7 @@ mod tests {
             pending
                 .events
                 .iter()
-                .map(|event| event.sequence)
+                .map(PendingPlatformEvent::sequence)
                 .collect::<Vec<_>>(),
             vec![10, 11, 12, 13]
         );
@@ -1523,6 +1804,7 @@ mod tests {
         let recovery = platform::ObserverRecovery {
             events: vec![envelope(11, PlatformEvent::Suspended { at_ms: 110 })],
             overflowed: false,
+            ..Default::default()
         };
         for event in recovery.events {
             pending.enqueue(event);
@@ -1532,7 +1814,7 @@ mod tests {
             pending
                 .events
                 .iter()
-                .map(|event| event.sequence)
+                .map(PendingPlatformEvent::sequence)
                 .collect::<Vec<_>>(),
             vec![11, 12, 13]
         );
@@ -1542,14 +1824,14 @@ mod tests {
     fn stale_foreground_event_cannot_rewrite_truth_after_unlock() {
         let mut pending = PendingPlatformEvents::default();
         pending.enqueue(envelope(12, PlatformEvent::Unlocked { at_ms: 120 }));
-        let unlock = pending.events[0];
+        let unlock = pending.events[0].clone();
         pending.events.remove(0);
-        pending.mark_success(unlock.sequence);
+        pending.mark_success(unlock.sequence());
         pending.enqueue(foreground(10, 100));
-        assert!(pending.is_stale(pending.events[0].sequence));
+        assert!(pending.is_stale(pending.events[0].sequence()));
         pending.events.remove(0);
         pending.mark_gap();
-        assert!(pending.gap_pending);
+        assert!(pending.gap_pending());
     }
 
     #[test]
@@ -1561,9 +1843,20 @@ mod tests {
         pending.mark_event_failure();
         pending.enqueue(later);
         assert!(pending.is_blocked_by_event_failure());
-        assert_eq!(pending.events[0].sequence, 11);
-        assert_eq!(pending.events[1].sequence, 13);
+        assert_eq!(pending.events[0].sequence(), 11);
+        assert_eq!(pending.events[1].sequence(), 13);
         assert!(!pending.retry_ready());
+    }
+
+    #[test]
+    fn late_lower_sequence_cannot_overtake_failed_event() {
+        let mut pending = PendingPlatformEvents::default();
+        pending.enqueue(envelope(11, PlatformEvent::Locked { at_ms: 110 }));
+        pending.mark_event_failure();
+        pending.enqueue(foreground(9, 90));
+        assert_eq!(pending.events[0].sequence(), 9);
+        assert_eq!(pending.next_event_index(), Some(1));
+        assert!(pending.event_is_next());
     }
 
     #[test]
@@ -1576,9 +1869,235 @@ mod tests {
             pending
                 .events
                 .iter()
-                .map(|event| event.sequence)
+                .map(PendingPlatformEvent::sequence)
                 .collect::<Vec<_>>(),
             vec![18, 19, 20]
         );
+    }
+
+    #[test]
+    fn failed_head_and_recovery_barrier_make_progress_in_order() {
+        let mut pending = PendingPlatformEvents::default();
+        pending.enqueue(envelope(10, PlatformEvent::Locked { at_ms: 10 }));
+        pending.enqueue(envelope(20, PlatformEvent::Resumed { at_ms: 20 }));
+        pending.request_recovery(Some(20));
+        pending.mark_event_failure();
+        pending.retry_at = Some(Instant::now());
+
+        assert!(pending.event_is_next());
+        assert!(!pending.gap_is_next());
+        pending.events.remove(0);
+        pending.mark_success(10);
+
+        assert!(pending.gap_is_next());
+        pending.mark_gap_success();
+        assert!(pending.event_is_next());
+    }
+
+    #[test]
+    fn failed_head_backoff_does_not_busy_loop_or_deadlock_gap() {
+        let mut pending = PendingPlatformEvents::default();
+        pending.enqueue(envelope(10, PlatformEvent::Suspended { at_ms: 10 }));
+        pending.enqueue(envelope(20, PlatformEvent::Resumed { at_ms: 20 }));
+        pending.request_recovery(Some(20));
+        let before = Instant::now();
+        pending.mark_event_failure();
+
+        assert!(!pending.retry_ready_at(before));
+        assert!(pending.event_is_next());
+        assert!(!pending.gap_is_next());
+
+        pending.retry_at = Some(Instant::now());
+        pending.mark_event_failure();
+        assert!(!pending.retry_ready_at(Instant::now()));
+        assert!(pending.event_is_next());
+        assert!(pending.gap_pending());
+    }
+
+    #[test]
+    fn failed_recovery_gap_blocks_later_resume_until_gap_commits() {
+        let mut pending = PendingPlatformEvents::default();
+        pending.enqueue(envelope(20, PlatformEvent::Resumed { at_ms: 20 }));
+        pending.request_recovery(Some(20));
+        pending.mark_recovery_failure();
+        pending.retry_at = Some(Instant::now());
+
+        assert!(pending.gap_is_next());
+        assert!(!pending.event_is_next());
+        pending.mark_gap_success();
+        assert!(pending.event_is_next());
+    }
+
+    #[test]
+    fn recovery_requests_are_coalesced_and_bounded() {
+        let mut pending = PendingPlatformEvents::default();
+        for sequence in 10..10_000 {
+            pending.request_recovery(Some(sequence));
+        }
+        assert_eq!(
+            pending.recovery_barrier,
+            Some(RecoveryBarrier {
+                first_unknown_sequence: Some(10),
+            })
+        );
+        pending.request_recovery(None);
+        assert_eq!(
+            pending.recovery_barrier,
+            Some(RecoveryBarrier {
+                first_unknown_sequence: None,
+            })
+        );
+        assert!(pending.events.is_empty());
+    }
+
+    #[test]
+    fn platform_collection_does_not_starve_either_lane() {
+        let (normal_tx, normal_rx) = bounded(16);
+        let (critical_tx, critical_rx) = bounded(16);
+        for sequence in 1..=8 {
+            normal_tx
+                .send(Control::Platform(foreground(sequence, sequence as i64)))
+                .unwrap();
+            critical_tx
+                .send(envelope(
+                    100 + sequence,
+                    PlatformEvent::Locked {
+                        at_ms: sequence as i64,
+                    },
+                ))
+                .unwrap();
+        }
+
+        let mut pending = PendingPlatformEvents::default();
+        collect_platform_events(&normal_rx, &critical_rx, &mut pending, &mut VecDeque::new());
+        assert!(pending
+            .events
+            .iter()
+            .any(|event| { matches!(event.source(), PlatformEvent::ForegroundWindow { .. }) }));
+        assert!(pending
+            .events
+            .iter()
+            .any(|event| matches!(event.source(), PlatformEvent::Locked { .. })));
+    }
+
+    #[test]
+    fn shutdown_wait_is_capped_by_global_deadline() {
+        let mut pending = PendingPlatformEvents::default();
+        pending.enqueue(envelope(10, PlatformEvent::Locked { at_ms: 10 }));
+        let now = Instant::now();
+        let deadline = now + Duration::from_millis(40);
+        pending.retry_at = Some(deadline + Duration::from_secs(10));
+        let wait = shutdown_platform_wait(&pending, now, deadline);
+        assert!(wait <= Duration::from_millis(40));
+        assert!(shutdown_platform_ready(&pending, deadline, deadline));
+    }
+
+    #[test]
+    fn shutdown_can_continue_after_platform_head_recovers_before_deadline() {
+        let mut pending = PendingPlatformEvents::default();
+        pending.enqueue(envelope(10, PlatformEvent::Locked { at_ms: 10 }));
+        pending.mark_event_failure();
+        pending.retry_at = Some(Instant::now());
+        let now = Instant::now();
+        let deadline = now + Duration::from_secs(1);
+        assert!(!shutdown_platform_ready(&pending, now, deadline));
+        pending.events.remove(0);
+        pending.mark_success(10);
+        assert!(shutdown_platform_ready(&pending, Instant::now(), deadline));
+    }
+
+    #[test]
+    fn shutdown_with_failed_gap_exits_at_deadline_without_infinite_retry() {
+        let mut pending = PendingPlatformEvents::default();
+        pending.request_recovery(None);
+        pending.mark_recovery_failure();
+        let now = Instant::now();
+        let deadline = now + Duration::from_millis(5);
+        assert!(!shutdown_platform_ready(&pending, now, deadline));
+        assert!(shutdown_platform_ready(&pending, deadline, deadline));
+        assert!(shutdown_platform_wait(&pending, deadline, deadline).is_zero());
+    }
+
+    fn captured_event(
+        sequence: u64,
+        source: PlatformEvent,
+        app: ForegroundApp,
+        state: ComputerState,
+    ) -> PendingPlatformEvent {
+        PendingPlatformEvent::Captured(CapturedPlatformEvent {
+            sequence,
+            source,
+            foreground: Some(ForegroundSnapshot::App(app)),
+            state: Some(state),
+        })
+    }
+
+    #[test]
+    fn prepared_recovery_events_replay_the_original_snapshot_after_db_failure() {
+        for (name, source) in [
+            ("unlock-replay", PlatformEvent::Unlocked { at_ms: 20_000 }),
+            ("resume-replay", PlatformEvent::Resumed { at_ms: 20_000 }),
+            ("connect-replay", PlatformEvent::Connected { at_ms: 20_000 }),
+            (
+                "foreground-replay",
+                PlatformEvent::ForegroundWindow {
+                    hwnd: 123,
+                    at_ms: 20_000,
+                },
+            ),
+        ] {
+            let mut harness = UsageHarness::new(name);
+            let captured = captured_event(10, source, harness.app.clone(), ComputerState::Active);
+            let prepared =
+                prepare_pending_platform_event(&harness.db, &mut HashSet::new(), &captured, None)
+                    .unwrap();
+            let expected = prepared.event.clone();
+            let replayable = PendingPlatformEvent::Prepared(prepared.clone());
+
+            let blocker = harness.lock_database();
+            assert!(harness
+                .apply_until(
+                    expected.clone(),
+                    Instant::now() + Duration::from_millis(100)
+                )
+                .is_err());
+            drop(blocker);
+            assert!(harness.apply(expected.clone()).is_ok());
+
+            let replay =
+                prepare_pending_platform_event(&harness.db, &mut HashSet::new(), &replayable, None)
+                    .unwrap();
+            assert_eq!(replay.event, expected);
+            harness.finish();
+        }
+    }
+
+    #[test]
+    fn failed_identity_prepare_retries_the_captured_snapshot_without_resampling() {
+        let harness = UsageHarness::new("identity-snapshot-retry");
+        let captured = captured_event(
+            10,
+            PlatformEvent::ForegroundWindow {
+                hwnd: 123,
+                at_ms: 20_000,
+            },
+            harness.app.clone(),
+            ComputerState::Active,
+        );
+        let blocker = harness.lock_database();
+        assert!(prepare_pending_platform_event(
+            &harness.db,
+            &mut HashSet::new(),
+            &captured,
+            Some(Instant::now() + Duration::from_millis(100)),
+        )
+        .is_err());
+        drop(blocker);
+
+        let prepared =
+            prepare_pending_platform_event(&harness.db, &mut HashSet::new(), &captured, None)
+                .unwrap();
+        assert!(matches!(prepared.event, UsageEvent::Foreground { .. }));
+        harness.finish();
     }
 }

@@ -27,6 +27,10 @@ critical session/power 事件使用独立的有界通道和非阻塞 fallback。
 
 所有 platform event 在进入 collector 时带有同一 process-wide sequence，normal、critical 和 fallback lane 会按该序列合并。一个 event 或 recovery gap 的 SQLite 写入失败时会保留 pending 和有界退避，后续更大 sequence 的事件不能越过未提交的边界。
 
+collector 将 platform pending 状态分为 raw event、captured snapshot、prepared/replayable event、失败队首和 recovery barrier。背压丢失会记录第一个可能缺失的 sequence；多个 overflow 合并为一个有界 barrier，已失败的队首先重试，barrier 成功后才允许更大的 sequence 继续。critical fallback 成功接收的事件不会被误报为丢失，真正无法证明的区间才写入 `unknown` gap。
+
+`Unlocked`、`Resumed`、`Connected` 和前台 HWND 在第一次准备时捕获必要的状态/应用身份。SQLite 失败后的 retry 只重放 immutable prepared payload，不重新采样当前窗口或电脑状态，因此不会把未来的 App/state 写回原始事件时间；身份解析本身失败时保留已捕获快照并重试数据库解析。Resource Timeline shutdown 使用独立的有界请求 lane，并把平台 drain、identity write、usage transaction、rollup、frame flush 和 collection-session close 约束在同一个绝对 deadline 内。
+
 ## 区间状态机
 
 foreground 与 computer state 是两个独立时间轴。可信的前台切换、无前台、暂停、锁定、休眠、断开、退出和 clock/gap recovery 会封口 foreground；active↔idle 只切换 computer state，不拆分 foreground。重复事件去抖；短暂无法解析的窗口进入明确的 unknown/gap，不会归入上一应用。

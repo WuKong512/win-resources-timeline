@@ -11,6 +11,10 @@ static NEXT_PLATFORM_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 pub struct ObserverRecovery {
     pub events: Vec<PlatformEventEnvelope>,
     pub overflowed: bool,
+    /// True when an observer send was rejected, including a recovered critical send.
+    pub dirty: bool,
+    /// The earliest sequence that may have been dropped, if the source could observe it.
+    pub overflow_after_sequence: Option<u64>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -102,17 +106,6 @@ pub fn start_session_observer(tx: Sender<Control>, critical_tx: Sender<PlatformE
 
 pub(crate) fn stamp_platform_event(event: PlatformEvent) -> PlatformEventEnvelope {
     PlatformEventEnvelope::new(event)
-}
-
-pub fn take_observer_dirty() -> bool {
-    #[cfg(windows)]
-    {
-        windows::session::take_dirty()
-    }
-    #[cfg(not(windows))]
-    {
-        false
-    }
 }
 
 pub fn take_observer_recovery() -> ObserverRecovery {

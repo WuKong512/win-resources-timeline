@@ -2,10 +2,10 @@ use crate::{
     collector::manager::Control,
     platform::{now_ms, stamp_platform_event, PlatformEvent, PlatformEventEnvelope},
 };
-use crossbeam_channel::Sender;
+use crossbeam_channel::{Sender, TrySendError};
 use std::collections::VecDeque;
 use std::sync::{
-    atomic::{AtomicBool, Ordering},
+    atomic::{AtomicBool, AtomicU64, Ordering},
     Mutex, OnceLock,
 };
 use windows::{
@@ -34,7 +34,9 @@ static CONTROL: OnceLock<Sender<Control>> = OnceLock::new();
 static CRITICAL_CONTROL: OnceLock<Sender<PlatformEventEnvelope>> = OnceLock::new();
 static CRITICAL_FALLBACK: OnceLock<Mutex<VecDeque<PlatformEventEnvelope>>> = OnceLock::new();
 static OBSERVER_DIRTY: AtomicBool = AtomicBool::new(false);
+static OBSERVER_DIRTY_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 static CRITICAL_OVERFLOW: AtomicBool = AtomicBool::new(false);
+static CRITICAL_OVERFLOW_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 pub const OPEN_WINDOW_MESSAGE: u32 = WM_APP + 42;
 const CRITICAL_FALLBACK_CAPACITY: usize = 32;
 
@@ -140,8 +142,15 @@ unsafe extern "system" fn window_proc(
 
 pub(crate) fn send(event: Control) {
     if let Some(tx) = CONTROL.get() {
-        if tx.try_send(event).is_err() {
-            OBSERVER_DIRTY.store(true, Ordering::Release);
+        let sequence = match &event {
+            Control::Platform(event) => Some(event.sequence),
+            _ => None,
+        };
+        match tx.try_send(event) {
+            Ok(()) => {}
+            Err(TrySendError::Full(_)) | Err(TrySendError::Disconnected(_)) => {
+                mark_dirty(sequence);
+            }
         }
     }
 }
@@ -155,22 +164,58 @@ pub(crate) fn send_critical(event: PlatformEvent) {
         return;
     };
     let event = stamp_platform_event(event);
-    if tx.try_send(event).is_ok() {
-        return;
-    }
-    OBSERVER_DIRTY.store(true, Ordering::Release);
+    let sequence = event.sequence;
+    let event = match tx.try_send(event) {
+        Ok(()) => return,
+        Err(TrySendError::Full(event)) | Err(TrySendError::Disconnected(event)) => {
+            // A critical event still has a bounded fallback lane; only the fallback overflow
+            // below represents a lost sequence. Keep the dirty bit for an eventual resync.
+            mark_dirty(None);
+            event
+        }
+    };
     let Some(fallback) = CRITICAL_FALLBACK.get() else {
-        CRITICAL_OVERFLOW.store(true, Ordering::Release);
+        mark_critical_overflow(sequence);
         return;
     };
     match fallback.try_lock() {
-        Ok(mut pending) if pending.len() < CRITICAL_FALLBACK_CAPACITY => pending.push_back(event),
-        _ => CRITICAL_OVERFLOW.store(true, Ordering::Release),
+        Ok(mut pending) if pending.len() < CRITICAL_FALLBACK_CAPACITY => {
+            pending.push_back(event);
+        }
+        _ => mark_critical_overflow(sequence),
     }
 }
 
-pub fn take_dirty() -> bool {
-    OBSERVER_DIRTY.swap(false, Ordering::AcqRel)
+fn mark_dirty(sequence: Option<u64>) {
+    OBSERVER_DIRTY.store(true, Ordering::Release);
+    if let Some(sequence) = sequence {
+        record_earliest(&OBSERVER_DIRTY_SEQUENCE, sequence);
+    }
+}
+
+fn mark_critical_overflow(sequence: u64) {
+    CRITICAL_OVERFLOW.store(true, Ordering::Release);
+    record_earliest(&CRITICAL_OVERFLOW_SEQUENCE, sequence);
+}
+
+fn record_earliest(slot: &AtomicU64, sequence: u64) {
+    let mut current = slot.load(Ordering::Acquire);
+    loop {
+        if current != 0 && current <= sequence {
+            return;
+        }
+        match slot.compare_exchange_weak(current, sequence, Ordering::AcqRel, Ordering::Acquire) {
+            Ok(_) => return,
+            Err(next) => current = next,
+        }
+    }
+}
+
+fn take_earliest(slot: &AtomicU64) -> Option<u64> {
+    match slot.swap(0, Ordering::AcqRel) {
+        0 => None,
+        sequence => Some(sequence),
+    }
 }
 
 pub fn take_recovery() -> crate::platform::ObserverRecovery {
@@ -183,8 +228,19 @@ pub fn take_recovery() -> crate::platform::ObserverRecovery {
                 .map(|mut pending| pending.drain(..).collect())
         })
         .unwrap_or_default();
+    let dirty = OBSERVER_DIRTY.swap(false, Ordering::AcqRel);
+    let critical_overflowed = CRITICAL_OVERFLOW.swap(false, Ordering::AcqRel);
+    let overflow_after_sequence = [
+        take_earliest(&OBSERVER_DIRTY_SEQUENCE),
+        take_earliest(&CRITICAL_OVERFLOW_SEQUENCE),
+    ]
+    .into_iter()
+    .flatten()
+    .min();
     crate::platform::ObserverRecovery {
         events,
-        overflowed: CRITICAL_OVERFLOW.swap(false, Ordering::AcqRel),
+        overflowed: critical_overflowed,
+        dirty,
+        overflow_after_sequence,
     }
 }
