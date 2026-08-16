@@ -77,7 +77,8 @@ PR-02 已落地 Windows 使用时间的双时间轴：
 - 20 秒 heartbeat/resync 重新确认前台窗口和电脑状态；普通前台事件与 session/power critical 事件使用独立的 bounded lane。critical lane 溢出时先建立 pending `unknown` gap，再应用后续 Resume/Connect，避免丢失的 Sleep/Disconnected/Locked 时段被桥接为 active；事务失败时 pending gap 保留到下一次重试。
 - usage Close/Start/Checkpoint action batch 在一个短 SQLite 事务中提交，成功后才更新内存 persistence state；`SQLITE_BUSY`、writer deadline 和重试次数进入 collector health。原始区间即时落盘，日报只标记受影响日期并 debounce/限频重算，不在每次 heartbeat 或 app switch 中同步重建多日日报。
 - 查询层以 `foreground_interval ∩ computer_state_interval` 派生 `active_usage` 与 `idle_foreground`，并单独返回 foreground total 与 computer active time。日报按 local day 重算，保留 UTC epoch milliseconds，支持跨午夜和幂等重算。
-- `boot_session` 使用 Windows 稳定 boot-time identity（可用时来自系统 boot-time 查询），并以小容差 reconciliation 复用；同一次 Windows boot 的应用重启只创建新的 `collection_session`，旧 session 以最后可信 checkpoint/last_seen 封口。
+- platform event 在 normal foreground lane、critical lane 和 fallback recovery lane 进入 collector 时共享 process-wide sequence；collector 按 sequence 合并消费，失败的队首事件或 recovery gap 在成功提交前保持 pending，后续事件不能越过。
+- `boot_session` 使用 Windows 的 best-effort boot-time system source（不是永久稳定的公开 Win32 contract），不可用时回退到 uptime/wall-clock observation，并以小容差 reconciliation 复用；同一次 Windows boot 的应用重启只创建新的 `collection_session`，旧 session 以最后可信 checkpoint/last_seen 封口。
 - `EVENT_SYSTEM_FOREGROUND` 回调使用系统提供的 event tick timestamp（无法提供时才回退到 delivery time），包含 Resource Timeline 自身窗口；默认不保存窗口标题、文档标题、浏览器 URL 或网站名称。
 - 默认不保存窗口标题、文档标题、浏览器 URL 或网站名称；现有 context 预留保持未启用。
 

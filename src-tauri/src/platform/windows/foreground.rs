@@ -1,5 +1,4 @@
 use crate::{
-    collector::manager::Control,
     models::ForegroundApp,
     platform::{now_ms, PlatformEvent},
 };
@@ -150,10 +149,10 @@ unsafe extern "system" fn foreground_event_callback(
     if event != EVENT_SYSTEM_FOREGROUND {
         return;
     }
-    super::session::send(Control::Platform(PlatformEvent::ForegroundWindow {
+    super::session::send_platform(PlatformEvent::ForegroundWindow {
         hwnd: hwnd.0 as isize,
         at_ms: event_timestamp_ms(event_time),
-    }));
+    });
 }
 
 fn event_timestamp_ms(event_time: u32) -> i64 {

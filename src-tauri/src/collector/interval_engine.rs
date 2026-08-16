@@ -31,6 +31,7 @@ pub enum UsageEvent {
     Unlocked {
         at_ms: i64,
         state: ComputerState,
+        foreground_app_executable_id: Option<i64>,
     },
     Suspend {
         at_ms: i64,
@@ -38,6 +39,7 @@ pub enum UsageEvent {
     Resume {
         at_ms: i64,
         state: ComputerState,
+        foreground_app_executable_id: Option<i64>,
     },
     Disconnected {
         at_ms: i64,
@@ -45,6 +47,7 @@ pub enum UsageEvent {
     Connected {
         at_ms: i64,
         state: ComputerState,
+        foreground_app_executable_id: Option<i64>,
     },
     #[allow(dead_code)]
     Heartbeat {
@@ -194,11 +197,32 @@ impl IntervalEngine {
                 }
             }
             UsageEvent::Locked { .. } => self.lock(at_ms, &mut actions),
-            UsageEvent::Unlocked { state, .. } => self.unlock(at_ms, state, &mut actions),
+            UsageEvent::Unlocked {
+                state,
+                foreground_app_executable_id,
+                ..
+            } => {
+                self.unlock(at_ms, state, &mut actions);
+                self.reconcile_foreground(foreground_app_executable_id, at_ms, &mut actions);
+            }
             UsageEvent::Suspend { .. } => self.suspend(at_ms, &mut actions),
-            UsageEvent::Resume { state, .. } => self.resume(at_ms, state, &mut actions),
+            UsageEvent::Resume {
+                state,
+                foreground_app_executable_id,
+                ..
+            } => {
+                self.resume(at_ms, state, &mut actions);
+                self.reconcile_foreground(foreground_app_executable_id, at_ms, &mut actions);
+            }
             UsageEvent::Disconnected { .. } => self.disconnect(at_ms, &mut actions),
-            UsageEvent::Connected { state, .. } => self.connect(at_ms, state, &mut actions),
+            UsageEvent::Connected {
+                state,
+                foreground_app_executable_id,
+                ..
+            } => {
+                self.connect(at_ms, state, &mut actions);
+                self.reconcile_foreground(foreground_app_executable_id, at_ms, &mut actions);
+            }
             UsageEvent::Heartbeat {
                 foreground_app_executable_id,
                 state,
@@ -393,6 +417,18 @@ impl IntervalEngine {
 
     fn connect(&mut self, at_ms: i64, state: ComputerState, actions: &mut Vec<IntervalAction>) {
         self.observe_computer_state_forced(state, at_ms, "wts-connect", 0, actions);
+    }
+
+    fn reconcile_foreground(
+        &mut self,
+        foreground_app_executable_id: Option<i64>,
+        at_ms: i64,
+        actions: &mut Vec<IntervalAction>,
+    ) {
+        match foreground_app_executable_id {
+            Some(app_executable_id) => self.observe_foreground(app_executable_id, at_ms, actions),
+            None => self.close_foreground(at_ms, "recovery-no-foreground", actions),
+        }
     }
 
     fn resync(
@@ -687,6 +723,7 @@ mod tests {
         let unlock = engine.handle(UsageEvent::Unlocked {
             at_ms: 10_000,
             state: ComputerState::Active,
+            foreground_app_executable_id: None,
         });
         assert!(unlock.iter().any(|action| matches!(
             action,
@@ -882,6 +919,7 @@ mod tests {
         engine.handle(UsageEvent::Resume {
             at_ms: 15_000,
             state: ComputerState::Active,
+            foreground_app_executable_id: None,
         });
         assert_eq!(
             engine.open_computer_state(),
@@ -898,6 +936,7 @@ mod tests {
         engine.handle(UsageEvent::Connected {
             at_ms: 15_000,
             state: ComputerState::Active,
+            foreground_app_executable_id: None,
         });
         assert_eq!(
             engine.open_computer_state(),

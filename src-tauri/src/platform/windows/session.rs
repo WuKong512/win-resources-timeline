@@ -1,6 +1,6 @@
 use crate::{
     collector::manager::Control,
-    platform::{now_ms, PlatformEvent},
+    platform::{now_ms, stamp_platform_event, PlatformEvent, PlatformEventEnvelope},
 };
 use crossbeam_channel::Sender;
 use std::collections::VecDeque;
@@ -31,14 +31,14 @@ use windows::{
 };
 
 static CONTROL: OnceLock<Sender<Control>> = OnceLock::new();
-static CRITICAL_CONTROL: OnceLock<Sender<PlatformEvent>> = OnceLock::new();
-static CRITICAL_FALLBACK: OnceLock<Mutex<VecDeque<PlatformEvent>>> = OnceLock::new();
+static CRITICAL_CONTROL: OnceLock<Sender<PlatformEventEnvelope>> = OnceLock::new();
+static CRITICAL_FALLBACK: OnceLock<Mutex<VecDeque<PlatformEventEnvelope>>> = OnceLock::new();
 static OBSERVER_DIRTY: AtomicBool = AtomicBool::new(false);
 static CRITICAL_OVERFLOW: AtomicBool = AtomicBool::new(false);
 pub const OPEN_WINDOW_MESSAGE: u32 = WM_APP + 42;
 const CRITICAL_FALLBACK_CAPACITY: usize = 32;
 
-pub fn start(tx: Sender<Control>, critical_tx: Sender<PlatformEvent>) {
+pub fn start(tx: Sender<Control>, critical_tx: Sender<PlatformEventEnvelope>) {
     if CONTROL.set(tx).is_err() {
         return;
     }
@@ -146,10 +146,15 @@ pub(crate) fn send(event: Control) {
     }
 }
 
+pub(crate) fn send_platform(event: PlatformEvent) {
+    send(Control::Platform(stamp_platform_event(event)));
+}
+
 pub(crate) fn send_critical(event: PlatformEvent) {
     let Some(tx) = CRITICAL_CONTROL.get() else {
         return;
     };
+    let event = stamp_platform_event(event);
     if tx.try_send(event).is_ok() {
         return;
     }

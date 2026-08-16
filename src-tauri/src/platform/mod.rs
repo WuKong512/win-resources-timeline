@@ -3,14 +3,37 @@ mod windows;
 use crate::collector::manager::Control;
 use crate::models::{BootIdentity, ComputerState, ForegroundApp};
 use crossbeam_channel::Sender;
+use std::sync::atomic::{AtomicU64, Ordering};
+
+static NEXT_PLATFORM_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Debug, Default)]
 pub struct ObserverRecovery {
-    pub events: Vec<PlatformEvent>,
+    pub events: Vec<PlatformEventEnvelope>,
     pub overflowed: bool,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PlatformEventEnvelope {
+    pub sequence: u64,
+    pub event: PlatformEvent,
+}
+
+impl PlatformEventEnvelope {
+    pub fn new(event: PlatformEvent) -> Self {
+        Self {
+            sequence: NEXT_PLATFORM_SEQUENCE.fetch_add(1, Ordering::Relaxed),
+            event,
+        }
+    }
+
+    #[cfg(test)]
+    pub fn with_sequence(sequence: u64, event: PlatformEvent) -> Self {
+        Self { sequence, event }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PlatformEvent {
     ForegroundWindow { hwnd: isize, at_ms: i64 },
     Locked { at_ms: i64 },
@@ -67,7 +90,7 @@ pub fn idle_for_ms() -> Option<u64> {
     }
 }
 
-pub fn start_session_observer(tx: Sender<Control>, critical_tx: Sender<PlatformEvent>) {
+pub fn start_session_observer(tx: Sender<Control>, critical_tx: Sender<PlatformEventEnvelope>) {
     #[cfg(windows)]
     windows::session::start(tx, critical_tx);
     #[cfg(not(windows))]
@@ -75,6 +98,10 @@ pub fn start_session_observer(tx: Sender<Control>, critical_tx: Sender<PlatformE
         drop(tx);
         drop(critical_tx);
     }
+}
+
+pub(crate) fn stamp_platform_event(event: PlatformEvent) -> PlatformEventEnvelope {
+    PlatformEventEnvelope::new(event)
 }
 
 pub fn take_observer_dirty() -> bool {

@@ -93,6 +93,9 @@ pub fn current_computer_state(idle_threshold_ms: u64) -> Option<ComputerState> {
 }
 
 fn stable_boot_time_ms() -> Option<i64> {
+    // This is a best-effort system source, not a permanent public Win32 contract. Keep startup
+    // functional if the native query is unavailable or changes shape; boot_identity() falls back
+    // to the uptime/wall-clock observation and the database reconciles within its tolerance.
     let mut info = SystemTimeOfDayInformation {
         boot_time: 0,
         _current_time: 0,
