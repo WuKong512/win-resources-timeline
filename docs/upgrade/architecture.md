@@ -38,10 +38,10 @@ flowchart TD
 ## 运行时生命周期
 
 1. 打开数据库，执行完整性检查和向前迁移。
-2. 建立 `boot_session` 与 `collection_session`，读取用户配置。
+2. 根据 Windows uptime/boot-time 信息建立或复用 `boot_session`，并为本次 Resource Timeline 运行建立新的 `collection_session`，读取用户配置。
 3. 快速能力探测，生成 CollectionPlan；耗时探测可后台补充并增量更新计划。
 4. 启动 Usage Tracker 和被启用的 Provider。
-5. 每个系统采样帧以一个小事务写入；前台切换独立即时提交。
+5. 每个系统采样帧以一个小事务写入；前台和电脑状态变化独立即时提交。
 6. 后台分批执行 1 分钟/1 小时/每日 rollup、保留和 WAL checkpoint，避开启动和交互高峰。
 7. 启动后异步扫描系统事件；发现崩溃时先建立 retention hold，再生成证据索引和客观摘要。
 8. 正常退出时刷新队列、结束开放区间并记录 clean shutdown marker。
@@ -66,6 +66,26 @@ PR-01 已把运行时写入边界接到 SQLite v7，但没有扩大 Provider、T
 ## API 与版本边界
 
 Tauri DTO 应面向产品语义而非表结构，例如 `MetricCapability`、`CollectionSettings`、`TimelineSeries`、`UsageSummary`、`CrashEvidenceDetail`。每个证据摘要带 `processing_version` 和 coverage，每个采集会话保存有效指标、周期和 Provider，使历史数据始终可解释。
+
+## PR-02 使用时间追踪
+
+PR-02 已落地 Windows 使用时间的双时间轴：
+
+- foreground interval 只在应用切换、无可归属前台、暂停、锁定、休眠、断开、退出或可信 clock/gap boundary 封口；active/idle 转换不会拆分 foreground interval。
+- computer state interval 单独记录 `active`、`idle`、`locked`、`sleep`、`disconnected` 和 `unknown`。锁定、休眠和断开状态优先于 idle/active，并持续到明确的 unlock/resume/connect 或 ObserverGap；睡眠时缺少 heartbeat 不会提前截断 `sleep`。
+- Windows 前台切换使用 `SetWinEventHook(EVENT_SYSTEM_FOREGROUND)`。回调只投递 HWND 和时间到 bounded channel；PID、可执行文件和应用身份在 collector worker 中解析，回调不写 SQLite。
+- 20 秒 heartbeat/resync 重新确认前台窗口和电脑状态；普通前台事件与 session/power critical 事件使用独立的 bounded lane。critical lane 溢出时先建立 pending `unknown` gap，再应用后续 Resume/Connect，避免丢失的 Sleep/Disconnected/Locked 时段被桥接为 active；事务失败时 pending gap 保留到下一次重试。
+- usage Close/Start/Checkpoint action batch 在一个短 SQLite 事务中提交，成功后才更新内存 persistence state；`SQLITE_BUSY`、writer deadline 和重试次数进入 collector health。原始区间即时落盘，日报只标记受影响日期并 debounce/限频重算，不在每次 heartbeat 或 app switch 中同步重建多日日报。
+- timestamp handling 区分可信 platform boundary、按 sequence 排序的平台观察事件和连续 heartbeat/resync 观察。后到但 source timestamp 略早的事件使用 monotonic effective timestamp，不制造 clock gap；长 observation gap 只保守封口 active/idle，explicit exclusion state 由对应恢复事件或 ObserverGap 结束。
+- 查询层以 `foreground_interval ∩ computer_state_interval` 派生 `active_usage` 与 `idle_foreground`，并单独返回 foreground total 与 computer active time。日报按 local day 重算，保留 UTC epoch milliseconds，支持跨午夜和幂等重算。
+- platform event 在 normal foreground lane、critical lane 和 fallback recovery lane 进入 collector 时共享 process-wide sequence；collector 按 sequence 合并消费，失败的队首事件或 recovery gap 在成功提交前保持 pending，后续事件不能越过。
+- collector 的 platform pending 状态显式区分 raw/captured/prepared event、失败队首、coalesced recovery barrier 和当前时间 resync。overflow barrier 按第一个可能丢失的 sequence 排序，失败队首不会被 gap 阻塞；gap 自身写失败时保留 barrier 并以 bounded backoff 重试。shutdown 通过独立有界 lane 进入，并对所有平台 retry/SQLite write/最终 flush 使用一个绝对 deadline。
+- recovery event 的前台身份与 active/idle snapshot 只在第一次 prepare 时捕获；后续 SQLite retry 重放 prepared payload，不重新读取未来的 OS truth。窗口解析失败只保留 explicit unknown，不把无法解析的窗口归入前一个应用。
+- `boot_session` 使用 Windows 的 best-effort boot-time system source（不是永久稳定的公开 Win32 contract），不可用时回退到 uptime/wall-clock observation，并以小容差 reconciliation 复用；同一次 Windows boot 的应用重启只创建新的 `collection_session`，旧 session 以最后可信 checkpoint/last_seen 封口。
+- `EVENT_SYSTEM_FOREGROUND` 回调使用系统提供的 event tick timestamp（无法提供时才回退到 delivery time），包含 Resource Timeline 自身窗口；默认不保存窗口标题、文档标题、浏览器 URL 或网站名称。
+- 默认不保存窗口标题、文档标题、浏览器 URL 或网站名称；现有 context 预留保持未启用。
+
+完整 Windows Event Log 历史补齐、Crash evidence、Retention Hold、Provider framework 和硬件指标属于后续 PR，不在 PR-02 中实现。
 
 ## UI 架构方向
 

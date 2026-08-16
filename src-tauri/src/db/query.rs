@@ -1,8 +1,14 @@
-use crate::models::{
-    AppIdentity, AppResourceHistoryPoint, AppResourceSample, AppUsageSummary, ForegroundInterval,
-    ResourceApp, SystemSample, TodayOverview,
+use crate::{
+    db::usage::{
+        computer_active_duration, foreground_state_segments, intersect_foreground, StateRange,
+        TimeRange,
+    },
+    models::{
+        AppIdentity, AppResourceHistoryPoint, AppResourceSample, AppUsageSummary,
+        DailyUsageSummary, ForegroundInterval, ResourceApp, SystemSample, TodayOverview,
+    },
 };
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, OptionalExtension};
 use std::collections::BTreeSet;
 
 fn valid_range(start_ms: i64, end_ms: i64) -> rusqlite::Result<()> {
@@ -41,36 +47,154 @@ pub fn foreground_intervals(
     include_idle: bool,
 ) -> rusqlite::Result<Vec<ForegroundInterval>> {
     valid_range(start_ms, end_ms)?;
-    let mut stmt = conn.prepare(
-        r#"SELECT fi.id, fi.app_executable_id, a.process_name, a.display_name,
+    let foregrounds = load_foreground_rows(conn, start_ms, end_ms, include_hidden)?;
+    let states = load_state_ranges(conn, start_ms, end_ms)?;
+    let tracked_boots = load_state_boots(conn)?;
+    let mut intervals = Vec::new();
+
+    for foreground in foregrounds {
+        let foreground_range = TimeRange {
+            start_ms: foreground.start_ms,
+            end_ms: foreground.end_ms,
+        };
+        let segments =
+            foreground_state_segments(foreground.boot_session_id, foreground_range, &states);
+        if segments.is_empty() && !tracked_boots.contains(&foreground.boot_session_id) {
+            if include_idle || foreground.activity_state == "active" {
+                intervals
+                    .push(foreground.to_model(foreground_range, foreground.activity_state.clone()));
+            }
+            continue;
+        }
+        for (range, state) in segments {
+            if !include_idle && state == "idle" {
+                continue;
+            }
+            intervals.push(foreground.to_model(range, state));
+        }
+    }
+    intervals.sort_by_key(|interval| (interval.start_time_ms, interval.id, interval.end_time_ms));
+    Ok(intervals)
+}
+
+#[derive(Debug, Clone)]
+struct ForegroundRow {
+    id: i64,
+    boot_session_id: i64,
+    app_id: i64,
+    app_name: String,
+    display_name: String,
+    start_ms: i64,
+    end_ms: i64,
+    activity_state: String,
+    is_hidden: bool,
+}
+
+impl ForegroundRow {
+    fn to_model(&self, range: TimeRange, activity_state: String) -> ForegroundInterval {
+        ForegroundInterval {
+            id: self.id,
+            app_id: self.app_id,
+            app_name: self.app_name.clone(),
+            display_name: self.display_name.clone(),
+            start_time_ms: range.start_ms,
+            end_time_ms: range.end_ms,
+            duration_ms: range.end_ms.saturating_sub(range.start_ms),
+            activity_state,
+            is_hidden: self.is_hidden,
+        }
+    }
+}
+
+fn load_foreground_rows(
+    conn: &Connection,
+    start_ms: i64,
+    end_ms: i64,
+    include_hidden: bool,
+) -> rusqlite::Result<Vec<ForegroundRow>> {
+    let mut statement = conn.prepare(
+        r#"SELECT fi.id, fi.boot_session_id, e.app_id, a.process_name, a.display_name,
                   MAX(fi.start_time_ms, ?1), MIN(COALESCE(fi.end_time_ms, fi.last_seen_time_ms), ?2),
                   fi.activity_state, a.is_hidden
            FROM foreground_interval fi
            JOIN app_executable e ON e.id = fi.app_executable_id
            JOIN app a ON a.id = e.app_id
-           WHERE fi.start_time_ms < ?2 AND COALESCE(fi.end_time_ms, fi.last_seen_time_ms) > ?1
-             AND (?3 = 1 OR a.is_hidden = 0) AND (?4 = 1 OR fi.activity_state = 'active')
-           ORDER BY fi.start_time_ms"#,
+           WHERE fi.start_time_ms < ?2
+             AND COALESCE(fi.end_time_ms, fi.last_seen_time_ms) > ?1
+             AND (?3 = 1 OR a.is_hidden = 0)
+           ORDER BY fi.boot_session_id, fi.start_time_ms, fi.id"#,
     )?;
-    let rows = stmt.query_map(
-        params![start_ms, end_ms, include_hidden as i64, include_idle as i64],
-        |r| {
-            let start: i64 = r.get(4)?;
-            let end: i64 = r.get(5)?;
-            Ok(ForegroundInterval {
-                id: r.get(0)?,
-                app_id: r.get(1)?,
-                app_name: r.get(2)?,
-                display_name: r.get(3)?,
-                start_time_ms: start,
-                end_time_ms: end,
-                duration_ms: (end - start).max(0),
-                activity_state: r.get(6)?,
-                is_hidden: r.get::<_, i64>(7)? != 0,
+    let rows = statement
+        .query_map(params![start_ms, end_ms, include_hidden as i64], |row| {
+            let start_ms: i64 = row.get(5)?;
+            let end_ms: i64 = row.get(6)?;
+            Ok(ForegroundRow {
+                id: row.get(0)?,
+                boot_session_id: row.get(1)?,
+                app_id: row.get(2)?,
+                app_name: row.get(3)?,
+                display_name: row.get(4)?,
+                start_ms,
+                end_ms,
+                activity_state: row.get(7)?,
+                is_hidden: row.get::<_, i64>(8)? != 0,
             })
-        },
+        })?
+        .filter_map(|row| match row {
+            Ok(row) if row.end_ms > row.start_ms => Some(Ok(row)),
+            Ok(_) => None,
+            Err(error) => Some(Err(error)),
+        })
+        .collect();
+    rows
+}
+
+fn load_state_ranges(
+    conn: &Connection,
+    start_ms: i64,
+    end_ms: i64,
+) -> rusqlite::Result<Vec<StateRange>> {
+    let checkpoint = usage_checkpoint(conn)?.unwrap_or(end_ms).min(end_ms);
+    let mut statement = conn.prepare(
+        r#"SELECT boot_session_id, state,
+                  MAX(start_ts, ?1), MIN(COALESCE(end_ts, ?3), ?2)
+           FROM computer_state_interval
+           WHERE start_ts < ?2 AND COALESCE(end_ts, ?3) > ?1
+           ORDER BY boot_session_id, start_ts, id"#,
     )?;
-    rows.collect()
+    let rows = statement
+        .query_map(params![start_ms, end_ms, checkpoint], |row| {
+            let start_ms: i64 = row.get(2)?;
+            let end_ms: i64 = row.get(3)?;
+            Ok(StateRange {
+                boot_session_id: row.get(0)?,
+                state: row.get(1)?,
+                range: TimeRange { start_ms, end_ms },
+            })
+        })?
+        .filter_map(|row| match row {
+            Ok(row) if row.range.end_ms > row.range.start_ms => Some(Ok(row)),
+            Ok(_) => None,
+            Err(error) => Some(Err(error)),
+        })
+        .collect();
+    rows
+}
+
+fn load_state_boots(conn: &Connection) -> rusqlite::Result<BTreeSet<i64>> {
+    let mut statement =
+        conn.prepare("SELECT DISTINCT boot_session_id FROM computer_state_interval")?;
+    let rows = statement.query_map([], |row| row.get(0))?.collect();
+    rows
+}
+
+fn usage_checkpoint(conn: &Connection) -> rusqlite::Result<Option<i64>> {
+    conn.query_row(
+        "SELECT CAST(value AS INTEGER) FROM settings WHERE key = 'runtime_usage_heartbeat_ms'",
+        [],
+        |row| row.get(0),
+    )
+    .optional()
 }
 
 pub fn timeline_available_dates(conn: &Connection) -> rusqlite::Result<Vec<String>> {
@@ -119,39 +243,104 @@ pub fn usage_summary(
     end_ms: i64,
     include_hidden: bool,
 ) -> rusqlite::Result<Vec<AppUsageSummary>> {
-    let intervals = foreground_intervals(conn, start_ms, end_ms, include_hidden, true)?;
-    let total_active: i64 = intervals
-        .iter()
-        .filter(|i| i.activity_state == "active")
-        .map(|i| i.duration_ms)
-        .sum();
+    valid_range(start_ms, end_ms)?;
+    let foregrounds = load_foreground_rows(conn, start_ms, end_ms, include_hidden)?;
+    let states = load_state_ranges(conn, start_ms, end_ms)?;
+    let tracked_boots = load_state_boots(conn)?;
     let mut grouped = std::collections::BTreeMap::<i64, AppUsageSummary>::new();
-    for interval in intervals {
-        let item = grouped.entry(interval.app_id).or_insert(AppUsageSummary {
-            app_id: interval.app_id,
-            app_name: interval.app_name,
-            display_name: interval.display_name,
+    for foreground in foregrounds {
+        let range = TimeRange {
+            start_ms: foreground.start_ms,
+            end_ms: foreground.end_ms,
+        };
+        let durations = if tracked_boots.contains(&foreground.boot_session_id) {
+            intersect_foreground(foreground.boot_session_id, range, &states)
+        } else if foreground.activity_state == "idle" {
+            crate::db::usage::UsageDurations {
+                active_ms: 0,
+                idle_ms: foreground.end_ms - foreground.start_ms,
+            }
+        } else {
+            crate::db::usage::UsageDurations {
+                active_ms: foreground.end_ms - foreground.start_ms,
+                idle_ms: 0,
+            }
+        };
+        let item = grouped.entry(foreground.app_id).or_insert(AppUsageSummary {
+            app_id: foreground.app_id,
+            app_name: foreground.app_name,
+            display_name: foreground.display_name,
+            foreground_total_ms: 0,
+            active_usage_ms: 0,
+            idle_foreground_ms: 0,
             active_seconds: 0,
             idle_seconds: 0,
             percentage: 0.0,
-            is_hidden: interval.is_hidden,
+            is_hidden: foreground.is_hidden,
         });
-        if interval.activity_state == "active" {
-            item.active_seconds += interval.duration_ms / 1000;
-        } else {
-            item.idle_seconds += interval.duration_ms / 1000;
-        }
+        item.foreground_total_ms = item
+            .foreground_total_ms
+            .saturating_add(foreground.end_ms - foreground.start_ms);
+        item.active_usage_ms = item.active_usage_ms.saturating_add(durations.active_ms);
+        item.idle_foreground_ms = item.idle_foreground_ms.saturating_add(durations.idle_ms);
     }
+    let total_active: i64 = grouped.values().map(|item| item.active_usage_ms).sum();
     let mut values: Vec<_> = grouped.into_values().collect();
     for item in &mut values {
+        item.active_seconds = item.active_usage_ms / 1000;
+        item.idle_seconds = item.idle_foreground_ms / 1000;
         item.percentage = if total_active > 0 {
-            item.active_seconds as f64 * 100_000.0 / total_active as f64
+            item.active_usage_ms as f64 * 100.0 / total_active as f64
         } else {
             0.0
         };
     }
-    values.sort_by_key(|value| std::cmp::Reverse(value.active_seconds));
+    values.sort_by_key(|value| std::cmp::Reverse(value.active_usage_ms));
     Ok(values)
+}
+
+pub fn computer_active_time(
+    conn: &Connection,
+    start_ms: i64,
+    end_ms: i64,
+) -> rusqlite::Result<i64> {
+    valid_range(start_ms, end_ms)?;
+    let states = load_state_ranges(conn, start_ms, end_ms)?;
+    Ok(computer_active_duration(&states, start_ms, end_ms))
+}
+
+pub fn daily_usage_summary(
+    conn: &Connection,
+    local_date: &str,
+    include_hidden: bool,
+) -> rusqlite::Result<Vec<DailyUsageSummary>> {
+    let mut statement = conn.prepare(
+        r#"SELECT d.local_date, d.app_id, a.process_name, a.display_name,
+                  d.foreground_total_ms, COALESCE(d.active_usage_ms, 0),
+                  d.idle_foreground_ms, d.launch_count, d.processing_version, a.is_hidden
+           FROM app_usage_daily d
+           JOIN app a ON a.id = d.app_id
+           WHERE d.local_date = ?1 AND (?2 = 1 OR a.is_hidden = 0)
+           ORDER BY COALESCE(d.active_usage_ms, 0) DESC, d.foreground_total_ms DESC,
+                    a.display_name COLLATE NOCASE"#,
+    )?;
+    let rows = statement
+        .query_map(params![local_date, include_hidden as i64], |row| {
+            Ok(DailyUsageSummary {
+                local_date: row.get(0)?,
+                app_id: row.get(1)?,
+                app_name: row.get(2)?,
+                display_name: row.get(3)?,
+                foreground_total_ms: row.get(4)?,
+                active_usage_ms: row.get(5)?,
+                idle_foreground_ms: row.get(6)?,
+                launch_count: row.get(7)?,
+                processing_version: row.get(8)?,
+                is_hidden: row.get::<_, i64>(9)? != 0,
+            })
+        })?
+        .collect();
+    rows
 }
 
 pub fn system_samples(
@@ -354,6 +543,7 @@ pub fn today_overview(
     let all_usage = usage_summary(conn, start_ms, end_ms, true)?;
     let total_active_foreground_seconds = all_usage.iter().map(|a| a.active_seconds).sum();
     let total_idle_foreground_seconds = all_usage.iter().map(|a| a.idle_seconds).sum();
+    let computer_active_seconds = computer_active_time(conn, start_ms, end_ms)? / 1000;
     let hidden_active_foreground_seconds = all_usage
         .iter()
         .filter(|a| a.is_hidden)
@@ -382,6 +572,7 @@ pub fn today_overview(
         end_ms,
         total_active_foreground_seconds,
         total_idle_foreground_seconds,
+        computer_active_seconds,
         hidden_active_foreground_seconds,
         top_apps,
         cpu_sampled_peak: samples

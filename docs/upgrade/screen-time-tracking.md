@@ -23,32 +23,41 @@
 
 事件回调只收集最少标识并投递到内部队列，解析进程身份和数据库写入不在 Windows 回调线程完成。
 
+critical session/power 事件使用独立的有界通道和非阻塞 fallback。若 critical lane 溢出，collector 会在处理后续 Resume/Connect 之前先写入明确的 `unknown` gap，再通过 heartbeat/resync 重新确认当前状态；因此无法确认的时间不会被猜成 `active`，也不会延长上一应用。回调不会执行 SQLite、进程路径重试、文件版本扫描或签名验证。
+
+所有 platform event 在进入 collector 时带有同一 process-wide sequence，normal、critical 和 fallback lane 会按该序列合并。一个 event 或 recovery gap 的 SQLite 写入失败时会保留 pending 和有界退避，后续更大 sequence 的事件不能越过未提交的边界。
+
+collector 将 platform pending 状态分为 raw event、captured snapshot、prepared/replayable event、失败队首和 recovery barrier。背压丢失会记录第一个可能缺失的 sequence；多个 overflow 合并为一个有界 barrier，已失败的队首先重试，barrier 成功后才允许更大的 sequence 继续。critical fallback 成功接收的事件不会被误报为丢失，真正无法证明的区间才写入 `unknown` gap。
+
+`Unlocked`、`Resumed`、`Connected` 和前台 HWND 在第一次准备时捕获必要的状态/应用身份。SQLite 失败后的 retry 只重放 immutable prepared payload，不重新采样当前窗口或电脑状态，因此不会把未来的 App/state 写回原始事件时间；身份解析本身失败时保留已捕获快照并重试数据库解析。Resource Timeline shutdown 使用独立的有界请求 lane，并把平台 drain、identity write、usage transaction、rollup、frame flush 和 collection-session close 约束在同一个绝对 deadline 内。
+
 ## 区间状态机
 
-每次可信的前台或电脑状态变化先关闭当前开放区间，再打开新间隔。重复事件去抖；短暂无法解析的窗口记录为 unknown，而不是错误归入上一应用。应用异常退出、Explorer 重启和权限隔离窗口都必须被视为正常边界条件。
+foreground 与 computer state 是两个独立时间轴。可信的前台切换、无前台、暂停、锁定、休眠、断开、退出和 clock/gap recovery 会封口 foreground；active↔idle 只切换 computer state，不拆分 foreground。重复事件去抖；短暂无法解析的窗口进入明确的 unknown/gap，不会归入上一应用。
 
-应用启动时恢复未封口区间：最多延伸到上次心跳、系统崩溃时间或 boot session 结束，不能直接延伸到本次启动时间。
+`locked`、`sleep` 和 `disconnected` 是 explicit exclusion state：它们从可信的开始边界持续到对应的 unlock/resume/connect 或明确的 ObserverGap。睡眠期间没有 heartbeat 不会自动结束 `sleep`；heartbeat/resync 的长 gap 只对依赖连续观察的 `active`/`idle` 做保守封口。平台事件按 process-wide sequence 处理，后到但 source timestamp 略早的事件使用不倒退的 effective timestamp，不会被误判为 clock gap；真正无法证明的区间只由 ObserverGap/recovery barrier 表达为 `unknown`。
+
+应用启动时恢复未封口区间：最多延伸到上次可信 heartbeat/last_seen，不能直接延伸到本次启动时间。锁定和休眠期间不属于任何应用的 active usage；恢复后重新确认当前状态和前台应用。
+
+同一批 foreground/computer-state Close、Start、Checkpoint action 在一个短事务中提交，事务成功后才确认 collector 内存状态。SQLite busy/deadline 使用有界重试，失败、重试和最后错误通过 collector health 计数/字段可见；失败的恢复 gap 会保留到后续重试。
+
+原始区间变化只标记受影响的 local dates。日报重算采用 debounce 和最低执行间隔的维护调度，最终 shutdown 会强制执行一次；重算按 `foreground_interval ∩ computer_state_interval`、local-day boundary 和 `processing_version` 幂等更新，不把 heartbeat 次数当作使用时长。
 
 ## Windows 与应用会话
 
-`boot_session` 表示 Windows 的一次启动/电源周期，来源于系统启动时间和 Windows Event Log；`collection_session` 只表示 Resource Timeline 在某套采集计划下的一次运行区间。同一 boot session 内可以有多个 collection session，应用重启不得被解释为 Windows 重启。
+`boot_session` 表示 Windows 的一次启动/电源周期，使用 uptime/boot-time identity 并以小容差与已有记录 reconciliation；`collection_session` 只表示 Resource Timeline 的一次采集运行。同一 boot session 内可以有多个 collection session，应用重启不得被解释为 Windows 重启。锁定/解锁、睡眠/恢复和会话连接使用 Windows live notifications；应用未运行期间的完整历史 Event Log 补齐留给后续 system-event/crash 工作。
 
-系统启动/关机、睡眠/休眠和唤醒优先使用操作系统通知实时记录；应用未运行期间的历史由下一次启动扫描 Event Log 补齐。快速启动、完整重启、休眠恢复和普通睡眠恢复保留可验证的分类，不全部折叠成“应用启动”。
+Windows boot identity 优先使用不随 wall-clock 校正整体漂移的 best-effort system boot-time source；它不是永久稳定的公开 Win32 contract，查询不可用时回退到 uptime/wall-clock observation。一次 boot 的轻微 key 漂移通过 boot time reconciliation 复用，真实 reboot 才创建新的 `boot_session`。`EVENT_SYSTEM_FOREGROUND` 使用 callback 提供的 tick timestamp 转换为 UTC epoch milliseconds，并包含 Resource Timeline 自身窗口。
 
 ## 应用身份归一化
 
-逻辑 `app` 与具体 `app_executable` 分离。身份解析优先组合包族名、签名发布者、文件身份、规范化路径和产品名。Microsoft Store 应用升级后路径变化，应尽量归入同一逻辑应用；无法可靠合并时宁可保留两个候选并允许用户手动合并。
+逻辑 `app` 与具体 `app_executable` 分离。当前运行时至少保存 `process_name`、display name、规范化 executable path；如果可靠获得 PID 与 process creation time，则建立 `process_instance`。可执行文件路径/版本变化不会在查询层自动拆分明显同名逻辑应用；无法可靠确认时保持 separate/unknown，不猜测。
 
 系统组件、浏览器和多进程应用需要聚合规则，但不在第一版通过窗口标题推测网站或文档。进程资源样本关联 executable，日报聚合关联 logical app。
 
 ## 隐私
 
-窗口标题/上下文默认关闭。开启后：
-
-- 用户可按应用排除。
-- 支持只保存散列/规则化类别，而不是原始标题。
-- 敏感应用可强制不记录。
-- 提供单独清除窗口上下文的操作，不影响应用时长。
+默认不保存窗口标题、文档标题、浏览器 URL 或网站名称。schema 中的 window context 预留保持未启用，应用使用统计不依赖窗口内容。
 
 ## 参考方向
 
@@ -57,6 +66,8 @@
 ## 验收
 
 - 前台快速切换、锁屏、空闲、休眠和跨午夜场景无重叠或负区间。
+- foreground total、active usage、idle foreground 来自两条时间轴的区间求交，日报重算幂等。
 - 应用所有 active usage 之和不超过电脑 active time（允许 unknown 未归属）。
 - 强杀应用后，恢复逻辑不会把停机时间计入前台使用。
-- 关闭标题记录时，数据库不存在新标题内容。
+- launch_count 只统计同时有 PID 和 process creation time 的 observed process instance；无法可靠确认时不以 foreground activation 次数代替。
+- 数据库不存在新窗口标题、文档标题或 URL 内容。

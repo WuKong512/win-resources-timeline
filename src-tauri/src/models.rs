@@ -2,15 +2,49 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ForegroundApp {
+    /// Stable logical-app key. The executable path is stored separately in app_executable.
     pub identity_key: String,
     pub process_name: String,
     pub exe_path: Option<String>,
     pub display_name: String,
+    pub pid: Option<u32>,
+    pub process_creation_time_ms: Option<i64>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ComputerState {
+    Active,
+    Idle,
+    Locked,
+    Sleep,
+    Disconnected,
+    #[allow(dead_code)]
+    Unknown,
+}
+
+impl ComputerState {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Active => "active",
+            Self::Idle => "idle",
+            Self::Locked => "locked",
+            Self::Sleep => "sleep",
+            Self::Disconnected => "disconnected",
+            Self::Unknown => "unknown",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BootIdentity {
+    pub boot_id: String,
+    pub boot_time_ms: i64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ActivityState {
     Active,
+    #[allow(dead_code)]
     Idle,
 }
 
@@ -56,9 +90,27 @@ pub struct AppUsageSummary {
     pub app_id: i64,
     pub app_name: String,
     pub display_name: String,
+    pub foreground_total_ms: i64,
+    pub active_usage_ms: i64,
+    pub idle_foreground_ms: i64,
     pub active_seconds: i64,
     pub idle_seconds: i64,
     pub percentage: f64,
+    pub is_hidden: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DailyUsageSummary {
+    pub local_date: String,
+    pub app_id: i64,
+    pub app_name: String,
+    pub display_name: String,
+    pub foreground_total_ms: i64,
+    pub active_usage_ms: i64,
+    pub idle_foreground_ms: i64,
+    pub launch_count: i64,
+    pub processing_version: String,
     pub is_hidden: bool,
 }
 
@@ -123,6 +175,7 @@ pub struct TodayOverview {
     pub end_ms: i64,
     pub total_active_foreground_seconds: i64,
     pub total_idle_foreground_seconds: i64,
+    pub computer_active_seconds: i64,
     pub hidden_active_foreground_seconds: i64,
     pub top_apps: Vec<AppUsageSummary>,
     pub cpu_sampled_peak: Option<f64>,
@@ -141,6 +194,9 @@ pub struct CollectorStatus {
     pub last_foreground_sample_at_ms: Option<i64>,
     pub last_system_sample_at_ms: Option<i64>,
     pub dropped_system_samples: u64,
+    pub usage_write_failures: u64,
+    pub usage_write_retries: u64,
+    pub last_usage_write_error: Option<String>,
     pub database_size_bytes: u64,
     pub database_path: String,
 }

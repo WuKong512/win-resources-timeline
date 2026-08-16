@@ -634,6 +634,7 @@ fn migrate_v6_to_v7_with_options(
         rename_legacy_tables(&tx)?;
         tx.execute_batch(SCHEMA_V7)?;
         tx.execute_batch(V7_COMPATIBILITY_DDL)?;
+        repair_open_computer_state_intervals(&tx)?;
         install_v7_nullable_constraints(&tx)?;
         let (boot, collection) = ensure_legacy_session(&tx, &legacy)?;
         mark_stage_tx(&tx, &run_id, "create", "completed", None, None)?;
@@ -1107,8 +1108,40 @@ fn ensure_v7_compatibility(conn: &mut Connection) -> rusqlite::Result<()> {
         ));
     }
     tx.execute_batch(V7_COMPATIBILITY_DDL)?;
+    repair_open_computer_state_intervals(&tx)?;
     install_v7_nullable_constraints(&tx)?;
     tx.commit()
+}
+
+fn repair_open_computer_state_intervals(tx: &Transaction<'_>) -> rusqlite::Result<()> {
+    tx.execute(
+        "UPDATE computer_state_interval AS current
+         SET end_ts = MAX(
+             current.start_ts,
+             (
+                 SELECT MIN(next.start_ts)
+                 FROM computer_state_interval AS next
+                 WHERE next.boot_session_id = current.boot_session_id
+                   AND next.end_ts IS NULL
+                   AND next.id > current.id
+             )
+         )
+         WHERE current.end_ts IS NULL
+           AND EXISTS (
+               SELECT 1
+               FROM computer_state_interval AS next
+               WHERE next.boot_session_id = current.boot_session_id
+                 AND next.end_ts IS NULL
+                 AND next.id > current.id
+           )",
+        [],
+    )?;
+    tx.execute_batch(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_computer_state_single_open
+         ON computer_state_interval(boot_session_id)
+         WHERE end_ts IS NULL;",
+    )?;
+    Ok(())
 }
 
 fn install_v7_nullable_constraints(tx: &Transaction<'_>) -> rusqlite::Result<()> {

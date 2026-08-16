@@ -1,7 +1,13 @@
-use crate::models::{CollectionSettings, ForegroundApp, ResourceSnapshot, SystemSample};
-use rusqlite::{params, Connection, OptionalExtension};
+use crate::{
+    db::usage::{intersect_foreground, StateRange, TimeRange},
+    models::{
+        ActivityState, BootIdentity, CollectionSettings, ComputerState, ForegroundApp,
+        ResourceSnapshot, SystemSample,
+    },
+};
+use rusqlite::{params, Connection, OptionalExtension, Transaction};
 use std::{
-    collections::{HashSet, VecDeque},
+    collections::{HashMap, HashSet, VecDeque},
     io,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
@@ -18,6 +24,52 @@ pub struct WriterHealth {
     pub last_commit_duration_ms: u64,
     pub last_committed_timestamp_ms: Option<i64>,
     pub last_error: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AppResolution {
+    pub app_id: i64,
+    pub app_executable_id: i64,
+    pub process_instance_id: Option<i64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum UsageWriteAction {
+    StartForeground {
+        app_executable_id: i64,
+        at_ms: i64,
+    },
+    CheckpointForeground {
+        at_ms: i64,
+    },
+    CloseForeground {
+        at_ms: i64,
+        reason: &'static str,
+    },
+    StartComputerState {
+        state: ComputerState,
+        at_ms: i64,
+        source: &'static str,
+        quality: i64,
+    },
+    CheckpointComputerState {
+        at_ms: i64,
+    },
+    CloseComputerState {
+        at_ms: i64,
+        reason: &'static str,
+    },
+    MarkWindowsShutdown {
+        at_ms: i64,
+    },
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct UsagePersistenceState {
+    pub open_foreground_id: Option<i64>,
+    pub open_computer_state_id: Option<i64>,
+    pub last_foreground_checkpoint_ms: i64,
+    pub last_computer_checkpoint_ms: i64,
 }
 
 struct QueuedFrame {
@@ -311,42 +363,163 @@ impl FrameWriter {
     }
 }
 
+#[allow(dead_code)]
 pub fn recover_open_interval(conn: &Connection) -> rusqlite::Result<usize> {
-    conn.execute(
-        "UPDATE foreground_interval SET end_time_ms = last_seen_time_ms, close_reason = 'recovery' WHERE end_time_ms IS NULL",
+    recover_open_intervals(conn, now_ms())
+}
+
+pub fn recover_open_intervals(conn: &Connection, recovery_at_ms: i64) -> rusqlite::Result<usize> {
+    let checkpoint: Option<i64> = conn
+        .query_row(
+            "SELECT CAST(value AS INTEGER) FROM settings WHERE key = 'runtime_usage_heartbeat_ms'",
+            [],
+            |row| row.get(0),
+        )
+        .optional()?;
+    let last_foreground_seen: Option<i64> = conn.query_row(
+        "SELECT MAX(last_seen_time_ms) FROM foreground_interval WHERE end_time_ms IS NULL",
         [],
-    )
+        |row| row.get(0),
+    )?;
+    let strict_now = recovery_at_ms.saturating_sub(1).max(0);
+    let state_recovery_at = checkpoint.unwrap_or_default().clamp(0, strict_now);
+    let collection_recovery_at = checkpoint
+        .unwrap_or_default()
+        .max(last_foreground_seen.unwrap_or_default())
+        .clamp(0, strict_now);
+    let tx = conn.unchecked_transaction()?;
+    let mut recovered = tx.execute(
+        "UPDATE foreground_interval
+         SET end_time_ms = MAX(start_time_ms, last_seen_time_ms), close_reason = 'recovery'
+         WHERE end_time_ms IS NULL",
+        [],
+    )?;
+    recovered += tx.execute(
+        "UPDATE computer_state_interval
+         SET end_ts = MAX(start_ts, ?1)
+         WHERE end_ts IS NULL",
+        [state_recovery_at],
+    )?;
+    tx.execute(
+        "UPDATE collection_session
+         SET ended_at_ms = MAX(started_at_ms, MIN(?1, ?2))
+         WHERE ended_at_ms IS NULL",
+        params![collection_recovery_at, strict_now],
+    )?;
+    tx.commit()?;
+    Ok(recovered)
 }
 
 pub fn start_runtime_session(conn: &Connection, now: i64) -> rusqlite::Result<()> {
+    let identity = crate::platform::boot_identity(now);
+    start_runtime_session_with_identity(conn, now, &identity)
+}
+
+pub fn start_runtime_session_with_identity(
+    conn: &Connection,
+    now: i64,
+    identity: &BootIdentity,
+) -> rusqlite::Result<()> {
     let tx = conn.unchecked_transaction()?;
-    let boot_key = format!("runtime-{now}-{}", std::process::id());
-    tx.execute(
-        "INSERT INTO boot_session(boot_id, boot_time_ms, observed_start_ms, shutdown_kind, created_at_ms) VALUES (?1, ?2, ?2, NULL, ?2)",
-        params![boot_key, now],
+    start_runtime_session_tx(&tx, now, identity)?;
+    tx.commit()
+}
+
+fn start_runtime_session_tx(
+    tx: &Transaction<'_>,
+    now: i64,
+    identity: &BootIdentity,
+) -> rusqlite::Result<()> {
+    let strict_now = now.saturating_sub(1).max(0);
+    let last_foreground_seen: Option<i64> = tx.query_row(
+        "SELECT MAX(last_seen_time_ms) FROM foreground_interval WHERE end_time_ms IS NULL",
+        [],
+        |row| row.get(0),
     )?;
-    let boot_id = tx.last_insert_rowid();
+    let usage_checkpoint: Option<i64> = tx
+        .query_row(
+            "SELECT CAST(value AS INTEGER) FROM settings WHERE key = 'runtime_usage_heartbeat_ms'",
+            [],
+            |row| row.get(0),
+        )
+        .optional()?;
+    let trusted_cutoff = usage_checkpoint
+        .unwrap_or_default()
+        .max(last_foreground_seen.unwrap_or_default())
+        .clamp(0, strict_now);
     tx.execute(
-        "INSERT INTO collection_session(boot_session_id, started_at_ms, app_version, schema_version, config_hash) VALUES (?1, ?2, ?3, 7, NULL)",
+        "UPDATE collection_session
+         SET ended_at_ms = MAX(started_at_ms, MIN(?1, ?2))
+         WHERE ended_at_ms IS NULL",
+        params![trusted_cutoff, strict_now],
+    )?;
+    let exact_boot_id = tx
+        .query_row(
+            "SELECT id FROM boot_session WHERE boot_id = ?1",
+            [&identity.boot_id],
+            |row| row.get(0),
+        )
+        .optional()?;
+    let reconciled_boot_id = if exact_boot_id.is_some() {
+        exact_boot_id
+    } else {
+        tx.query_row(
+            "SELECT id
+             FROM boot_session
+             WHERE boot_time_ms IS NOT NULL
+               AND ABS(boot_time_ms - ?1) <= ?2
+             ORDER BY ABS(boot_time_ms - ?1), id DESC
+             LIMIT 1",
+            params![identity.boot_time_ms, BOOT_TIME_MATCH_TOLERANCE_MS],
+            |row| row.get(0),
+        )
+        .optional()?
+    };
+    let boot_id: i64 = if let Some(id) = reconciled_boot_id {
+        tx.execute(
+            "UPDATE boot_session
+             SET boot_time_ms = COALESCE(boot_time_ms, ?1),
+                 observed_start_ms = CASE WHEN observed_start_ms IS NULL OR ?2 < observed_start_ms THEN ?2 ELSE observed_start_ms END
+             WHERE id = ?3",
+            params![identity.boot_time_ms, now, id],
+        )?;
+        id
+    } else {
+        tx.execute(
+            "INSERT INTO boot_session(boot_id, boot_time_ms, observed_start_ms, shutdown_kind, created_at_ms)
+             VALUES (?1, ?2, ?3, NULL, ?3)",
+            params![identity.boot_id, identity.boot_time_ms, now],
+        )?;
+        tx.last_insert_rowid()
+    };
+    tx.execute(
+        "INSERT INTO collection_session(boot_session_id, started_at_ms, app_version, schema_version, config_hash)
+         VALUES (?1, ?2, ?3, 7, NULL)",
         params![boot_id, now, env!("CARGO_PKG_VERSION")],
     )?;
     let collection_id = tx.last_insert_rowid();
     for (key, value) in [
         ("runtime_boot_session_id", boot_id),
         ("runtime_collection_session_id", collection_id),
+        ("runtime_usage_heartbeat_ms", now),
     ] {
         tx.execute(
-            "INSERT INTO settings(key, value, updated_at_ms) VALUES (?1, ?2, ?3) ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at_ms = excluded.updated_at_ms",
+            "INSERT INTO settings(key, value, updated_at_ms) VALUES (?1, ?2, ?3)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at_ms = excluded.updated_at_ms",
             params![key, value.to_string(), now],
         )?;
     }
-    tx.commit()
+    Ok(())
 }
 
 pub fn ensure_runtime_session(conn: &Connection, now: i64) -> rusqlite::Result<()> {
     let exists: Option<i64> = conn
         .query_row(
-            "SELECT CAST(value AS INTEGER) FROM settings WHERE key = 'runtime_collection_session_id'",
+            "SELECT cs.id
+             FROM collection_session cs
+             JOIN settings s ON s.key = 'runtime_collection_session_id'
+                            AND CAST(s.value AS INTEGER) = cs.id
+             WHERE cs.ended_at_ms IS NULL",
             [],
             |row| row.get(0),
         )
@@ -357,6 +530,49 @@ pub fn ensure_runtime_session(conn: &Connection, now: i64) -> rusqlite::Result<(
     Ok(())
 }
 
+fn ensure_runtime_session_tx(tx: &Transaction<'_>, now: i64) -> rusqlite::Result<()> {
+    let exists: Option<i64> = tx
+        .query_row(
+            "SELECT cs.id
+             FROM collection_session cs
+             JOIN settings s ON s.key = 'runtime_collection_session_id'
+                            AND CAST(s.value AS INTEGER) = cs.id
+             WHERE cs.ended_at_ms IS NULL",
+            [],
+            |row| row.get(0),
+        )
+        .optional()?;
+    if exists.is_none() {
+        let identity = crate::platform::boot_identity(now);
+        start_runtime_session_tx(tx, now, &identity)?;
+    }
+    Ok(())
+}
+
+pub fn finish_collection_session(
+    conn: &Connection,
+    now: i64,
+    _shutdown_kind: &str,
+) -> rusqlite::Result<()> {
+    let collection_id: Option<i64> = conn
+        .query_row(
+            "SELECT CAST(value AS INTEGER) FROM settings WHERE key = 'runtime_collection_session_id'",
+            [],
+            |row| row.get(0),
+        )
+        .optional()?;
+    if let Some(collection_id) = collection_id {
+        conn.execute(
+            "UPDATE collection_session
+             SET ended_at_ms = MAX(started_at_ms, ?1)
+             WHERE id = ?2 AND ended_at_ms IS NULL",
+            params![now, collection_id],
+        )?;
+    }
+    Ok(())
+}
+
+#[allow(dead_code)]
 pub fn finish_runtime_session(
     conn: &Connection,
     now: i64,
@@ -396,6 +612,23 @@ pub fn finish_runtime_session(
     tx.commit()
 }
 
+#[allow(dead_code)]
+pub fn mark_windows_shutdown(
+    conn: &Connection,
+    now: i64,
+    shutdown_kind: &str,
+) -> rusqlite::Result<()> {
+    let boot_id = current_boot_session_id(conn)?;
+    conn.execute(
+        "UPDATE boot_session
+         SET observed_end_ms = MAX(COALESCE(observed_end_ms, 0), ?1), shutdown_kind = ?2
+         WHERE id = ?3",
+        params![now, shutdown_kind, boot_id],
+    )?;
+    Ok(())
+}
+
+#[allow(dead_code)]
 pub fn upsert_app(conn: &Connection, app: &ForegroundApp, now: i64) -> rusqlite::Result<i64> {
     let tx = conn.unchecked_transaction()?;
     let app_id = upsert_app_tx(&tx, app, now, true)?;
@@ -408,22 +641,129 @@ pub fn upsert_app(conn: &Connection, app: &ForegroundApp, now: i64) -> rusqlite:
     Ok(executable_id)
 }
 
+pub fn resolve_foreground_app(
+    conn: &Connection,
+    app: &ForegroundApp,
+    now: i64,
+) -> rusqlite::Result<AppResolution> {
+    let tx = conn.unchecked_transaction()?;
+    let app_id = upsert_app_tx(&tx, app, now, true)?;
+    let executable_id: i64 = tx.query_row(
+        "SELECT id FROM app_executable WHERE app_id = ?1 AND normalized_path = ?2",
+        params![app_id, normalized_path(app)],
+        |row| row.get(0),
+    )?;
+    let process_instance_id = match (app.pid, app.process_creation_time_ms) {
+        (Some(pid), Some(create_time_ms)) => {
+            let stable_key = format!("runtime:{executable_id}:{pid}:{create_time_ms}");
+            tx.execute(
+                "INSERT INTO process_instance(app_executable_id, stable_key, pid, create_time_ms, source)
+                 VALUES (?1, ?2, ?3, ?4, 'runtime')
+                 ON CONFLICT(stable_key) DO UPDATE SET
+                    app_executable_id = excluded.app_executable_id,
+                    pid = excluded.pid,
+                    create_time_ms = excluded.create_time_ms",
+                params![executable_id, stable_key, i64::from(pid), create_time_ms],
+            )?;
+            Some(tx.query_row(
+                "SELECT id FROM process_instance WHERE stable_key = ?1",
+                [stable_key],
+                |row| row.get(0),
+            )?)
+        }
+        _ => None,
+    };
+    tx.commit()?;
+    Ok(AppResolution {
+        app_id,
+        app_executable_id: executable_id,
+        process_instance_id,
+    })
+}
+
+#[allow(dead_code)]
 pub fn begin_interval(
     conn: &Connection,
     app_executable_id: i64,
     at_ms: i64,
-    state: &str,
+    _state: &str,
+) -> rusqlite::Result<i64> {
+    begin_foreground_interval(conn, app_executable_id, at_ms)
+}
+
+pub fn begin_foreground_interval(
+    conn: &Connection,
+    app_executable_id: i64,
+    at_ms: i64,
 ) -> rusqlite::Result<i64> {
     ensure_runtime_session(conn, at_ms)?;
     let boot_id = current_boot_session_id(conn)?;
     conn.execute(
         "INSERT INTO foreground_interval(boot_session_id, app_executable_id, start_time_ms, last_seen_time_ms, activity_state) VALUES (?1, ?2, ?3, ?3, ?4)",
-        params![boot_id, app_executable_id, at_ms, state],
+        params![boot_id, app_executable_id, at_ms, ActivityState::Active.as_str()],
     )?;
     Ok(conn.last_insert_rowid())
 }
 
+#[allow(dead_code)]
+pub fn begin_computer_state_interval(
+    conn: &Connection,
+    state: ComputerState,
+    at_ms: i64,
+    source: &str,
+    quality: i64,
+) -> rusqlite::Result<i64> {
+    ensure_runtime_session(conn, at_ms)?;
+    let boot_id = current_boot_session_id(conn)?;
+    conn.execute(
+        "INSERT INTO computer_state_interval(boot_session_id, state, start_ts, source, quality)
+         VALUES (?1, ?2, ?3, ?4, ?5)",
+        params![boot_id, state.as_str(), at_ms, source, quality],
+    )?;
+    conn.execute(
+        "INSERT INTO settings(key, value, updated_at_ms) VALUES ('runtime_usage_heartbeat_ms', ?1, ?1)
+         ON CONFLICT(key) DO UPDATE SET value = MAX(CAST(value AS INTEGER), excluded.value), updated_at_ms = excluded.updated_at_ms",
+        [at_ms],
+    )?;
+    Ok(conn.last_insert_rowid())
+}
+
+#[allow(dead_code)]
+pub fn checkpoint_computer_state(conn: &Connection, at_ms: i64) -> rusqlite::Result<()> {
+    conn.execute(
+        "INSERT INTO settings(key, value, updated_at_ms) VALUES ('runtime_usage_heartbeat_ms', ?1, ?1)
+         ON CONFLICT(key) DO UPDATE SET value = MAX(CAST(value AS INTEGER), excluded.value), updated_at_ms = excluded.updated_at_ms",
+        [at_ms],
+    )?;
+    Ok(())
+}
+
+#[allow(dead_code)]
+pub fn close_computer_state_interval(
+    conn: &Connection,
+    interval_id: i64,
+    at_ms: i64,
+    _reason: &str,
+) -> rusqlite::Result<()> {
+    conn.execute(
+        "UPDATE computer_state_interval
+         SET end_ts = MAX(start_ts, ?1)
+         WHERE id = ?2 AND end_ts IS NULL",
+        params![at_ms, interval_id],
+    )?;
+    checkpoint_computer_state(conn, at_ms)
+}
+
+#[allow(dead_code)]
 pub fn checkpoint_interval(
+    conn: &Connection,
+    interval_id: i64,
+    at_ms: i64,
+) -> rusqlite::Result<()> {
+    checkpoint_foreground_interval(conn, interval_id, at_ms)
+}
+
+pub fn checkpoint_foreground_interval(
     conn: &Connection,
     interval_id: i64,
     at_ms: i64,
@@ -435,7 +775,17 @@ pub fn checkpoint_interval(
     Ok(())
 }
 
+#[allow(dead_code)]
 pub fn close_interval(
+    conn: &Connection,
+    interval_id: i64,
+    at_ms: i64,
+    reason: &str,
+) -> rusqlite::Result<()> {
+    close_foreground_interval(conn, interval_id, at_ms, reason)
+}
+
+pub fn close_foreground_interval(
     conn: &Connection,
     interval_id: i64,
     at_ms: i64,
@@ -446,6 +796,248 @@ pub fn close_interval(
         params![at_ms, reason, interval_id],
     )?;
     Ok(())
+}
+
+pub fn apply_usage_actions_with_retry(
+    conn: &Connection,
+    actions: &[UsageWriteAction],
+    current: UsagePersistenceState,
+    checkpoint_interval_ms: i64,
+    deadline: Option<Instant>,
+) -> rusqlite::Result<(UsagePersistenceState, u32)> {
+    apply_usage_actions_with_retry_configured(
+        conn,
+        actions,
+        current,
+        checkpoint_interval_ms,
+        deadline,
+        4,
+        SQLITE_BUSY_TIMEOUT,
+    )
+}
+
+#[cfg(test)]
+pub(crate) fn apply_usage_actions_with_retry_for_test(
+    conn: &Connection,
+    actions: &[UsageWriteAction],
+    current: UsagePersistenceState,
+    checkpoint_interval_ms: i64,
+    deadline: Option<Instant>,
+    retry_limit: u32,
+    busy_timeout: Duration,
+) -> rusqlite::Result<(UsagePersistenceState, u32)> {
+    apply_usage_actions_with_retry_configured(
+        conn,
+        actions,
+        current,
+        checkpoint_interval_ms,
+        deadline,
+        retry_limit,
+        busy_timeout,
+    )
+}
+
+fn apply_usage_actions_with_retry_configured(
+    conn: &Connection,
+    actions: &[UsageWriteAction],
+    current: UsagePersistenceState,
+    checkpoint_interval_ms: i64,
+    deadline: Option<Instant>,
+    max_retries: u32,
+    busy_timeout: Duration,
+) -> rusqlite::Result<(UsagePersistenceState, u32)> {
+    let operation_deadline = deadline.unwrap_or_else(|| Instant::now() + Duration::from_secs(2));
+    let mut retries = 0;
+    loop {
+        if Instant::now() >= operation_deadline {
+            return Err(usage_write_timeout_error());
+        }
+        configure_connection_for_deadline_with_cap(conn, operation_deadline, busy_timeout)?;
+        match apply_usage_actions(conn, actions, current, checkpoint_interval_ms) {
+            Ok(next) => return Ok((next, retries)),
+            Err(error) if is_transient_usage_error(&error) && retries < max_retries => {
+                retries += 1;
+                let delay = retry_backoff(retries)
+                    .min(operation_deadline.saturating_duration_since(Instant::now()));
+                if delay.is_zero() {
+                    return Err(error);
+                }
+                std::thread::sleep(delay);
+            }
+            Err(error) => return Err(error),
+        }
+    }
+}
+
+fn apply_usage_actions(
+    conn: &Connection,
+    actions: &[UsageWriteAction],
+    current: UsagePersistenceState,
+    checkpoint_interval_ms: i64,
+) -> rusqlite::Result<UsagePersistenceState> {
+    if actions.is_empty() {
+        return Ok(current);
+    }
+    let max_at = actions
+        .iter()
+        .map(usage_write_timestamp)
+        .max()
+        .unwrap_or_default();
+    let tx = conn.unchecked_transaction()?;
+    ensure_runtime_session_tx(&tx, max_at)?;
+    let mut next = current;
+    let checkpoint_interval_ms = checkpoint_interval_ms.max(1);
+
+    for action in actions {
+        match action {
+            UsageWriteAction::StartForeground {
+                app_executable_id,
+                at_ms,
+            } => {
+                if next.open_foreground_id.is_some() {
+                    return Err(usage_state_error(
+                        "usage batch attempted to start a foreground interval while one is open",
+                    ));
+                }
+                let boot_id = current_boot_session_id(&tx)?;
+                tx.execute(
+                    "INSERT INTO foreground_interval(boot_session_id, app_executable_id, start_time_ms, last_seen_time_ms, activity_state) VALUES (?1, ?2, ?3, ?3, ?4)",
+                    params![boot_id, app_executable_id, at_ms, ActivityState::Active.as_str()],
+                )?;
+                next.open_foreground_id = Some(tx.last_insert_rowid());
+            }
+            UsageWriteAction::CheckpointForeground { at_ms } => {
+                if at_ms.saturating_sub(next.last_foreground_checkpoint_ms)
+                    >= checkpoint_interval_ms
+                {
+                    let Some(interval_id) = next.open_foreground_id else {
+                        return Err(usage_state_error(
+                            "usage batch attempted to checkpoint a missing foreground interval",
+                        ));
+                    };
+                    let changed = tx.execute(
+                        "UPDATE foreground_interval SET last_seen_time_ms = MAX(last_seen_time_ms, ?1) WHERE id = ?2 AND end_time_ms IS NULL",
+                        params![at_ms, interval_id],
+                    )?;
+                    if changed != 1 {
+                        return Err(usage_state_error(
+                            "usage batch could not checkpoint the open foreground interval",
+                        ));
+                    }
+                    next.last_foreground_checkpoint_ms = *at_ms;
+                }
+            }
+            UsageWriteAction::CloseForeground { at_ms, reason } => {
+                let Some(interval_id) = next.open_foreground_id else {
+                    return Err(usage_state_error(
+                        "usage batch attempted to close a missing foreground interval",
+                    ));
+                };
+                let changed = tx.execute(
+                    "UPDATE foreground_interval SET last_seen_time_ms = MAX(last_seen_time_ms, ?1), end_time_ms = MAX(start_time_ms, ?1), close_reason = ?2 WHERE id = ?3 AND end_time_ms IS NULL",
+                    params![at_ms, reason, interval_id],
+                )?;
+                if changed != 1 {
+                    return Err(usage_state_error(
+                        "usage batch could not close the open foreground interval",
+                    ));
+                }
+                next.open_foreground_id = None;
+                next.last_foreground_checkpoint_ms = 0;
+            }
+            UsageWriteAction::StartComputerState {
+                state,
+                at_ms,
+                source,
+                quality,
+            } => {
+                if next.open_computer_state_id.is_some() {
+                    return Err(usage_state_error(
+                        "usage batch attempted to start a computer state while one is open",
+                    ));
+                }
+                let boot_id = current_boot_session_id(&tx)?;
+                tx.execute(
+                    "INSERT INTO computer_state_interval(boot_session_id, state, start_ts, source, quality) VALUES (?1, ?2, ?3, ?4, ?5)",
+                    params![boot_id, state.as_str(), at_ms, source, quality],
+                )?;
+                tx.execute(
+                    "INSERT INTO settings(key, value, updated_at_ms) VALUES ('runtime_usage_heartbeat_ms', ?1, ?1) ON CONFLICT(key) DO UPDATE SET value = MAX(CAST(value AS INTEGER), excluded.value), updated_at_ms = excluded.updated_at_ms",
+                    [at_ms],
+                )?;
+                next.open_computer_state_id = Some(tx.last_insert_rowid());
+            }
+            UsageWriteAction::CheckpointComputerState { at_ms } => {
+                if at_ms.saturating_sub(next.last_computer_checkpoint_ms) >= checkpoint_interval_ms
+                {
+                    if next.open_computer_state_id.is_none() {
+                        return Err(usage_state_error(
+                            "usage batch attempted to checkpoint a missing computer state interval",
+                        ));
+                    }
+                    tx.execute(
+                        "INSERT INTO settings(key, value, updated_at_ms) VALUES ('runtime_usage_heartbeat_ms', ?1, ?1) ON CONFLICT(key) DO UPDATE SET value = MAX(CAST(value AS INTEGER), excluded.value), updated_at_ms = excluded.updated_at_ms",
+                        [at_ms],
+                    )?;
+                    next.last_computer_checkpoint_ms = *at_ms;
+                }
+            }
+            UsageWriteAction::CloseComputerState { at_ms, .. } => {
+                let Some(interval_id) = next.open_computer_state_id else {
+                    return Err(usage_state_error(
+                        "usage batch attempted to close a missing computer state interval",
+                    ));
+                };
+                let changed = tx.execute(
+                    "UPDATE computer_state_interval SET end_ts = MAX(start_ts, ?1) WHERE id = ?2 AND end_ts IS NULL",
+                    params![at_ms, interval_id],
+                )?;
+                if changed != 1 {
+                    return Err(usage_state_error(
+                        "usage batch could not close the open computer state interval",
+                    ));
+                }
+                tx.execute(
+                    "INSERT INTO settings(key, value, updated_at_ms) VALUES ('runtime_usage_heartbeat_ms', ?1, ?1) ON CONFLICT(key) DO UPDATE SET value = MAX(CAST(value AS INTEGER), excluded.value), updated_at_ms = excluded.updated_at_ms",
+                    [at_ms],
+                )?;
+                next.open_computer_state_id = None;
+                next.last_computer_checkpoint_ms = 0;
+            }
+            UsageWriteAction::MarkWindowsShutdown { at_ms } => {
+                let boot_id = current_boot_session_id(&tx)?;
+                tx.execute(
+                    "UPDATE boot_session SET observed_end_ms = MAX(COALESCE(observed_end_ms, 0), ?1), shutdown_kind = 'clean' WHERE id = ?2",
+                    params![at_ms, boot_id],
+                )?;
+            }
+        }
+    }
+    tx.commit()?;
+    Ok(next)
+}
+
+fn usage_write_timestamp(action: &UsageWriteAction) -> i64 {
+    match action {
+        UsageWriteAction::StartForeground { at_ms, .. }
+        | UsageWriteAction::CheckpointForeground { at_ms }
+        | UsageWriteAction::CloseForeground { at_ms, .. }
+        | UsageWriteAction::StartComputerState { at_ms, .. }
+        | UsageWriteAction::CheckpointComputerState { at_ms }
+        | UsageWriteAction::CloseComputerState { at_ms, .. }
+        | UsageWriteAction::MarkWindowsShutdown { at_ms } => *at_ms,
+    }
+}
+
+fn usage_state_error(message: &str) -> rusqlite::Error {
+    rusqlite::Error::ToSqlConversionFailure(Box::new(io::Error::other(message)))
+}
+
+fn usage_write_timeout_error() -> rusqlite::Error {
+    rusqlite::Error::ToSqlConversionFailure(Box::new(io::Error::new(
+        io::ErrorKind::TimedOut,
+        "usage write deadline expired",
+    )))
 }
 
 #[allow(dead_code)]
@@ -585,6 +1177,8 @@ fn upsert_resource_app_tx(
         process_name: app.process_name.clone(),
         exe_path: app.exe_path.clone(),
         display_name: app.process_name.clone(),
+        pid: None,
+        process_creation_time_ms: None,
     };
     upsert_app_tx(tx, &foreground, now, false)?;
     tx.query_row(
@@ -610,10 +1204,213 @@ fn normalized_path(app: &ForegroundApp) -> String {
         .unwrap_or_else(|| format!("legacy:{}", app.identity_key))
 }
 
+const USAGE_PROCESSING_VERSION: &str = "pr02-v1";
+const BOOT_TIME_MATCH_TOLERANCE_MS: i64 = 5_000;
+
+#[derive(Default)]
+struct DailyUsageAccumulator {
+    app_id: i64,
+    foreground_total_ms: i64,
+    active_usage_ms: i64,
+    idle_foreground_ms: i64,
+}
+
+pub fn rebuild_daily_usage(conn: &Connection, start_ms: i64, end_ms: i64) -> rusqlite::Result<()> {
+    if end_ms <= start_ms {
+        return Ok(());
+    }
+    let mut date_statement = conn.prepare(
+        "WITH RECURSIVE dates(day) AS (
+             SELECT date(?1 / 1000.0, 'unixepoch', 'localtime')
+             UNION ALL
+             SELECT date(day, '+1 day') FROM dates
+             WHERE day < date((?2 - 1) / 1000.0, 'unixepoch', 'localtime')
+         )
+         SELECT day,
+                CAST(strftime('%s', day || ' 00:00:00', 'utc') AS INTEGER) * 1000,
+                CAST(strftime('%s', date(day, '+1 day') || ' 00:00:00', 'utc') AS INTEGER) * 1000
+         FROM dates",
+    )?;
+    let days: Vec<(String, i64, i64)> = date_statement
+        .query_map(params![start_ms, end_ms], |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+        })?
+        .collect::<rusqlite::Result<_>>()?;
+    let state_start_ms = days
+        .first()
+        .map_or(start_ms, |(_, day_start, _)| *day_start);
+    let state_end_ms = days.last().map_or(end_ms, |(_, _, day_end)| *day_end);
+    let state_checkpoint = usage_heartbeat_checkpoint(conn)?
+        .unwrap_or(state_end_ms)
+        .min(state_end_ms);
+    let state_ranges =
+        load_rollup_state_ranges(conn, state_start_ms, state_end_ms, state_checkpoint)?;
+    let mut rebuilt = Vec::<(String, i64, i64, Vec<DailyUsageAccumulator>)>::new();
+
+    for (local_date, day_start, day_end) in days {
+        let mut foreground_statement = conn.prepare(
+            "SELECT fi.boot_session_id, e.app_id,
+                    MAX(fi.start_time_ms, ?1),
+                    MIN(COALESCE(fi.end_time_ms, fi.last_seen_time_ms), ?2)
+             FROM foreground_interval fi
+             JOIN app_executable e ON e.id = fi.app_executable_id
+             WHERE fi.start_time_ms < ?2
+               AND COALESCE(fi.end_time_ms, fi.last_seen_time_ms) > ?1
+             ORDER BY fi.start_time_ms, fi.id",
+        )?;
+        let foregrounds: Vec<(i64, i64, i64, i64)> = foreground_statement
+            .query_map(params![day_start, day_end], |row| {
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+            })?
+            .collect::<rusqlite::Result<_>>()?;
+        let mut aggregates = std::collections::BTreeMap::<i64, DailyUsageAccumulator>::new();
+
+        for (boot_session_id, app_id, foreground_start, foreground_end) in foregrounds {
+            if foreground_end <= foreground_start {
+                continue;
+            }
+            let entry = aggregates
+                .entry(app_id)
+                .or_insert_with(|| DailyUsageAccumulator {
+                    app_id,
+                    ..DailyUsageAccumulator::default()
+                });
+            entry.foreground_total_ms = entry
+                .foreground_total_ms
+                .saturating_add(foreground_end - foreground_start);
+            let durations = state_ranges
+                .get(&boot_session_id)
+                .map(|states| {
+                    intersect_foreground(
+                        boot_session_id,
+                        TimeRange {
+                            start_ms: foreground_start,
+                            end_ms: foreground_end,
+                        },
+                        states,
+                    )
+                })
+                .unwrap_or_default();
+            entry.active_usage_ms = entry.active_usage_ms.saturating_add(durations.active_ms);
+            entry.idle_foreground_ms = entry.idle_foreground_ms.saturating_add(durations.idle_ms);
+        }
+        rebuilt.push((
+            local_date,
+            day_start,
+            day_end,
+            aggregates.into_values().collect(),
+        ));
+    }
+
+    let tx = conn.unchecked_transaction()?;
+    for (local_date, day_start, day_end, aggregates) in rebuilt {
+        tx.execute(
+            "DELETE FROM app_usage_daily WHERE local_date = ?1",
+            [&local_date],
+        )?;
+        for aggregate in aggregates {
+            let launch_count: i64 = tx.query_row(
+                "SELECT COUNT(DISTINCT pi.id)
+                 FROM process_instance pi
+                 JOIN app_executable e ON e.id = pi.app_executable_id
+                 WHERE e.app_id = ?1
+                   AND pi.pid IS NOT NULL
+                   AND pi.create_time_ms >= ?2
+                   AND pi.create_time_ms < ?3",
+                params![aggregate.app_id, day_start, day_end],
+                |row| row.get(0),
+            )?;
+            tx.execute(
+                "INSERT INTO app_usage_daily(
+                    local_date, app_id, foreground_total_ms, active_usage_ms,
+                    idle_foreground_ms, launch_count, processing_version
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+                 ON CONFLICT(local_date, app_id) DO UPDATE SET
+                    foreground_total_ms = excluded.foreground_total_ms,
+                    active_usage_ms = excluded.active_usage_ms,
+                    idle_foreground_ms = excluded.idle_foreground_ms,
+                    launch_count = excluded.launch_count,
+                    processing_version = excluded.processing_version",
+                params![
+                    local_date,
+                    aggregate.app_id,
+                    aggregate.foreground_total_ms,
+                    aggregate.active_usage_ms,
+                    aggregate.idle_foreground_ms,
+                    launch_count,
+                    USAGE_PROCESSING_VERSION,
+                ],
+            )?;
+        }
+    }
+    tx.commit()
+}
+
+fn usage_heartbeat_checkpoint(conn: &Connection) -> rusqlite::Result<Option<i64>> {
+    conn.query_row(
+        "SELECT CAST(value AS INTEGER) FROM settings WHERE key = 'runtime_usage_heartbeat_ms'",
+        [],
+        |row| row.get(0),
+    )
+    .optional()
+}
+
+fn load_rollup_state_ranges(
+    conn: &Connection,
+    start_ms: i64,
+    end_ms: i64,
+    checkpoint_ms: i64,
+) -> rusqlite::Result<HashMap<i64, Vec<StateRange>>> {
+    let mut statement = conn.prepare(
+        "SELECT boot_session_id, state, start_ts, COALESCE(end_ts, ?3)
+         FROM computer_state_interval
+         WHERE start_ts < ?2 AND COALESCE(end_ts, ?3) > ?1
+         ORDER BY boot_session_id, start_ts, id",
+    )?;
+    let mut ranges = HashMap::<i64, Vec<StateRange>>::new();
+    let rows = statement.query_map(params![start_ms, end_ms, checkpoint_ms], |row| {
+        Ok((
+            row.get::<_, i64>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, i64>(2)?,
+            row.get::<_, i64>(3)?,
+        ))
+    })?;
+    for row in rows {
+        let (boot_session_id, state, start_ms, end_ms) = row?;
+        if end_ms > start_ms {
+            ranges.entry(boot_session_id).or_default().push(StateRange {
+                boot_session_id,
+                state,
+                range: TimeRange { start_ms, end_ms },
+            });
+        }
+    }
+    Ok(ranges)
+}
+
 const RETRY_BASE_DELAY_MS: u64 = 25;
 const RETRY_MAX_DELAY_MS: u64 = 5_000;
 const MAX_RETRY_LIMIT: u32 = 32;
 const SQLITE_BUSY_TIMEOUT: Duration = Duration::from_secs(5);
+
+pub fn is_transient_usage_error(error: &rusqlite::Error) -> bool {
+    match error {
+        rusqlite::Error::SqliteFailure(code, _) => matches!(
+            code.code,
+            rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked
+        ),
+        rusqlite::Error::ToSqlConversionFailure(source) => {
+            source.downcast_ref::<io::Error>().is_some_and(|error| {
+                matches!(
+                    error.kind(),
+                    io::ErrorKind::TimedOut | io::ErrorKind::WouldBlock
+                )
+            })
+        }
+        _ => false,
+    }
+}
 
 fn retry_backoff(attempt: u32) -> Duration {
     if attempt == 0 {
@@ -640,11 +1437,19 @@ pub(crate) fn configure_connection_for_deadline(
     conn: &Connection,
     deadline: Instant,
 ) -> rusqlite::Result<()> {
+    configure_connection_for_deadline_with_cap(conn, deadline, SQLITE_BUSY_TIMEOUT)
+}
+
+fn configure_connection_for_deadline_with_cap(
+    conn: &Connection,
+    deadline: Instant,
+    busy_timeout_cap: Duration,
+) -> rusqlite::Result<()> {
     let remaining = deadline.saturating_duration_since(Instant::now());
     if remaining.is_zero() {
         return Err(shutdown_timeout_error());
     }
-    conn.busy_timeout(remaining.min(SQLITE_BUSY_TIMEOUT))
+    conn.busy_timeout(remaining.min(busy_timeout_cap))
 }
 
 fn shutdown_timeout_error() -> rusqlite::Error {
