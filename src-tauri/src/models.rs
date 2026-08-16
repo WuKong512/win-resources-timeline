@@ -1,5 +1,116 @@
 use serde::{Deserialize, Serialize};
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Ord, PartialOrd, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum MetricCategory {
+    Cpu,
+    Gpu,
+    Memory,
+    Disk,
+    Network,
+    Power,
+    Battery,
+    Process,
+}
+
+impl MetricCategory {
+    pub const ALL: [Self; 8] = [
+        Self::Cpu,
+        Self::Gpu,
+        Self::Memory,
+        Self::Disk,
+        Self::Network,
+        Self::Power,
+        Self::Battery,
+        Self::Process,
+    ];
+
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Cpu => "cpu",
+            Self::Gpu => "gpu",
+            Self::Memory => "memory",
+            Self::Disk => "disk",
+            Self::Network => "network",
+            Self::Power => "power",
+            Self::Battery => "battery",
+            Self::Process => "process",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum CapabilitySupportStatus {
+    Supported,
+    Unsupported,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum CapabilityState {
+    SupportedEnabled,
+    SupportedDisabled,
+    Unsupported,
+    Failed,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ProviderLifecycleState {
+    Stopped,
+    Running,
+    Paused,
+    Failed,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ProviderErrorCode {
+    ProviderMissing,
+    PermissionDenied,
+    StartupFailed,
+    SampleFailed,
+    StopFailed,
+    Unsupported,
+    UserDisabled,
+    CategoryDisabled,
+    Paused,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ProviderErrorSummary {
+    pub code: ProviderErrorCode,
+    pub message: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct MetricCapabilityStatus {
+    pub provider_id: String,
+    pub category: MetricCategory,
+    pub support_status: CapabilitySupportStatus,
+    pub enabled: bool,
+    pub can_toggle: bool,
+    pub state: CapabilityState,
+    pub reason_code: Option<ProviderErrorCode>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ProviderStatus {
+    pub provider_id: String,
+    pub display_name: String,
+    pub supported: bool,
+    pub enabled: bool,
+    pub lifecycle: ProviderLifecycleState,
+    pub capabilities: Vec<MetricCapabilityStatus>,
+    pub last_success_at_ms: Option<i64>,
+    pub failure_count: u64,
+    pub last_error: Option<ProviderErrorSummary>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ForegroundApp {
     /// Stable logical-app key. The executable path is stored separately in app_executable.
@@ -199,6 +310,7 @@ pub struct CollectorStatus {
     pub last_usage_write_error: Option<String>,
     pub database_size_bytes: u64,
     pub database_path: String,
+    pub provider_status: Vec<ProviderStatus>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -208,6 +320,19 @@ pub struct CollectionSettings {
     pub system_sample_interval_ms: u64,
     pub idle_threshold_seconds: u64,
     pub system_sample_retention_days: u64,
+    #[serde(default = "default_enabled_categories")]
+    pub enabled_categories: Vec<MetricCategory>,
+    #[serde(default)]
+    pub disabled_providers: Vec<String>,
+}
+
+fn default_enabled_categories() -> Vec<MetricCategory> {
+    vec![
+        MetricCategory::Cpu,
+        MetricCategory::Memory,
+        MetricCategory::Disk,
+        MetricCategory::Process,
+    ]
 }
 
 impl Default for CollectionSettings {
@@ -217,6 +342,8 @@ impl Default for CollectionSettings {
             system_sample_interval_ms: 5_000,
             idle_threshold_seconds: 300,
             system_sample_retention_days: 7,
+            enabled_categories: default_enabled_categories(),
+            disabled_providers: Vec::new(),
         }
     }
 }
@@ -234,6 +361,13 @@ impl CollectionSettings {
         }
         if !(1..=30).contains(&self.system_sample_retention_days) {
             return Err("systemSampleRetentionDays must be between 1 and 30".into());
+        }
+        if self
+            .disabled_providers
+            .iter()
+            .any(|provider| provider.trim().is_empty())
+        {
+            return Err("disabledProviders must not contain empty provider ids".into());
         }
         Ok(())
     }

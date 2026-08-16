@@ -2,7 +2,7 @@ use crate::{
     db::usage::{intersect_foreground, StateRange, TimeRange},
     models::{
         ActivityState, BootIdentity, CollectionSettings, ComputerState, ForegroundApp,
-        ResourceSnapshot, SystemSample,
+        MetricCategory, ResourceSnapshot, SystemSample,
     },
 };
 use rusqlite::{params, Connection, OptionalExtension, Transaction};
@@ -1049,7 +1049,12 @@ pub fn insert_resource_snapshot(
     conn: &Connection,
     snapshot: &ResourceSnapshot,
 ) -> rusqlite::Result<()> {
-    insert_snapshot(conn, &snapshot.system, &snapshot.apps, true)
+    insert_snapshot(
+        conn,
+        &snapshot.system,
+        &snapshot.apps,
+        snapshot.system.has_app_snapshot || !snapshot.apps.is_empty(),
+    )
 }
 
 fn insert_snapshot(
@@ -1501,12 +1506,22 @@ pub fn set_app_hidden(conn: &Connection, executable_id: i64, hidden: bool) -> ru
 }
 
 fn setting_u64(conn: &Connection, key: &str, fallback: u64) -> rusqlite::Result<u64> {
-    let value: Option<String> = conn
-        .query_row("SELECT value FROM settings WHERE key = ?1", [key], |r| {
-            r.get(0)
-        })
-        .optional()?;
+    let value = setting_text(conn, key)?;
     Ok(value.and_then(|v| v.parse().ok()).unwrap_or(fallback))
+}
+
+fn setting_text(conn: &Connection, key: &str) -> rusqlite::Result<Option<String>> {
+    conn.query_row("SELECT value FROM settings WHERE key = ?1", [key], |r| {
+        r.get(0)
+    })
+    .optional()
+}
+
+fn setting_json<T: serde::de::DeserializeOwned>(
+    conn: &Connection,
+    key: &str,
+) -> rusqlite::Result<Option<T>> {
+    Ok(setting_text(conn, key)?.and_then(|value| serde_json::from_str(&value).ok()))
 }
 
 pub fn collection_settings(conn: &Connection) -> rusqlite::Result<CollectionSettings> {
@@ -1515,6 +1530,10 @@ pub fn collection_settings(conn: &Connection) -> rusqlite::Result<CollectionSett
         system_sample_interval_ms: setting_u64(conn, "system_sample_interval_ms", 5_000)?,
         idle_threshold_seconds: setting_u64(conn, "idle_threshold_seconds", 300)?,
         system_sample_retention_days: setting_u64(conn, "system_sample_retention_days", 7)?,
+        enabled_categories: setting_json::<Vec<MetricCategory>>(conn, "enabled_categories")?
+            .unwrap_or_else(|| CollectionSettings::default().enabled_categories),
+        disabled_providers: setting_json::<Vec<String>>(conn, "disabled_providers")?
+            .unwrap_or_default(),
     })
 }
 
@@ -1523,6 +1542,10 @@ pub fn save_collection_settings(
     settings: &CollectionSettings,
     updated_at_ms: i64,
 ) -> rusqlite::Result<()> {
+    let enabled_categories = serde_json::to_string(&settings.enabled_categories)
+        .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
+    let disabled_providers = serde_json::to_string(&settings.disabled_providers)
+        .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
     let tx = conn.unchecked_transaction()?;
     for (key, value) in [
         (
@@ -1542,6 +1565,15 @@ pub fn save_collection_settings(
         tx.execute(
             "INSERT INTO settings(key, value, updated_at_ms) VALUES (?1, ?2, ?3) ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at_ms = excluded.updated_at_ms",
             params![key, value.to_string(), updated_at_ms],
+        )?;
+    }
+    for (key, value) in [
+        ("enabled_categories", enabled_categories),
+        ("disabled_providers", disabled_providers),
+    ] {
+        tx.execute(
+            "INSERT INTO settings(key, value, updated_at_ms) VALUES (?1, ?2, ?3) ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at_ms = excluded.updated_at_ms",
+            params![key, value, updated_at_ms],
         )?;
     }
     tx.commit()

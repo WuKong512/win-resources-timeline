@@ -1,6 +1,7 @@
 use super::{
     interval_engine::{IntervalAction, IntervalEngine, UsageEvent},
-    system_metrics::{now_ms, SystemSampler},
+    provider::{CollectionPlan, ProviderHost, ProviderSample, WindowsBaselineProvider},
+    system_metrics::now_ms,
 };
 use crate::{
     db::{writer, Database},
@@ -484,16 +485,19 @@ fn run_collector(
     engine.set_expected_heartbeat_ms(USAGE_HEARTBEAT_INTERVAL.as_millis() as u64);
     let mut persistence = writer::UsagePersistenceState::default();
     let mut rollup_scheduler = DailyRollupScheduler::default();
-    let mut system = SystemSampler::new();
     let mut settings = db
         .with_writer(writer::collection_settings)
         .unwrap_or_default();
+    let mut provider_host = ProviderHost::new(vec![Box::new(WindowsBaselineProvider::new())]);
+    provider_host.apply_plan(
+        CollectionPlan::build(&settings, &provider_host.descriptors()),
+        Instant::now(),
+    );
+    sync_provider_status(&status, provider_host.statuses());
     let mut tracked_app_keys: HashSet<String> =
         db.with_writer(writer::tracked_app_keys).unwrap_or_default();
     let mut last_heartbeat = Instant::now() - USAGE_HEARTBEAT_INTERVAL;
     let mut last_observation_ms = None;
-    let mut last_system =
-        Instant::now() - Duration::from_millis(settings.system_sample_interval_ms);
     let mut last_system_flush = Instant::now();
     let mut frame_writer = writer::FrameWriter::new(64, 5);
     let mut last_prune = Instant::now() - Duration::from_secs(86_400);
@@ -652,7 +656,11 @@ fn run_collector(
                 .min(Duration::from_millis(100));
             match rx.recv_timeout(wait) {
                 Ok(control) => Some(control),
-                Err(crossbeam_channel::RecvTimeoutError::Disconnected) => break,
+                Err(crossbeam_channel::RecvTimeoutError::Disconnected) => {
+                    provider_host.stop_all();
+                    sync_provider_status(&status, provider_host.statuses());
+                    break;
+                }
                 Err(crossbeam_channel::RecvTimeoutError::Timeout) => None,
             }
         };
@@ -711,11 +719,13 @@ fn run_collector(
                     value.paused = paused;
                     value.last_heartbeat_at_ms = Some(now);
                 }
-                if !paused {
+                if paused {
+                    provider_host.pause();
+                } else {
+                    provider_host.resume(Instant::now());
                     last_observation_ms = Some(now);
-                    system = SystemSampler::new();
-                    last_system = Instant::now();
                 }
+                sync_provider_status(&status, provider_host.statuses());
             }
             Some(Control::OpenWindow) => {
                 crate::app_lifecycle::show_main_window(&app);
@@ -726,10 +736,13 @@ fn run_collector(
                     .with_writer(|conn| writer::save_collection_settings(conn, &next, now))
                     .map_err(|error| error.to_string());
                 if result.is_ok() {
+                    provider_host.apply_plan(
+                        CollectionPlan::build(&next, &provider_host.descriptors()),
+                        Instant::now(),
+                    );
                     settings = next;
-                    system = SystemSampler::new();
-                    last_system = Instant::now();
                     last_prune = Instant::now() - Duration::from_secs(86_400);
+                    sync_provider_status(&status, provider_host.statuses());
                 }
                 let _ = reply.send(result);
             }
@@ -764,6 +777,8 @@ fn run_collector(
                 reply,
                 done,
             }) => {
+                provider_host.stop_all();
+                sync_provider_status(&status, provider_host.statuses());
                 let shutdown_at = now_ms();
                 let action_result = if pending_platform_events.has_pending_work() {
                     Err("shutdown deadline expired with uncommitted platform state".to_string())
@@ -895,12 +910,14 @@ fn run_collector(
                 }
             }
 
-            if last_system.elapsed() >= Duration::from_millis(settings.system_sample_interval_ms) {
-                last_system = Instant::now();
-                if let Some(sample) = system.sample(now, &tracked_app_keys) {
-                    frame_writer.enqueue(sample);
+            for sample in provider_host.sample_due(Instant::now(), now, &tracked_app_keys) {
+                match sample {
+                    ProviderSample::ResourceSnapshot(snapshot) => {
+                        frame_writer.enqueue(snapshot);
+                    }
                 }
             }
+            sync_provider_status(&status, provider_host.statuses());
             if last_system_flush.elapsed() >= Duration::from_millis(250)
                 && frame_writer.queue_depth() > 0
             {
@@ -925,6 +942,8 @@ fn run_collector(
             value.last_heartbeat_at_ms = Some(now);
         }
     }
+    provider_host.stop_all();
+    sync_provider_status(&status, provider_host.statuses());
     if let Ok(mut value) = status.lock() {
         value.running = false;
     }
@@ -1309,6 +1328,15 @@ fn sync_writer_status(status: &Arc<Mutex<CollectorStatus>>, health: &writer::Wri
     if let Ok(mut value) = status.lock() {
         value.last_system_sample_at_ms = health.last_committed_timestamp_ms;
         value.dropped_system_samples = health.drop_count;
+    }
+}
+
+fn sync_provider_status(
+    status: &Arc<Mutex<CollectorStatus>>,
+    provider_status: Vec<crate::models::ProviderStatus>,
+) {
+    if let Ok(mut value) = status.lock() {
+        value.provider_status = provider_status;
     }
 }
 

@@ -87,6 +87,20 @@ PR-02 已落地 Windows 使用时间的双时间轴：
 
 完整 Windows Event Log 历史补齐、Crash evidence、Retention Hold、Provider framework 和硬件指标属于后续 PR，不在 PR-02 中实现。
 
+## PR-03 Provider Framework
+
+PR-03 将 Provider framework 接入现有 collector，但不新增硬件采集源：
+
+- `MetricProvider` 只负责 descriptor/capability、受控 `start`/`reconfigure`/`sample`/`stop` 和 health observation；Provider 不写 SQLite，也不拥有 UI。
+- `MetricCategory` 与 provider identity 分离。当前保留 `cpu`、`gpu`、`memory`、`disk`、`network`、`power`、`battery`、`process` 这些产品类别；一个 provider 可以提供多个类别，未来一个类别也可以有多个来源。
+- `CollectionPlan` 由持久化 settings、descriptor capabilities 和采样 policy 确定性编译。它只在启动、settings reload 或能力变化时重建，采样热路径只消费已编译计划。
+- `ProviderHost` 是 collector 内的生命周期边界。用户禁用类别或 provider 时，相关 provider 被停止、采样调度清除、采集资源释放；pause 则暂时停止资源但保留用户启用计划，resume 可重新初始化。
+- Provider status DTO 独立表达 `supportedEnabled`、`supportedDisabled`、`unsupported` 和 `failed`。合法的 `0` 仍作为 metric value 保存，不能用 0、缺行或 `None` 代替状态。
+- 单个 provider 的 startup/sample failure 只更新其 bounded health/backoff 状态；其他 provider 和 foreground/computer-state timeline 继续运行。shutdown 使用现有绝对 deadline，provider stop 不得无限阻塞。
+- 当前唯一接入的 production path 是把既有 Windows `sysinfo`/PDH CPU、内存、磁盘、进程 sampler 包装为 `windows-baseline` provider；没有引入 NVML、`nvidia-smi`、CPU 温度/功耗或其他新硬件源。
+
+真实 NVIDIA GPU、CPU sensor 和其他硬件 Provider 留到 PR-04，并须先满足 Spike-01 的能力、权限、语义与开销证据。
+
 ## UI 架构方向
 
 保留现有前端栈，逐步补充：

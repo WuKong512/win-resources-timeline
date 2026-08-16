@@ -1,6 +1,7 @@
+use crate::models::MetricCategory;
 use crate::models::{AppResourceSample, ResourceSnapshot, SystemSample};
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{BTreeSet, HashMap, HashSet},
     time::Instant,
 };
 use sysinfo::System;
@@ -15,48 +16,77 @@ pub struct SystemSampler {
 }
 
 impl SystemSampler {
+    #[allow(dead_code)]
     pub fn new() -> Self {
-        let mut system = System::new();
-        system.refresh_cpu();
-        system.refresh_memory();
-        system.refresh_processes();
+        let categories: BTreeSet<_> = MetricCategory::ALL.into_iter().collect();
+        Self::new_for_categories(&categories)
+    }
+
+    pub fn new_for_categories(categories: &BTreeSet<MetricCategory>) -> Self {
         Self {
-            system,
+            system: System::new(),
             last_sample: Instant::now(),
             warmed_up: false,
-            disk: DiskIoSampler::new(),
+            disk: DiskIoSampler::new_if(categories.contains(&MetricCategory::Disk)),
         }
     }
+    #[allow(dead_code)]
     pub fn sample(
         &mut self,
         timestamp_ms: i64,
         tracked_app_keys: &HashSet<String>,
     ) -> Option<ResourceSnapshot> {
+        let categories: BTreeSet<_> = MetricCategory::ALL.into_iter().collect();
+        self.sample_with_categories(timestamp_ms, tracked_app_keys, &categories)
+    }
+
+    pub fn sample_with_categories(
+        &mut self,
+        timestamp_ms: i64,
+        tracked_app_keys: &HashSet<String>,
+        categories: &BTreeSet<MetricCategory>,
+    ) -> Option<ResourceSnapshot> {
         let elapsed = self.last_sample.elapsed();
         self.last_sample = Instant::now();
-        self.system.refresh_cpu();
-        self.system.refresh_memory();
-        self.system.refresh_processes();
+        let cpu_enabled = categories.contains(&MetricCategory::Cpu);
+        let memory_enabled = categories.contains(&MetricCategory::Memory);
+        let disk_enabled = categories.contains(&MetricCategory::Disk);
+        let process_enabled = categories.contains(&MetricCategory::Process);
+        if cpu_enabled {
+            self.system.refresh_cpu();
+        }
+        if memory_enabled {
+            self.system.refresh_memory();
+        }
+        if process_enabled {
+            self.system.refresh_processes();
+        }
         if !self.warmed_up {
             self.warmed_up = true;
             return None;
         }
-        let total = self.system.total_memory();
-        let used = self.system.used_memory();
-        let disk = self.disk.sample();
+        let memory =
+            memory_enabled.then(|| (self.system.total_memory(), self.system.used_memory()));
+        let disk = disk_enabled.then(|| self.disk.sample()).flatten();
         let sample_duration_ms = elapsed.as_millis().max(1) as i64;
         let system = SystemSample {
             timestamp_ms,
             sample_duration_ms,
-            cpu_percent: Some(self.system.global_cpu_info().cpu_usage() as f64),
-            memory_percent: (total > 0).then_some(used as f64 * 100.0 / total as f64),
-            memory_used_bytes: Some(used as i64),
-            memory_total_bytes: Some(total as i64),
+            cpu_percent: cpu_enabled.then(|| self.system.global_cpu_info().cpu_usage() as f64),
+            memory_percent: memory.and_then(|(total, used)| {
+                (total > 0).then_some(used as f64 * 100.0 / total as f64)
+            }),
+            memory_used_bytes: memory.map(|(_, used)| used as i64),
+            memory_total_bytes: memory.map(|(total, _)| total as i64),
             disk_read_bytes_per_sec: disk.map(|value| value.0),
             disk_write_bytes_per_sec: disk.map(|value| value.1),
-            has_app_snapshot: false,
+            has_app_snapshot: process_enabled,
         };
-        let apps = collect_app_samples(&self.system, sample_duration_ms, tracked_app_keys);
+        let apps = if process_enabled {
+            collect_app_samples(&self.system, sample_duration_ms, tracked_app_keys)
+        } else {
+            Vec::new()
+        };
         Some(ResourceSnapshot { system, apps })
     }
 }
@@ -168,6 +198,14 @@ struct DiskIoSampler {
 
 #[cfg(windows)]
 impl DiskIoSampler {
+    fn new_if(enabled: bool) -> Self {
+        if enabled {
+            Self::new()
+        } else {
+            Self::unavailable()
+        }
+    }
+
     fn new() -> Self {
         use windows::{
             core::PCWSTR,
@@ -275,6 +313,10 @@ struct DiskIoSampler;
 
 #[cfg(not(windows))]
 impl DiskIoSampler {
+    fn new_if(_enabled: bool) -> Self {
+        Self
+    }
+
     fn new() -> Self {
         Self
     }

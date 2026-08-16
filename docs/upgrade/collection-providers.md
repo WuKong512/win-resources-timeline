@@ -84,3 +84,16 @@ Windows 原始进程 CPU time 保留为内部单调累计计数，采样时计�
 - Provider 失败不会阻断其他类别采集；UI 能区分禁用、不支持和失败。
 - 切换来源后历史记录仍能追溯到 session/provider。
 - 启用温度、功耗和频率后的后台开销满足性能预算。
+
+## PR-03 当前落地边界
+
+PR-03 提供项目内部的 Provider contract，而不是动态插件系统：
+
+- `ProviderDescriptor` 声明 provider identity、采样 schedule 和每个 `MetricCategory` 的 support status/reason code。
+- `CollectionPlan` 将 `CollectionSettings` 与 descriptor capabilities 编译为确定性的 provider enable/category/interval 计划；未请求或用户禁用的类别不会触发 sample。
+- `ProviderHost` 只对受影响的 provider 应用 start/stop/reconfigure delta。未变化的 settings 不重复启动或停止 provider；暂停会释放已启动资源，恢复时重新 start。
+- health 由 runtime DTO 暴露 provider lifecycle、last success、failure count 和简短 error code/message。failure 使用 interval-based bounded backoff，避免 busy-loop 和高频数据库写入。
+- fake provider tests 覆盖 supported/disabled/unsupported/failed、真正停止采样、重新启用、失败隔离、pause 语义和 shutdown 幂等停止。
+- 既有 Windows baseline sampler 通过 `windows-baseline` adapter 进入该框架，FrameWriter/SQLite 仍由 collector/writer 层负责。
+
+本 PR 明确不新增 NVML production provider、`nvidia-smi` 调用、GPU 温度/功耗/频率、CPU 温度/功耗或任何新的硬件采集源。Spike-01 probe 仍是独立工具，PR-04 才负责真实硬件接入。

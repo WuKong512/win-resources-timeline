@@ -103,6 +103,48 @@ export interface TodayOverview {
   diskWriteSampledPeak: number | null;
 }
 
+export type MetricCategory = "cpu" | "gpu" | "memory" | "disk" | "network" | "power" | "battery" | "process";
+export type CapabilitySupportStatus = "supported" | "unsupported";
+export type CapabilityState = "supportedEnabled" | "supportedDisabled" | "unsupported" | "failed";
+export type ProviderLifecycleState = "stopped" | "running" | "paused" | "failed";
+export type ProviderErrorCode =
+  | "providerMissing"
+  | "permissionDenied"
+  | "startupFailed"
+  | "sampleFailed"
+  | "stopFailed"
+  | "unsupported"
+  | "userDisabled"
+  | "categoryDisabled"
+  | "paused";
+
+export interface ProviderErrorSummary {
+  code: ProviderErrorCode;
+  message: string | null;
+}
+
+export interface MetricCapabilityStatus {
+  providerId: string;
+  category: MetricCategory;
+  supportStatus: CapabilitySupportStatus;
+  enabled: boolean;
+  canToggle: boolean;
+  state: CapabilityState;
+  reasonCode: ProviderErrorCode | null;
+}
+
+export interface ProviderStatus {
+  providerId: string;
+  displayName: string;
+  supported: boolean;
+  enabled: boolean;
+  lifecycle: ProviderLifecycleState;
+  capabilities: MetricCapabilityStatus[];
+  lastSuccessAtMs: number | null;
+  failureCount: number;
+  lastError: ProviderErrorSummary | null;
+}
+
 export interface CollectorStatus {
   running: boolean;
   paused: boolean;
@@ -113,6 +155,7 @@ export interface CollectorStatus {
   droppedSystemSamples: number;
   databaseSizeBytes: number;
   databasePath: string;
+  providerStatus: ProviderStatus[];
 }
 
 export interface CollectionSettings {
@@ -120,4 +163,6 @@ export interface CollectionSettings {
   systemSampleIntervalMs: number;
   idleThresholdSeconds: number;
   systemSampleRetentionDays: number;
+  enabledCategories: MetricCategory[];
+  disabledProviders: string[];
 }
