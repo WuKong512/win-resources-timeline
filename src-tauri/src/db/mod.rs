@@ -1,6 +1,7 @@
 pub mod query;
 pub mod rollup;
 pub mod schema;
+pub mod usage;
 pub mod writer;
 
 use rusqlite::{Connection, OpenFlags};
@@ -24,8 +25,10 @@ impl Database {
         }
         let mut conn = Connection::open(&path)?;
         schema::migrate_with_path(&mut conn, Some(&path))?;
-        writer::recover_open_interval(&conn)?;
-        writer::start_runtime_session(&conn, now_ms())?;
+        let now = now_ms();
+        let boot_identity = crate::platform::boot_identity(now);
+        writer::recover_open_intervals(&conn, now)?;
+        writer::start_runtime_session_with_identity(&conn, now, &boot_identity)?;
         Ok(Self {
             path,
             writer: Mutex::new(conn),
@@ -120,8 +123,8 @@ mod tests {
     use crate::{
         db::{query, writer},
         models::{
-            ActivityState, AppResourceSample, CollectionSettings, ForegroundApp, ResourceSnapshot,
-            SystemSample,
+            ActivityState, AppResourceSample, BootIdentity, CollectionSettings, ComputerState,
+            ForegroundApp, ResourceSnapshot, SystemSample,
         },
     };
     use rusqlite::params;
@@ -328,6 +331,8 @@ mod tests {
                 process_name: "test.exe".into(),
                 exe_path: Some("C:\\test.exe".into()),
                 display_name: "test".into(),
+                pid: None,
+                process_creation_time_ms: None,
             };
             let app_id = db
                 .with_writer(|c| writer::upsert_app(c, &app, 1_000))
@@ -372,6 +377,14 @@ mod tests {
             assert_eq!(conn.query_row("SELECT COUNT(*) FROM app", [], |row| row.get::<_, i64>(0))?, 0);
             assert_eq!(conn.query_row("SELECT COUNT(*) FROM sample_frame", [], |row| row.get::<_, i64>(0))?, 0);
             assert_eq!(conn.query_row("SELECT COUNT(*) FROM process_sample", [], |row| row.get::<_, i64>(0))?, 0);
+            assert_eq!(
+                conn.query_row(
+                    "SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' AND name = 'idx_computer_state_single_open'",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )?,
+                1
+            );
             assert_eq!(foreign_key_error_count(conn)?, 0);
             assert_eq!(pragma_text(conn, "quick_check")?, "ok");
             assert_eq!(pragma_text(conn, "integrity_check")?, "ok");
@@ -477,6 +490,8 @@ mod tests {
             process_name: "editor.exe".into(),
             exe_path: Some("C:\\friendly-editor.exe".into()),
             display_name: "Friendly Editor".into(),
+            pid: None,
+            process_creation_time_ms: None,
         };
         db.with_writer(|conn| writer::upsert_app(conn, &foreground, 1_000))
             .unwrap();
@@ -929,6 +944,8 @@ mod tests {
                     process_name: "ChatGPT.exe".into(),
                     exe_path: Some(r"C:\Program Files\WindowsApps\OpenAI_26.1\ChatGPT.exe".into()),
                     display_name: "ChatGPT Desktop".into(),
+                    pid: None,
+                    process_creation_time_ms: None,
                 },
                 9_000,
             )
@@ -1645,6 +1662,474 @@ mod tests {
             .is_some_and(|error| error.contains("deadline")));
 
         drop(db);
+        cleanup_test_files(&path);
+    }
+
+    #[test]
+    fn pr02_daily_usage_rollup_uses_interval_intersection_and_is_idempotent() {
+        let path = test_path("pr02-daily-rollup");
+        cleanup_test_files(&path);
+        let db = Database::open(path.clone()).unwrap();
+        let base = 1_700_000_000_000_i64;
+        let app = ForegroundApp {
+            identity_key: "name:editor.exe".into(),
+            process_name: "editor.exe".into(),
+            exe_path: Some("C:\\Editor.exe".into()),
+            display_name: "Editor".into(),
+            pid: Some(101),
+            process_creation_time_ms: Some(base),
+        };
+
+        db.with_writer(|conn| {
+            let executable_id = writer::resolve_foreground_app(conn, &app, base)?.app_executable_id;
+            writer::begin_foreground_interval(conn, executable_id, base)?;
+
+            let active_before_idle = writer::begin_computer_state_interval(
+                conn,
+                ComputerState::Active,
+                base,
+                "test",
+                1,
+            )?;
+            writer::close_computer_state_interval(
+                conn,
+                active_before_idle,
+                base + 300_000,
+                "test",
+            )?;
+            let idle = writer::begin_computer_state_interval(
+                conn,
+                ComputerState::Idle,
+                base + 300_000,
+                "test",
+                1,
+            )?;
+            writer::close_computer_state_interval(conn, idle, base + 900_000, "test")?;
+            let active_after_idle = writer::begin_computer_state_interval(
+                conn,
+                ComputerState::Active,
+                base + 900_000,
+                "test",
+                1,
+            )?;
+            writer::close_computer_state_interval(
+                conn,
+                active_after_idle,
+                base + 1_200_000,
+                "test",
+            )?;
+            writer::close_foreground_interval(conn, 1, base + 1_200_000, "test")?;
+            writer::rebuild_daily_usage(conn, base, base + 1_300_000)
+        })
+        .unwrap();
+
+        let local_date = db
+            .read(|conn| {
+                conn.query_row(
+                    "SELECT date(?1 / 1000.0, 'unixepoch', 'localtime')",
+                    [base],
+                    |row| row.get::<_, String>(0),
+                )
+            })
+            .unwrap();
+        let summary = db
+            .read(|conn| query::usage_summary(conn, base, base + 1_300_000, true))
+            .unwrap();
+        assert_eq!(summary.len(), 1);
+        assert_eq!(summary[0].foreground_total_ms, 1_200_000);
+        assert_eq!(summary[0].active_usage_ms, 600_000);
+        assert_eq!(summary[0].idle_foreground_ms, 600_000);
+        assert_eq!(
+            db.read(|conn| query::computer_active_time(conn, base, base + 1_300_000))
+                .unwrap(),
+            600_000
+        );
+        assert!(
+            summary[0].active_usage_ms
+                <= db
+                    .read(|conn| query::computer_active_time(conn, base, base + 1_300_000))
+                    .unwrap()
+        );
+
+        db.read(|conn| {
+            assert_eq!(
+                conn.query_row(
+                    "SELECT COUNT(*) FROM foreground_interval WHERE end_time_ms IS NOT NULL",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )?,
+                1
+            );
+            assert_eq!(
+                conn.query_row(
+                    "SELECT activity_state FROM foreground_interval",
+                    [],
+                    |row| row.get::<_, String>(0),
+                )?,
+                "active"
+            );
+            let overlap_count: i64 = conn.query_row(
+                "SELECT COUNT(*)
+                 FROM computer_state_interval first_state
+                 JOIN computer_state_interval second_state
+                   ON first_state.boot_session_id = second_state.boot_session_id
+                  AND first_state.id < second_state.id
+                  AND first_state.start_ts < COALESCE(second_state.end_ts, 9223372036854775807)
+                  AND second_state.start_ts < COALESCE(first_state.end_ts, 9223372036854775807)",
+                [],
+                |row| row.get(0),
+            )?;
+            assert_eq!(overlap_count, 0);
+            Ok(())
+        })
+        .unwrap();
+
+        let daily = db
+            .read(|conn| query::daily_usage_summary(conn, &local_date, true))
+            .unwrap();
+        assert_eq!(daily.len(), 1);
+        assert_eq!(daily[0].foreground_total_ms, 1_200_000);
+        assert_eq!(daily[0].active_usage_ms, 600_000);
+        assert_eq!(daily[0].idle_foreground_ms, 600_000);
+        assert_eq!(daily[0].launch_count, 1);
+
+        db.with_writer(|conn| writer::rebuild_daily_usage(conn, base, base + 1_300_000))
+            .unwrap();
+        let daily_again = db
+            .read(|conn| query::daily_usage_summary(conn, &local_date, true))
+            .unwrap();
+        assert_eq!(daily_again.len(), 1);
+        assert_eq!(
+            (
+                daily_again[0].foreground_total_ms,
+                daily_again[0].active_usage_ms,
+                daily_again[0].idle_foreground_ms,
+                daily_again[0].launch_count,
+            ),
+            (
+                daily[0].foreground_total_ms,
+                daily[0].active_usage_ms,
+                daily[0].idle_foreground_ms,
+                daily[0].launch_count,
+            )
+        );
+
+        drop(db);
+        cleanup_test_files(&path);
+    }
+
+    #[test]
+    fn pr02_daily_usage_rollup_splits_at_local_midnight() {
+        let path = test_path("pr02-midnight-rollup");
+        cleanup_test_files(&path);
+        let db = Database::open(path.clone()).unwrap();
+        let app = ForegroundApp {
+            identity_key: "name:midnight.exe".into(),
+            process_name: "midnight.exe".into(),
+            exe_path: Some("C:\\Midnight.exe".into()),
+            display_name: "Midnight".into(),
+            pid: Some(202),
+            process_creation_time_ms: Some(1_000),
+        };
+
+        let (local_date, next_date, day_start, next_day_start) = db
+            .read(|conn| {
+                conn.query_row(
+                    "SELECT date(?1 / 1000.0, 'unixepoch', 'localtime'),
+                            date(date(?1 / 1000.0, 'unixepoch', 'localtime'), '+1 day'),
+                            CAST(strftime('%s', date(?1 / 1000.0, 'unixepoch', 'localtime') || ' 00:00:00', 'utc') AS INTEGER) * 1000,
+                            CAST(strftime('%s', date(date(?1 / 1000.0, 'unixepoch', 'localtime'), '+1 day') || ' 00:00:00', 'utc') AS INTEGER) * 1000",
+                    [1_700_000_000_000_i64],
+                    |row| {
+                        Ok((
+                            row.get::<_, String>(0)?,
+                            row.get::<_, String>(1)?,
+                            row.get::<_, i64>(2)?,
+                            row.get::<_, i64>(3)?,
+                        ))
+                    },
+                )
+            })
+            .unwrap();
+        let foreground_start = day_start + 23 * 60 * 60 * 1_000 + 55 * 60 * 1_000;
+        let foreground_end = next_day_start + 10 * 60 * 1_000;
+
+        db.with_writer(|conn| {
+            let executable_id =
+                writer::resolve_foreground_app(conn, &app, foreground_start)?.app_executable_id;
+            writer::begin_foreground_interval(conn, executable_id, foreground_start)?;
+            let state_id = writer::begin_computer_state_interval(
+                conn,
+                ComputerState::Active,
+                foreground_start,
+                "test",
+                1,
+            )?;
+            writer::close_computer_state_interval(conn, state_id, foreground_end, "test")?;
+            writer::close_foreground_interval(conn, 1, foreground_end, "test")?;
+            writer::rebuild_daily_usage(conn, foreground_start, foreground_end)
+        })
+        .unwrap();
+
+        let first_day = db
+            .read(|conn| query::daily_usage_summary(conn, &local_date, true))
+            .unwrap();
+        let second_day = db
+            .read(|conn| query::daily_usage_summary(conn, &next_date, true))
+            .unwrap();
+        assert_eq!(first_day[0].foreground_total_ms, 5 * 60 * 1_000);
+        assert_eq!(second_day[0].foreground_total_ms, 10 * 60 * 1_000);
+        assert_eq!(
+            first_day[0].active_usage_ms,
+            first_day[0].foreground_total_ms
+        );
+        assert_eq!(
+            second_day[0].active_usage_ms,
+            second_day[0].foreground_total_ms
+        );
+
+        drop(db);
+        cleanup_test_files(&path);
+    }
+
+    #[test]
+    fn pr02_restart_recovery_ends_at_last_trusted_heartbeat() {
+        let path = test_path("pr02-restart-recovery");
+        cleanup_test_files(&path);
+        let db = Database::open(path.clone()).unwrap();
+        let identity = BootIdentity {
+            boot_id: "test-boot-recovery".into(),
+            boot_time_ms: 1_000,
+        };
+        let app = ForegroundApp {
+            identity_key: "name:recovery.exe".into(),
+            process_name: "recovery.exe".into(),
+            exe_path: Some("C:\\Recovery.exe".into()),
+            display_name: "Recovery".into(),
+            pid: Some(303),
+            process_creation_time_ms: Some(1_000),
+        };
+
+        db.with_writer(|conn| {
+            writer::start_runtime_session_with_identity(conn, 10_000, &identity)?;
+            let executable_id =
+                writer::resolve_foreground_app(conn, &app, 11_000)?.app_executable_id;
+            writer::begin_foreground_interval(conn, executable_id, 11_000)?;
+            writer::checkpoint_foreground_interval(conn, 1, 15_000)?;
+            writer::recover_open_intervals(conn, 100_000)?;
+            writer::start_runtime_session_with_identity(conn, 200_000, &identity)?;
+            writer::begin_foreground_interval(conn, executable_id, 200_000)?;
+            Ok(())
+        })
+        .unwrap();
+
+        db.read(|conn| {
+            let mut statement = conn.prepare(
+                "SELECT start_time_ms, end_time_ms
+                 FROM foreground_interval
+                 WHERE app_executable_id = (SELECT id FROM app_executable WHERE normalized_path = 'path:c:\\recovery.exe')
+                 ORDER BY start_time_ms",
+            )?;
+            let rows: Vec<(i64, Option<i64>)> = statement
+                .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
+                .collect::<rusqlite::Result<_>>()?;
+            assert_eq!(rows, vec![(11_000, Some(15_000)), (200_000, None)]);
+            let boot_count: i64 = conn.query_row(
+                "SELECT COUNT(*) FROM boot_session WHERE boot_id = ?1",
+                [&identity.boot_id],
+                |row| row.get(0),
+            )?;
+            let collection_count: i64 = conn.query_row(
+                "SELECT COUNT(*) FROM collection_session WHERE boot_session_id = (SELECT id FROM boot_session WHERE boot_id = ?1)",
+                [&identity.boot_id],
+                |row| row.get(0),
+            )?;
+            assert_eq!(boot_count, 1);
+            assert_eq!(collection_count, 2);
+            Ok(())
+        })
+        .unwrap();
+
+        drop(db);
+        cleanup_test_files(&path);
+    }
+
+    #[test]
+    fn pr02_boot_reconciliation_reuses_boot_within_tolerance() {
+        let path = test_path("pr02-boot-reconciliation");
+        cleanup_test_files(&path);
+        let db = Database::open(path.clone()).unwrap();
+        let first = BootIdentity {
+            boot_id: "test-boot-exact".into(),
+            boot_time_ms: 10_000,
+        };
+        let drifted = BootIdentity {
+            boot_id: "test-boot-drifted-key".into(),
+            boot_time_ms: 10_004,
+        };
+        let rebooted = BootIdentity {
+            boot_id: "test-boot-rebooted".into(),
+            boot_time_ms: 20_000,
+        };
+
+        db.with_writer(|conn| {
+            writer::start_runtime_session_with_identity(conn, 30_000, &first)?;
+            writer::start_runtime_session_with_identity(conn, 40_000, &drifted)?;
+            writer::start_runtime_session_with_identity(conn, 50_000, &rebooted)
+        })
+        .unwrap();
+        db.read(|conn| {
+            assert_eq!(
+                conn.query_row(
+                    "SELECT COUNT(*) FROM boot_session WHERE boot_id LIKE 'test-boot-%'",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )?,
+                2
+            );
+            assert_eq!(
+                conn.query_row(
+                    "SELECT COUNT(*) FROM collection_session WHERE boot_session_id = (SELECT id FROM boot_session WHERE boot_id = ?1)",
+                    [&first.boot_id],
+                    |row| row.get::<_, i64>(0),
+                )?,
+                2
+            );
+            Ok(())
+        })
+        .unwrap();
+
+        drop(db);
+        cleanup_test_files(&path);
+    }
+
+    #[test]
+    fn pr02_launch_count_uses_process_instance_not_foreground_activation() {
+        let path = test_path("pr02-launch-count");
+        cleanup_test_files(&path);
+        let db = Database::open(path.clone()).unwrap();
+        let base = 1_700_000_000_000_i64;
+        let app_a = ForegroundApp {
+            identity_key: "name:alpha.exe".into(),
+            process_name: "alpha.exe".into(),
+            exe_path: Some("C:\\Alpha.exe".into()),
+            display_name: "Alpha".into(),
+            pid: Some(404),
+            process_creation_time_ms: Some(base),
+        };
+        let app_b = ForegroundApp {
+            identity_key: "name:beta.exe".into(),
+            process_name: "beta.exe".into(),
+            exe_path: Some("C:\\Beta.exe".into()),
+            display_name: "Beta".into(),
+            pid: Some(405),
+            process_creation_time_ms: Some(base),
+        };
+
+        db.with_writer(|conn| {
+            let alpha_id = writer::resolve_foreground_app(conn, &app_a, base)?.app_executable_id;
+            let beta_id = writer::resolve_foreground_app(conn, &app_b, base)?.app_executable_id;
+            let state_id = writer::begin_computer_state_interval(
+                conn,
+                ComputerState::Active,
+                base,
+                "test",
+                1,
+            )?;
+            let first_alpha = writer::begin_foreground_interval(conn, alpha_id, base)?;
+            writer::close_foreground_interval(conn, first_alpha, base + 1_000, "app-switch")?;
+            let beta = writer::begin_foreground_interval(conn, beta_id, base + 1_000)?;
+            writer::close_foreground_interval(conn, beta, base + 2_000, "app-switch")?;
+            let second_alpha = writer::begin_foreground_interval(conn, alpha_id, base + 2_000)?;
+            writer::close_foreground_interval(conn, second_alpha, base + 3_000, "test")?;
+            writer::close_computer_state_interval(conn, state_id, base + 3_000, "test")?;
+            writer::rebuild_daily_usage(conn, base, base + 4_000)
+        })
+        .unwrap();
+
+        let local_date = db
+            .read(|conn| {
+                conn.query_row(
+                    "SELECT date(?1 / 1000.0, 'unixepoch', 'localtime')",
+                    [base],
+                    |row| row.get::<_, String>(0),
+                )
+            })
+            .unwrap();
+        let daily = db
+            .read(|conn| query::daily_usage_summary(conn, &local_date, true))
+            .unwrap();
+        let alpha = daily
+            .iter()
+            .find(|item| item.app_name == "alpha.exe")
+            .unwrap();
+        assert_eq!(alpha.foreground_total_ms, 2_000);
+        assert_eq!(alpha.launch_count, 1);
+
+        drop(db);
+        cleanup_test_files(&path);
+    }
+
+    #[test]
+    fn pr02_v7_state_open_index_repairs_existing_duplicates() {
+        let path = test_path("pr02-state-repair");
+        cleanup_test_files(&path);
+        {
+            let db = Database::open(path.clone()).unwrap();
+            db.with_writer(|conn| {
+                assert_eq!(
+                    conn.query_row(
+                        "SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' AND name = 'idx_computer_state_single_open'",
+                        [],
+                        |row| row.get::<_, i64>(0),
+                    )?,
+                    1
+                );
+                let boot_id: i64 = conn.query_row(
+                    "SELECT CAST(value AS INTEGER) FROM settings WHERE key = 'runtime_boot_session_id'",
+                    [],
+                    |row| row.get(0),
+                )?;
+                conn.execute("DROP INDEX idx_computer_state_single_open", [])?;
+                conn.execute(
+                    "INSERT INTO computer_state_interval(boot_session_id, state, start_ts, source, quality) VALUES (?1, 'active', 1000, 'test', 1)",
+                    [boot_id],
+                )?;
+                conn.execute(
+                    "INSERT INTO computer_state_interval(boot_session_id, state, start_ts, source, quality) VALUES (?1, 'idle', 2000, 'test', 1)",
+                    [boot_id],
+                )?;
+                Ok(())
+            })
+            .unwrap();
+            drop(db);
+        }
+
+        let mut conn = Connection::open(&path).unwrap();
+        schema::migrate_with_path(&mut conn, Some(&path)).unwrap();
+        let repaired: Vec<(i64, Option<i64>)> = {
+            let mut statement = conn
+                .prepare(
+                    "SELECT start_ts, end_ts FROM computer_state_interval ORDER BY id DESC LIMIT 2",
+                )
+                .unwrap();
+            statement
+                .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+                .unwrap()
+                .collect::<rusqlite::Result<_>>()
+                .unwrap()
+        };
+        assert_eq!(repaired, vec![(2000, None), (1000, Some(2000))]);
+        assert_eq!(
+            conn.query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' AND name = 'idx_computer_state_single_open'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap(),
+            1
+        );
+        drop(conn);
         cleanup_test_files(&path);
     }
 }

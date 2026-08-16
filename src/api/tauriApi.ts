@@ -1,10 +1,13 @@
 import { invoke } from "@tauri-apps/api/core";
-import type { AppIdentity, AppResourceHistoryPoint, AppResourceSample, CollectionSettings, CollectorStatus, ForegroundInterval, ResourceApp, SystemSample, TodayOverview } from "../types/resource";
+import type { AppIdentity, AppResourceHistoryPoint, AppResourceSample, CollectionSettings, CollectorStatus, DailyUsageSummary, ForegroundInterval, ResourceApp, SystemSample, TodayOverview } from "../types/resource";
 
 export const getTodayOverview = (startMs: number, endMs: number) =>
   invoke<TodayOverview>("get_today_overview", { startMs, endMs });
 
 export const getOverviewAvailableDates = () => invoke<string[]>("get_overview_available_dates");
+
+export const getDailyUsageSummary = (localDate: string, includeHidden: boolean) =>
+  invoke<DailyUsageSummary[]>("get_daily_usage_summary", { localDate, includeHidden });
 
 export const getAppUsageTimeline = (startMs: number, endMs: number, includeHidden: boolean, includeIdle: boolean) =>
   invoke<ForegroundInterval[]>("get_app_usage_timeline", { startMs, endMs, includeHidden, includeIdle });

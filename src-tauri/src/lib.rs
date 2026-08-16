@@ -72,6 +72,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             commands::overview::get_today_overview,
+            commands::overview::get_daily_usage_summary,
             commands::overview::get_overview_available_dates,
             commands::timeline::get_app_usage_timeline,
             commands::timeline::get_timeline_available_dates,

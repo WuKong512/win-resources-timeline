@@ -2,7 +2,8 @@ use crate::{
     db::query,
     error::CommandError,
     models::{
-        AppResourceHistoryPoint, AppResourceSample, ResourceApp, SystemSample, TodayOverview,
+        AppResourceHistoryPoint, AppResourceSample, DailyUsageSummary, ResourceApp, SystemSample,
+        TodayOverview,
     },
     AppState,
 };
@@ -17,6 +18,21 @@ pub fn get_today_overview(
     state
         .db
         .read(|conn| query::today_overview(conn, start_ms, end_ms))
+        .map_err(Into::into)
+}
+
+#[tauri::command]
+pub fn get_daily_usage_summary(
+    state: State<'_, AppState>,
+    local_date: String,
+    include_hidden: bool,
+) -> Result<Vec<DailyUsageSummary>, CommandError> {
+    if local_date.trim().is_empty() {
+        return Err(crate::error::AppError::InvalidRequest("localDate is required".into()).into());
+    }
+    state
+        .db
+        .read(|conn| query::daily_usage_summary(conn, &local_date, include_hidden))
         .map_err(Into::into)
 }
 

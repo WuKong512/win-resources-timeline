@@ -1,7 +1,13 @@
-use crate::models::{CollectionSettings, ForegroundApp, ResourceSnapshot, SystemSample};
+use crate::{
+    db::usage::{intersect_foreground, StateRange, TimeRange},
+    models::{
+        ActivityState, BootIdentity, CollectionSettings, ComputerState, ForegroundApp,
+        ResourceSnapshot, SystemSample,
+    },
+};
 use rusqlite::{params, Connection, OptionalExtension};
 use std::{
-    collections::{HashSet, VecDeque},
+    collections::{HashMap, HashSet, VecDeque},
     io,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
@@ -18,6 +24,13 @@ pub struct WriterHealth {
     pub last_commit_duration_ms: u64,
     pub last_committed_timestamp_ms: Option<i64>,
     pub last_error: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AppResolution {
+    pub app_id: i64,
+    pub app_executable_id: i64,
+    pub process_instance_id: Option<i64>,
 }
 
 struct QueuedFrame {
@@ -311,32 +324,109 @@ impl FrameWriter {
     }
 }
 
+#[allow(dead_code)]
 pub fn recover_open_interval(conn: &Connection) -> rusqlite::Result<usize> {
-    conn.execute(
-        "UPDATE foreground_interval SET end_time_ms = last_seen_time_ms, close_reason = 'recovery' WHERE end_time_ms IS NULL",
+    recover_open_intervals(conn, now_ms())
+}
+
+pub fn recover_open_intervals(conn: &Connection, recovery_at_ms: i64) -> rusqlite::Result<usize> {
+    let checkpoint: Option<i64> = conn
+        .query_row(
+            "SELECT CAST(value AS INTEGER) FROM settings WHERE key = 'runtime_usage_heartbeat_ms'",
+            [],
+            |row| row.get(0),
+        )
+        .optional()?;
+    let state_recovery_at = checkpoint
+        .unwrap_or(recovery_at_ms)
+        .clamp(0, recovery_at_ms.max(0));
+    let tx = conn.unchecked_transaction()?;
+    let mut recovered = tx.execute(
+        "UPDATE foreground_interval
+         SET end_time_ms = MAX(start_time_ms, last_seen_time_ms), close_reason = 'recovery'
+         WHERE end_time_ms IS NULL",
         [],
-    )
+    )?;
+    recovered += tx.execute(
+        "UPDATE computer_state_interval
+         SET end_ts = MAX(start_ts, ?1)
+         WHERE end_ts IS NULL",
+        [state_recovery_at],
+    )?;
+    tx.execute(
+        "UPDATE collection_session
+         SET ended_at_ms = MAX(started_at_ms, ?1)
+         WHERE ended_at_ms IS NULL",
+        [recovery_at_ms],
+    )?;
+    tx.commit()?;
+    Ok(recovered)
 }
 
 pub fn start_runtime_session(conn: &Connection, now: i64) -> rusqlite::Result<()> {
+    let identity = crate::platform::boot_identity(now);
+    start_runtime_session_with_identity(conn, now, &identity)
+}
+
+pub fn start_runtime_session_with_identity(
+    conn: &Connection,
+    now: i64,
+    identity: &BootIdentity,
+) -> rusqlite::Result<()> {
     let tx = conn.unchecked_transaction()?;
-    let boot_key = format!("runtime-{now}-{}", std::process::id());
+    let exact_boot_id = tx
+        .query_row(
+            "SELECT id FROM boot_session WHERE boot_id = ?1",
+            [&identity.boot_id],
+            |row| row.get(0),
+        )
+        .optional()?;
+    let reconciled_boot_id = if exact_boot_id.is_some() {
+        exact_boot_id
+    } else {
+        tx.query_row(
+            "SELECT id
+             FROM boot_session
+             WHERE boot_time_ms IS NOT NULL
+               AND ABS(boot_time_ms - ?1) <= ?2
+             ORDER BY ABS(boot_time_ms - ?1), id DESC
+             LIMIT 1",
+            params![identity.boot_time_ms, BOOT_TIME_MATCH_TOLERANCE_MS],
+            |row| row.get(0),
+        )
+        .optional()?
+    };
+    let boot_id: i64 = if let Some(id) = reconciled_boot_id {
+        tx.execute(
+            "UPDATE boot_session
+             SET boot_time_ms = COALESCE(boot_time_ms, ?1),
+                 observed_start_ms = CASE WHEN observed_start_ms IS NULL OR ?2 < observed_start_ms THEN ?2 ELSE observed_start_ms END
+             WHERE id = ?3",
+            params![identity.boot_time_ms, now, id],
+        )?;
+        id
+    } else {
+        tx.execute(
+            "INSERT INTO boot_session(boot_id, boot_time_ms, observed_start_ms, shutdown_kind, created_at_ms)
+             VALUES (?1, ?2, ?3, NULL, ?3)",
+            params![identity.boot_id, identity.boot_time_ms, now],
+        )?;
+        tx.last_insert_rowid()
+    };
     tx.execute(
-        "INSERT INTO boot_session(boot_id, boot_time_ms, observed_start_ms, shutdown_kind, created_at_ms) VALUES (?1, ?2, ?2, NULL, ?2)",
-        params![boot_key, now],
-    )?;
-    let boot_id = tx.last_insert_rowid();
-    tx.execute(
-        "INSERT INTO collection_session(boot_session_id, started_at_ms, app_version, schema_version, config_hash) VALUES (?1, ?2, ?3, 7, NULL)",
+        "INSERT INTO collection_session(boot_session_id, started_at_ms, app_version, schema_version, config_hash)
+         VALUES (?1, ?2, ?3, 7, NULL)",
         params![boot_id, now, env!("CARGO_PKG_VERSION")],
     )?;
     let collection_id = tx.last_insert_rowid();
     for (key, value) in [
         ("runtime_boot_session_id", boot_id),
         ("runtime_collection_session_id", collection_id),
+        ("runtime_usage_heartbeat_ms", now),
     ] {
         tx.execute(
-            "INSERT INTO settings(key, value, updated_at_ms) VALUES (?1, ?2, ?3) ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at_ms = excluded.updated_at_ms",
+            "INSERT INTO settings(key, value, updated_at_ms) VALUES (?1, ?2, ?3)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at_ms = excluded.updated_at_ms",
             params![key, value.to_string(), now],
         )?;
     }
@@ -346,7 +436,11 @@ pub fn start_runtime_session(conn: &Connection, now: i64) -> rusqlite::Result<()
 pub fn ensure_runtime_session(conn: &Connection, now: i64) -> rusqlite::Result<()> {
     let exists: Option<i64> = conn
         .query_row(
-            "SELECT CAST(value AS INTEGER) FROM settings WHERE key = 'runtime_collection_session_id'",
+            "SELECT cs.id
+             FROM collection_session cs
+             JOIN settings s ON s.key = 'runtime_collection_session_id'
+                            AND CAST(s.value AS INTEGER) = cs.id
+             WHERE cs.ended_at_ms IS NULL",
             [],
             |row| row.get(0),
         )
@@ -357,6 +451,30 @@ pub fn ensure_runtime_session(conn: &Connection, now: i64) -> rusqlite::Result<(
     Ok(())
 }
 
+pub fn finish_collection_session(
+    conn: &Connection,
+    now: i64,
+    _shutdown_kind: &str,
+) -> rusqlite::Result<()> {
+    let collection_id: Option<i64> = conn
+        .query_row(
+            "SELECT CAST(value AS INTEGER) FROM settings WHERE key = 'runtime_collection_session_id'",
+            [],
+            |row| row.get(0),
+        )
+        .optional()?;
+    if let Some(collection_id) = collection_id {
+        conn.execute(
+            "UPDATE collection_session
+             SET ended_at_ms = MAX(started_at_ms, ?1)
+             WHERE id = ?2 AND ended_at_ms IS NULL",
+            params![now, collection_id],
+        )?;
+    }
+    Ok(())
+}
+
+#[allow(dead_code)]
 pub fn finish_runtime_session(
     conn: &Connection,
     now: i64,
@@ -396,6 +514,22 @@ pub fn finish_runtime_session(
     tx.commit()
 }
 
+pub fn mark_windows_shutdown(
+    conn: &Connection,
+    now: i64,
+    shutdown_kind: &str,
+) -> rusqlite::Result<()> {
+    let boot_id = current_boot_session_id(conn)?;
+    conn.execute(
+        "UPDATE boot_session
+         SET observed_end_ms = MAX(COALESCE(observed_end_ms, 0), ?1), shutdown_kind = ?2
+         WHERE id = ?3",
+        params![now, shutdown_kind, boot_id],
+    )?;
+    Ok(())
+}
+
+#[allow(dead_code)]
 pub fn upsert_app(conn: &Connection, app: &ForegroundApp, now: i64) -> rusqlite::Result<i64> {
     let tx = conn.unchecked_transaction()?;
     let app_id = upsert_app_tx(&tx, app, now, true)?;
@@ -408,22 +542,126 @@ pub fn upsert_app(conn: &Connection, app: &ForegroundApp, now: i64) -> rusqlite:
     Ok(executable_id)
 }
 
+pub fn resolve_foreground_app(
+    conn: &Connection,
+    app: &ForegroundApp,
+    now: i64,
+) -> rusqlite::Result<AppResolution> {
+    let tx = conn.unchecked_transaction()?;
+    let app_id = upsert_app_tx(&tx, app, now, true)?;
+    let executable_id: i64 = tx.query_row(
+        "SELECT id FROM app_executable WHERE app_id = ?1 AND normalized_path = ?2",
+        params![app_id, normalized_path(app)],
+        |row| row.get(0),
+    )?;
+    let process_instance_id = match (app.pid, app.process_creation_time_ms) {
+        (Some(pid), Some(create_time_ms)) => {
+            let stable_key = format!("runtime:{executable_id}:{pid}:{create_time_ms}");
+            tx.execute(
+                "INSERT INTO process_instance(app_executable_id, stable_key, pid, create_time_ms, source)
+                 VALUES (?1, ?2, ?3, ?4, 'runtime')
+                 ON CONFLICT(stable_key) DO UPDATE SET
+                    app_executable_id = excluded.app_executable_id,
+                    pid = excluded.pid,
+                    create_time_ms = excluded.create_time_ms",
+                params![executable_id, stable_key, i64::from(pid), create_time_ms],
+            )?;
+            Some(tx.query_row(
+                "SELECT id FROM process_instance WHERE stable_key = ?1",
+                [stable_key],
+                |row| row.get(0),
+            )?)
+        }
+        _ => None,
+    };
+    tx.commit()?;
+    Ok(AppResolution {
+        app_id,
+        app_executable_id: executable_id,
+        process_instance_id,
+    })
+}
+
+#[allow(dead_code)]
 pub fn begin_interval(
     conn: &Connection,
     app_executable_id: i64,
     at_ms: i64,
-    state: &str,
+    _state: &str,
+) -> rusqlite::Result<i64> {
+    begin_foreground_interval(conn, app_executable_id, at_ms)
+}
+
+pub fn begin_foreground_interval(
+    conn: &Connection,
+    app_executable_id: i64,
+    at_ms: i64,
 ) -> rusqlite::Result<i64> {
     ensure_runtime_session(conn, at_ms)?;
     let boot_id = current_boot_session_id(conn)?;
     conn.execute(
         "INSERT INTO foreground_interval(boot_session_id, app_executable_id, start_time_ms, last_seen_time_ms, activity_state) VALUES (?1, ?2, ?3, ?3, ?4)",
-        params![boot_id, app_executable_id, at_ms, state],
+        params![boot_id, app_executable_id, at_ms, ActivityState::Active.as_str()],
     )?;
     Ok(conn.last_insert_rowid())
 }
 
+pub fn begin_computer_state_interval(
+    conn: &Connection,
+    state: ComputerState,
+    at_ms: i64,
+    source: &str,
+    quality: i64,
+) -> rusqlite::Result<i64> {
+    ensure_runtime_session(conn, at_ms)?;
+    let boot_id = current_boot_session_id(conn)?;
+    conn.execute(
+        "INSERT INTO computer_state_interval(boot_session_id, state, start_ts, source, quality)
+         VALUES (?1, ?2, ?3, ?4, ?5)",
+        params![boot_id, state.as_str(), at_ms, source, quality],
+    )?;
+    conn.execute(
+        "INSERT INTO settings(key, value, updated_at_ms) VALUES ('runtime_usage_heartbeat_ms', ?1, ?1)
+         ON CONFLICT(key) DO UPDATE SET value = MAX(CAST(value AS INTEGER), excluded.value), updated_at_ms = excluded.updated_at_ms",
+        [at_ms],
+    )?;
+    Ok(conn.last_insert_rowid())
+}
+
+pub fn checkpoint_computer_state(conn: &Connection, at_ms: i64) -> rusqlite::Result<()> {
+    conn.execute(
+        "INSERT INTO settings(key, value, updated_at_ms) VALUES ('runtime_usage_heartbeat_ms', ?1, ?1)
+         ON CONFLICT(key) DO UPDATE SET value = MAX(CAST(value AS INTEGER), excluded.value), updated_at_ms = excluded.updated_at_ms",
+        [at_ms],
+    )?;
+    Ok(())
+}
+
+pub fn close_computer_state_interval(
+    conn: &Connection,
+    interval_id: i64,
+    at_ms: i64,
+    _reason: &str,
+) -> rusqlite::Result<()> {
+    conn.execute(
+        "UPDATE computer_state_interval
+         SET end_ts = MAX(start_ts, ?1)
+         WHERE id = ?2 AND end_ts IS NULL",
+        params![at_ms, interval_id],
+    )?;
+    checkpoint_computer_state(conn, at_ms)
+}
+
+#[allow(dead_code)]
 pub fn checkpoint_interval(
+    conn: &Connection,
+    interval_id: i64,
+    at_ms: i64,
+) -> rusqlite::Result<()> {
+    checkpoint_foreground_interval(conn, interval_id, at_ms)
+}
+
+pub fn checkpoint_foreground_interval(
     conn: &Connection,
     interval_id: i64,
     at_ms: i64,
@@ -435,7 +673,17 @@ pub fn checkpoint_interval(
     Ok(())
 }
 
+#[allow(dead_code)]
 pub fn close_interval(
+    conn: &Connection,
+    interval_id: i64,
+    at_ms: i64,
+    reason: &str,
+) -> rusqlite::Result<()> {
+    close_foreground_interval(conn, interval_id, at_ms, reason)
+}
+
+pub fn close_foreground_interval(
     conn: &Connection,
     interval_id: i64,
     at_ms: i64,
@@ -585,6 +833,8 @@ fn upsert_resource_app_tx(
         process_name: app.process_name.clone(),
         exe_path: app.exe_path.clone(),
         display_name: app.process_name.clone(),
+        pid: None,
+        process_creation_time_ms: None,
     };
     upsert_app_tx(tx, &foreground, now, false)?;
     tx.query_row(
@@ -608,6 +858,191 @@ fn normalized_path(app: &ForegroundApp) -> String {
             )
         })
         .unwrap_or_else(|| format!("legacy:{}", app.identity_key))
+}
+
+const USAGE_PROCESSING_VERSION: &str = "pr02-v1";
+const BOOT_TIME_MATCH_TOLERANCE_MS: i64 = 5_000;
+
+#[derive(Default)]
+struct DailyUsageAccumulator {
+    app_id: i64,
+    foreground_total_ms: i64,
+    active_usage_ms: i64,
+    idle_foreground_ms: i64,
+}
+
+pub fn rebuild_daily_usage(conn: &Connection, start_ms: i64, end_ms: i64) -> rusqlite::Result<()> {
+    if end_ms <= start_ms {
+        return Ok(());
+    }
+    let mut date_statement = conn.prepare(
+        "WITH RECURSIVE dates(day) AS (
+             SELECT date(?1 / 1000.0, 'unixepoch', 'localtime')
+             UNION ALL
+             SELECT date(day, '+1 day') FROM dates
+             WHERE day < date((?2 - 1) / 1000.0, 'unixepoch', 'localtime')
+         )
+         SELECT day,
+                CAST(strftime('%s', day || ' 00:00:00', 'utc') AS INTEGER) * 1000,
+                CAST(strftime('%s', date(day, '+1 day') || ' 00:00:00', 'utc') AS INTEGER) * 1000
+         FROM dates",
+    )?;
+    let days: Vec<(String, i64, i64)> = date_statement
+        .query_map(params![start_ms, end_ms], |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+        })?
+        .collect::<rusqlite::Result<_>>()?;
+    let state_start_ms = days
+        .first()
+        .map_or(start_ms, |(_, day_start, _)| *day_start);
+    let state_end_ms = days.last().map_or(end_ms, |(_, _, day_end)| *day_end);
+    let state_checkpoint = usage_heartbeat_checkpoint(conn)?
+        .unwrap_or(state_end_ms)
+        .min(state_end_ms);
+    let state_ranges =
+        load_rollup_state_ranges(conn, state_start_ms, state_end_ms, state_checkpoint)?;
+    let mut rebuilt = Vec::<(String, i64, i64, Vec<DailyUsageAccumulator>)>::new();
+
+    for (local_date, day_start, day_end) in days {
+        let mut foreground_statement = conn.prepare(
+            "SELECT fi.boot_session_id, e.app_id,
+                    MAX(fi.start_time_ms, ?1),
+                    MIN(COALESCE(fi.end_time_ms, fi.last_seen_time_ms), ?2)
+             FROM foreground_interval fi
+             JOIN app_executable e ON e.id = fi.app_executable_id
+             WHERE fi.start_time_ms < ?2
+               AND COALESCE(fi.end_time_ms, fi.last_seen_time_ms) > ?1
+             ORDER BY fi.start_time_ms, fi.id",
+        )?;
+        let foregrounds: Vec<(i64, i64, i64, i64)> = foreground_statement
+            .query_map(params![day_start, day_end], |row| {
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+            })?
+            .collect::<rusqlite::Result<_>>()?;
+        let mut aggregates = std::collections::BTreeMap::<i64, DailyUsageAccumulator>::new();
+
+        for (boot_session_id, app_id, foreground_start, foreground_end) in foregrounds {
+            if foreground_end <= foreground_start {
+                continue;
+            }
+            let entry = aggregates
+                .entry(app_id)
+                .or_insert_with(|| DailyUsageAccumulator {
+                    app_id,
+                    ..DailyUsageAccumulator::default()
+                });
+            entry.foreground_total_ms = entry
+                .foreground_total_ms
+                .saturating_add(foreground_end - foreground_start);
+            let durations = state_ranges
+                .get(&boot_session_id)
+                .map(|states| {
+                    intersect_foreground(
+                        boot_session_id,
+                        TimeRange {
+                            start_ms: foreground_start,
+                            end_ms: foreground_end,
+                        },
+                        states,
+                    )
+                })
+                .unwrap_or_default();
+            entry.active_usage_ms = entry.active_usage_ms.saturating_add(durations.active_ms);
+            entry.idle_foreground_ms = entry.idle_foreground_ms.saturating_add(durations.idle_ms);
+        }
+        rebuilt.push((
+            local_date,
+            day_start,
+            day_end,
+            aggregates.into_values().collect(),
+        ));
+    }
+
+    let tx = conn.unchecked_transaction()?;
+    for (local_date, day_start, day_end, aggregates) in rebuilt {
+        tx.execute(
+            "DELETE FROM app_usage_daily WHERE local_date = ?1",
+            [&local_date],
+        )?;
+        for aggregate in aggregates {
+            let launch_count: i64 = tx.query_row(
+                "SELECT COUNT(DISTINCT pi.id)
+                 FROM process_instance pi
+                 JOIN app_executable e ON e.id = pi.app_executable_id
+                 WHERE e.app_id = ?1
+                   AND pi.pid IS NOT NULL
+                   AND pi.create_time_ms >= ?2
+                   AND pi.create_time_ms < ?3",
+                params![aggregate.app_id, day_start, day_end],
+                |row| row.get(0),
+            )?;
+            tx.execute(
+                "INSERT INTO app_usage_daily(
+                    local_date, app_id, foreground_total_ms, active_usage_ms,
+                    idle_foreground_ms, launch_count, processing_version
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+                 ON CONFLICT(local_date, app_id) DO UPDATE SET
+                    foreground_total_ms = excluded.foreground_total_ms,
+                    active_usage_ms = excluded.active_usage_ms,
+                    idle_foreground_ms = excluded.idle_foreground_ms,
+                    launch_count = excluded.launch_count,
+                    processing_version = excluded.processing_version",
+                params![
+                    local_date,
+                    aggregate.app_id,
+                    aggregate.foreground_total_ms,
+                    aggregate.active_usage_ms,
+                    aggregate.idle_foreground_ms,
+                    launch_count,
+                    USAGE_PROCESSING_VERSION,
+                ],
+            )?;
+        }
+    }
+    tx.commit()
+}
+
+fn usage_heartbeat_checkpoint(conn: &Connection) -> rusqlite::Result<Option<i64>> {
+    conn.query_row(
+        "SELECT CAST(value AS INTEGER) FROM settings WHERE key = 'runtime_usage_heartbeat_ms'",
+        [],
+        |row| row.get(0),
+    )
+    .optional()
+}
+
+fn load_rollup_state_ranges(
+    conn: &Connection,
+    start_ms: i64,
+    end_ms: i64,
+    checkpoint_ms: i64,
+) -> rusqlite::Result<HashMap<i64, Vec<StateRange>>> {
+    let mut statement = conn.prepare(
+        "SELECT boot_session_id, state, start_ts, COALESCE(end_ts, ?3)
+         FROM computer_state_interval
+         WHERE start_ts < ?2 AND COALESCE(end_ts, ?3) > ?1
+         ORDER BY boot_session_id, start_ts, id",
+    )?;
+    let mut ranges = HashMap::<i64, Vec<StateRange>>::new();
+    let rows = statement.query_map(params![start_ms, end_ms, checkpoint_ms], |row| {
+        Ok((
+            row.get::<_, i64>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, i64>(2)?,
+            row.get::<_, i64>(3)?,
+        ))
+    })?;
+    for row in rows {
+        let (boot_session_id, state, start_ms, end_ms) = row?;
+        if end_ms > start_ms {
+            ranges.entry(boot_session_id).or_default().push(StateRange {
+                boot_session_id,
+                state,
+                range: TimeRange { start_ms, end_ms },
+            });
+        }
+    }
+    Ok(ranges)
 }
 
 const RETRY_BASE_DELAY_MS: u64 = 25;

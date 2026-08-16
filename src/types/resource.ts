@@ -27,9 +27,25 @@ export interface AppUsageSummary {
   appId: number;
   appName: string;
   displayName: string;
+  foregroundTotalMs: number;
+  activeUsageMs: number;
+  idleForegroundMs: number;
   activeSeconds: number;
   idleSeconds: number;
   percentage: number;
+  isHidden: boolean;
+}
+
+export interface DailyUsageSummary {
+  localDate: string;
+  appId: number;
+  appName: string;
+  displayName: string;
+  foregroundTotalMs: number;
+  activeUsageMs: number;
+  idleForegroundMs: number;
+  launchCount: number;
+  processingVersion: string;
   isHidden: boolean;
 }
 
@@ -78,6 +94,7 @@ export interface TodayOverview {
   endMs: number;
   totalActiveForegroundSeconds: number;
   totalIdleForegroundSeconds: number;
+  computerActiveSeconds: number;
   hiddenActiveForegroundSeconds: number;
   topApps: AppUsageSummary[];
   cpuSampledPeak: number | null;

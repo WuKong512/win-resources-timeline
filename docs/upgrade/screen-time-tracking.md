@@ -25,30 +25,23 @@
 
 ## 区间状态机
 
-每次可信的前台或电脑状态变化先关闭当前开放区间，再打开新间隔。重复事件去抖；短暂无法解析的窗口记录为 unknown，而不是错误归入上一应用。应用异常退出、Explorer 重启和权限隔离窗口都必须被视为正常边界条件。
+foreground 与 computer state 是两个独立时间轴。可信的前台切换、无前台、暂停、锁定、休眠、断开、退出和 clock/gap recovery 会封口 foreground；active↔idle 只切换 computer state，不拆分 foreground。重复事件去抖；短暂无法解析的窗口进入明确的 unknown/gap，不会归入上一应用。
 
-应用启动时恢复未封口区间：最多延伸到上次心跳、系统崩溃时间或 boot session 结束，不能直接延伸到本次启动时间。
+应用启动时恢复未封口区间：最多延伸到上次可信 heartbeat/last_seen，不能直接延伸到本次启动时间。锁定和休眠期间不属于任何应用的 active usage；恢复后重新确认当前状态和前台应用。
 
 ## Windows 与应用会话
 
-`boot_session` 表示 Windows 的一次启动/电源周期，来源于系统启动时间和 Windows Event Log；`collection_session` 只表示 Resource Timeline 在某套采集计划下的一次运行区间。同一 boot session 内可以有多个 collection session，应用重启不得被解释为 Windows 重启。
-
-系统启动/关机、睡眠/休眠和唤醒优先使用操作系统通知实时记录；应用未运行期间的历史由下一次启动扫描 Event Log 补齐。快速启动、完整重启、休眠恢复和普通睡眠恢复保留可验证的分类，不全部折叠成“应用启动”。
+`boot_session` 表示 Windows 的一次启动/电源周期，使用 uptime/boot-time identity 并以小容差与已有记录 reconciliation；`collection_session` 只表示 Resource Timeline 的一次采集运行。同一 boot session 内可以有多个 collection session，应用重启不得被解释为 Windows 重启。锁定/解锁、睡眠/恢复和会话连接使用 Windows live notifications；应用未运行期间的完整历史 Event Log 补齐留给后续 system-event/crash 工作。
 
 ## 应用身份归一化
 
-逻辑 `app` 与具体 `app_executable` 分离。身份解析优先组合包族名、签名发布者、文件身份、规范化路径和产品名。Microsoft Store 应用升级后路径变化，应尽量归入同一逻辑应用；无法可靠合并时宁可保留两个候选并允许用户手动合并。
+逻辑 `app` 与具体 `app_executable` 分离。当前运行时至少保存 `process_name`、display name、规范化 executable path；如果可靠获得 PID 与 process creation time，则建立 `process_instance`。可执行文件路径/版本变化不会在查询层自动拆分明显同名逻辑应用；无法可靠确认时保持 separate/unknown，不猜测。
 
 系统组件、浏览器和多进程应用需要聚合规则，但不在第一版通过窗口标题推测网站或文档。进程资源样本关联 executable，日报聚合关联 logical app。
 
 ## 隐私
 
-窗口标题/上下文默认关闭。开启后：
-
-- 用户可按应用排除。
-- 支持只保存散列/规则化类别，而不是原始标题。
-- 敏感应用可强制不记录。
-- 提供单独清除窗口上下文的操作，不影响应用时长。
+默认不保存窗口标题、文档标题、浏览器 URL 或网站名称。schema 中的 window context 预留保持未启用，应用使用统计不依赖窗口内容。
 
 ## 参考方向
 
@@ -57,6 +50,8 @@
 ## 验收
 
 - 前台快速切换、锁屏、空闲、休眠和跨午夜场景无重叠或负区间。
+- foreground total、active usage、idle foreground 来自两条时间轴的区间求交，日报重算幂等。
 - 应用所有 active usage 之和不超过电脑 active time（允许 unknown 未归属）。
 - 强杀应用后，恢复逻辑不会把停机时间计入前台使用。
-- 关闭标题记录时，数据库不存在新标题内容。
+- launch_count 只统计同时有 PID 和 process creation time 的 observed process instance；无法可靠确认时不以 foreground activation 次数代替。
+- 数据库不存在新窗口标题、文档标题或 URL 内容。
