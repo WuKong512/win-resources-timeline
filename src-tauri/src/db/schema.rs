@@ -313,6 +313,26 @@ BEGIN
 END;
 "#;
 
+const V8_COMPATIBILITY_DDL: &str = r#"
+CREATE INDEX IF NOT EXISTS idx_gpu_sample_device_frame ON gpu_sample(device_id, frame_id);
+DROP TRIGGER IF EXISTS trg_gpu_sample_power_scope_insert;
+CREATE TRIGGER IF NOT EXISTS trg_gpu_sample_power_scope_insert
+    BEFORE INSERT ON gpu_sample
+    WHEN (NEW.board_power_w IS NULL AND NEW.power_scope IS NOT NULL)
+      OR (NEW.board_power_w IS NOT NULL AND NEW.power_scope IS NOT 'gpu_board')
+BEGIN
+    SELECT RAISE(ABORT, 'gpu board power must use gpu_board scope');
+END;
+DROP TRIGGER IF EXISTS trg_gpu_sample_power_scope_update;
+CREATE TRIGGER IF NOT EXISTS trg_gpu_sample_power_scope_update
+    BEFORE UPDATE OF board_power_w, power_scope ON gpu_sample
+    WHEN (NEW.board_power_w IS NULL AND NEW.power_scope IS NOT NULL)
+      OR (NEW.board_power_w IS NOT NULL AND NEW.power_scope IS NOT 'gpu_board')
+BEGIN
+    SELECT RAISE(ABORT, 'gpu board power must use gpu_board scope');
+END;
+"#;
+
 const STAGES: &[&str] = &[
     "preflight",
     "backup",
@@ -377,7 +397,7 @@ pub fn migrate_with_path(
 ) -> rusqlite::Result<()> {
     configure_connection(conn)?;
     let original_version: i64 = conn.pragma_query_value(None, "user_version", |row| row.get(0))?;
-    if original_version > 7 {
+    if original_version > 8 {
         return Err(invalid_schema(
             "database schema is newer than this application",
         ));
@@ -446,9 +466,15 @@ pub fn migrate_with_path(
     if version < 7 {
         migrate_v6_to_v7(conn, database_path)?;
     }
+    let version: i64 = conn.pragma_query_value(None, "user_version", |row| row.get(0))?;
+    if version < 8 {
+        migrate_v7_to_v8(conn, database_path)?;
+    }
     let final_version: i64 = conn.pragma_query_value(None, "user_version", |row| row.get(0))?;
-    if final_version == 7 {
-        validate_v7_open(conn)?;
+    match final_version {
+        7 => validate_v7_open(conn)?,
+        8 => validate_v8_open(conn)?,
+        _ => {}
     }
     Ok(())
 }
@@ -530,6 +556,10 @@ fn migrate_v6_to_v7(conn: &mut Connection, database_path: Option<&Path>) -> rusq
     migrate_v6_to_v7_with_options(conn, database_path, None, None)
 }
 
+fn migrate_v7_to_v8(conn: &mut Connection, database_path: Option<&Path>) -> rusqlite::Result<()> {
+    migrate_v7_to_v8_with_options(conn, database_path, None, None)
+}
+
 #[cfg(test)]
 pub(crate) fn migrate_v6_to_v7_fail_at(
     conn: &mut Connection,
@@ -562,7 +592,7 @@ fn migrate_v6_to_v7_with_options(
         MIGRATION_RUN_COUNTER.fetch_add(1, Ordering::Relaxed)
     );
     conn.execute("UPDATE migration_journal SET status='interrupted', completed_at_ms=?1, error_text='previous migration was interrupted' WHERE to_version=7 AND status = 'started'", [now_ms()])?;
-    start_run(conn, &run_id)?;
+    start_run(conn, &run_id, 6, 7)?;
     mark_stage(conn, &run_id, "preflight", "started", None, None)?;
     let preflight = match preflight_with_available_space(conn, database_path, available_override) {
         Ok(v) => {
@@ -733,10 +763,195 @@ fn migrate_v6_to_v7_with_options(
     Ok(())
 }
 
-fn start_run(conn: &Connection, run_id: &str) -> rusqlite::Result<()> {
+#[cfg(test)]
+pub(crate) fn migrate_v7_to_v8_fail_at(
+    conn: &mut Connection,
+    database_path: Option<&Path>,
+    stage: &str,
+) -> rusqlite::Result<()> {
+    migrate_v7_to_v8_with_options(conn, database_path, Some(stage), None)
+}
+
+fn migrate_v7_to_v8_with_options(
+    conn: &mut Connection,
+    database_path: Option<&Path>,
+    failure_stage: Option<&str>,
+    available_override: Option<u64>,
+) -> rusqlite::Result<()> {
+    ensure_migration_journal_schema(conn)?;
+    let run_id = format!(
+        "v7-v8-{}-{}-{}",
+        now_ms(),
+        std::process::id(),
+        MIGRATION_RUN_COUNTER.fetch_add(1, Ordering::Relaxed)
+    );
+    conn.execute("UPDATE migration_journal SET status='interrupted', completed_at_ms=?1, error_text='previous migration was interrupted' WHERE to_version=8 AND status = 'started'", [now_ms()])?;
+    start_run(conn, &run_id, 7, 8)?;
+    mark_stage(conn, &run_id, "preflight", "started", None, None)?;
+    let preflight = match preflight_with_available_space(conn, database_path, available_override) {
+        Ok(value) => {
+            mark_stage(conn, &run_id, "preflight", "completed", None, None)?;
+            value
+        }
+        Err(error) => {
+            mark_stage(
+                conn,
+                &run_id,
+                "preflight",
+                "failed",
+                None,
+                Some(&error.to_string()),
+            )?;
+            return Err(error);
+        }
+    };
+    mark_stage(conn, &run_id, "backup", "started", None, None)?;
+    let backup_path = database_path.map(|path| {
+        path.parent()
+            .unwrap_or_else(|| Path::new("."))
+            .join(format!(
+                "{}.v8-backup-{}-{}.sqlite3",
+                path.file_name()
+                    .and_then(|name| name.to_str())
+                    .unwrap_or("resource-timeline.sqlite3"),
+                now_ms(),
+                std::process::id()
+            ))
+    });
+    if let Some(path) = backup_path.as_deref() {
+        if let Err(error) = create_consistent_backup(conn, path) {
+            mark_stage(
+                conn,
+                &run_id,
+                "backup",
+                "failed",
+                None,
+                Some(&error.to_string()),
+            )?;
+            return Err(error);
+        }
+    }
+    mark_stage(
+        conn,
+        &run_id,
+        "backup",
+        "completed",
+        Some(&format!(
+            "{{\"database_bytes\":{},\"wal_bytes\":{},\"shm_bytes\":{},\"available_bytes\":{},\"required_bytes\":{}}}",
+            preflight.database_bytes,
+            preflight.wal_bytes,
+            preflight.shm_bytes,
+            preflight
+                .available_bytes
+                .map(|value| value.to_string())
+                .unwrap_or_else(|| "null".into()),
+            preflight.required_bytes
+        )),
+        None,
+    )?;
+
+    let old_gpu_rows: i64 =
+        conn.query_row("SELECT COUNT(*) FROM gpu_sample", [], |row| row.get(0))?;
+    let mut current_stage = "create";
+    let mut completed_stages = Vec::new();
+    let result = (|| {
+        let tx = conn.transaction()?;
+        mark_stage_tx(&tx, &run_id, "create", "started", None, None)?;
+        inject_failure(failure_stage, "create")?;
+        ensure_v8_columns(&tx)?;
+        tx.execute(
+            "UPDATE gpu_sample SET power_scope = 'gpu_board' WHERE board_power_w IS NOT NULL AND power_scope IS NULL",
+            [],
+        )?;
+        tx.execute_batch(V8_COMPATIBILITY_DDL)?;
+        mark_stage_tx(&tx, &run_id, "create", "completed", None, None)?;
+        completed_stages.push("create");
+
+        current_stage = "identity_backfill";
+        mark_stage_tx(&tx, &run_id, current_stage, "started", None, None)?;
+        inject_failure(failure_stage, current_stage)?;
+        mark_stage_tx(&tx, &run_id, current_stage, "completed", None, None)?;
+        completed_stages.push(current_stage);
+
+        current_stage = "usage_backfill";
+        mark_stage_tx(&tx, &run_id, current_stage, "started", None, None)?;
+        inject_failure(failure_stage, current_stage)?;
+        mark_stage_tx(&tx, &run_id, current_stage, "completed", None, None)?;
+        completed_stages.push(current_stage);
+
+        current_stage = "resource_backfill";
+        mark_stage_tx(&tx, &run_id, current_stage, "started", None, None)?;
+        inject_failure(failure_stage, current_stage)?;
+        mark_stage_tx(&tx, &run_id, current_stage, "completed", None, None)?;
+        completed_stages.push(current_stage);
+
+        current_stage = "verify";
+        mark_stage_tx(&tx, &run_id, current_stage, "started", None, None)?;
+        inject_failure(failure_stage, current_stage)?;
+        verify_v8(&tx, old_gpu_rows)?;
+        mark_stage_tx(&tx, &run_id, current_stage, "completed", None, None)?;
+        completed_stages.push(current_stage);
+
+        current_stage = "commit";
+        mark_stage_tx(&tx, &run_id, current_stage, "started", None, None)?;
+        inject_failure(failure_stage, current_stage)?;
+        tx.pragma_update(None, "user_version", 8)?;
+        mark_stage_tx(&tx, &run_id, current_stage, "completed", None, None)?;
+        completed_stages.push(current_stage);
+        tx.commit()?;
+        Ok::<_, rusqlite::Error>(())
+    })();
+    if let Err(error) = result {
+        for stage in &completed_stages {
+            mark_stage(conn, &run_id, stage, "completed", None, None)?;
+        }
+        mark_stage(
+            conn,
+            &run_id,
+            current_stage,
+            "failed",
+            None,
+            Some(&error.to_string()),
+        )?;
+        return Err(error);
+    }
+
+    mark_stage(conn, &run_id, "postflight", "started", None, None)?;
+    if let Err(error) = inject_failure(failure_stage, "postflight") {
+        mark_stage(
+            conn,
+            &run_id,
+            "postflight",
+            "failed",
+            None,
+            Some(&error.to_string()),
+        )?;
+        return Err(error);
+    }
+    if let Err(error) = postflight_v8(conn) {
+        mark_stage(
+            conn,
+            &run_id,
+            "postflight",
+            "failed",
+            None,
+            Some(&error.to_string()),
+        )?;
+        return Err(error);
+    }
+    mark_stage(conn, &run_id, "postflight", "completed", None, None)?;
+    Ok(())
+}
+
+fn start_run(
+    conn: &Connection,
+    run_id: &str,
+    from_version: i64,
+    to_version: i64,
+) -> rusqlite::Result<()> {
     let tx = conn.unchecked_transaction()?;
     for stage in STAGES {
-        tx.execute("INSERT INTO migration_journal(run_id,from_version,to_version,stage,status) VALUES (?1,6,7,?2,'pending')", params![run_id, *stage])?;
+        tx.execute("INSERT INTO migration_journal(run_id,from_version,to_version,stage,status) VALUES (?1,?2,?3,?4,'pending')", params![run_id, from_version, to_version, *stage])?;
     }
     tx.commit()
 }
@@ -1018,10 +1233,56 @@ fn postflight(conn: &Connection) -> rusqlite::Result<()> {
     verify_database_integrity(conn)
 }
 
+fn postflight_v8(conn: &Connection) -> rusqlite::Result<()> {
+    let v: i64 = conn.pragma_query_value(None, "user_version", |r| r.get(0))?;
+    if v != 8 {
+        return Err(invalid_schema("postflight user_version is not 8"));
+    }
+    verify_database_integrity(conn)
+}
+
 fn validate_v7_open(conn: &mut Connection) -> rusqlite::Result<()> {
     ensure_v7_compatibility(conn)?;
-    let latest_postflight = latest_postflight(conn)?;
+    let latest_postflight = latest_postflight(conn, 7)?;
     match verify_database_integrity(conn) {
+        Ok(()) => {
+            if let Some((run_id, status)) = latest_postflight {
+                if status != "completed" {
+                    mark_stage(
+                        conn,
+                        &run_id,
+                        "postflight",
+                        "completed",
+                        Some("revalidated successfully on database open"),
+                        None,
+                    )?;
+                }
+            }
+            Ok(())
+        }
+        Err(error) => {
+            if let Some((run_id, _)) = latest_postflight {
+                mark_stage(
+                    conn,
+                    &run_id,
+                    "postflight",
+                    "failed",
+                    None,
+                    Some(&error.to_string()),
+                )?;
+            }
+            Err(error)
+        }
+    }
+}
+
+fn validate_v8_open(conn: &mut Connection) -> rusqlite::Result<()> {
+    ensure_v7_compatibility(conn)?;
+    ensure_v8_compatibility(conn)?;
+    let expected_gpu_rows: i64 =
+        conn.query_row("SELECT COUNT(*) FROM gpu_sample", [], |row| row.get(0))?;
+    let latest_postflight = latest_postflight(conn, 8)?;
+    match verify_v8(conn, expected_gpu_rows).and_then(|_| verify_database_integrity(conn)) {
         Ok(()) => {
             if let Some((run_id, status)) = latest_postflight {
                 if status != "completed" {
@@ -1113,6 +1374,66 @@ fn ensure_v7_compatibility(conn: &mut Connection) -> rusqlite::Result<()> {
     tx.commit()
 }
 
+fn ensure_v8_compatibility(conn: &mut Connection) -> rusqlite::Result<()> {
+    let tx = conn.transaction()?;
+    ensure_v8_columns(&tx)?;
+    tx.execute_batch(V8_COMPATIBILITY_DDL)?;
+    tx.commit()
+}
+
+fn ensure_v8_columns(conn: &Connection) -> rusqlite::Result<()> {
+    if !table_exists(conn, "gpu_sample")? {
+        return Err(invalid_schema("schema v8 is missing gpu_sample"));
+    }
+    for (column, definition) in [
+        ("memory_controller_usage_pct", "REAL"),
+        ("memory_clock_mhz", "REAL"),
+        ("vram_total_bytes", "INTEGER"),
+        ("power_scope", "TEXT"),
+    ] {
+        if !has_column(conn, "gpu_sample", column)? {
+            conn.execute(
+                &format!("ALTER TABLE gpu_sample ADD COLUMN {column} {definition}"),
+                [],
+            )?;
+        }
+    }
+    Ok(())
+}
+
+fn verify_v8(conn: &Connection, expected_gpu_rows: i64) -> rusqlite::Result<()> {
+    if let Some(error) = foreign_key_error(conn)? {
+        return Err(invalid_schema(&format!(
+            "foreign_key_check failed during v7 to v8 migration: {error}"
+        )));
+    }
+    for column in [
+        "memory_controller_usage_pct",
+        "memory_clock_mhz",
+        "vram_total_bytes",
+        "power_scope",
+    ] {
+        if !has_column(conn, "gpu_sample", column)? {
+            return Err(invalid_schema(&format!(
+                "gpu_sample is missing v8 column {column}"
+            )));
+        }
+    }
+    let gpu_rows: i64 = conn.query_row("SELECT COUNT(*) FROM gpu_sample", [], |row| row.get(0))?;
+    if gpu_rows != expected_gpu_rows {
+        return Err(invalid_schema("v7 to v8 GPU row-count verification failed"));
+    }
+    let invalid_power_scope: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM gpu_sample WHERE (board_power_w IS NULL AND power_scope IS NOT NULL) OR (board_power_w IS NOT NULL AND power_scope IS NOT 'gpu_board')",
+        [],
+        |row| row.get(0),
+    )?;
+    if invalid_power_scope != 0 {
+        return Err(invalid_schema("v8 GPU power scope verification failed"));
+    }
+    Ok(())
+}
+
 fn repair_open_computer_state_intervals(tx: &Transaction<'_>) -> rusqlite::Result<()> {
     tx.execute(
         "UPDATE computer_state_interval AS current
@@ -1186,17 +1507,20 @@ fn install_v7_nullable_constraints(tx: &Transaction<'_>) -> rusqlite::Result<()>
     Ok(())
 }
 
-fn latest_postflight(conn: &Connection) -> rusqlite::Result<Option<(String, String)>> {
+fn latest_postflight(
+    conn: &Connection,
+    to_version: i64,
+) -> rusqlite::Result<Option<(String, String)>> {
     if !table_exists(conn, "migration_journal")? {
         return Ok(None);
     }
     conn.query_row(
         "SELECT run_id, status
          FROM migration_journal
-         WHERE to_version = 7 AND stage = 'postflight'
+         WHERE to_version = ?1 AND stage = 'postflight'
          ORDER BY id DESC
          LIMIT 1",
-        [],
+        [to_version],
         |row| Ok((row.get(0)?, row.get(1)?)),
     )
     .optional()
@@ -1413,4 +1737,358 @@ fn now_ms() -> i64 {
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_millis() as i64)
         .unwrap_or(0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::models::GPU_BOARD_POWER_SCOPE;
+    use rusqlite::{params, Connection};
+
+    fn test_path(name: &str) -> PathBuf {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|duration| duration.as_nanos())
+            .unwrap_or_default();
+        std::env::temp_dir().join(format!(
+            "resource-timeline-schema-{name}-{}-{nonce}.sqlite3",
+            std::process::id(),
+        ))
+    }
+
+    fn cleanup(path: &Path) {
+        for suffix in ["", "-wal", "-shm"] {
+            let _ = fs::remove_file(PathBuf::from(format!("{}{}", path.display(), suffix)));
+        }
+        let Some(parent) = path.parent() else {
+            return;
+        };
+        let Some(name) = path.file_name().and_then(|value| value.to_str()) else {
+            return;
+        };
+        let prefixes = [format!("{name}.v8-backup-")];
+        if let Ok(entries) = fs::read_dir(parent) {
+            for entry in entries.flatten() {
+                if entry
+                    .file_name()
+                    .to_str()
+                    .is_some_and(|value| prefixes.iter().any(|prefix| value.starts_with(prefix)))
+                {
+                    let _ = fs::remove_file(entry.path());
+                }
+            }
+        }
+    }
+
+    fn create_v7_gpu_fixture(path: &Path) {
+        let conn = Connection::open(path).unwrap();
+        configure_connection(&conn).unwrap();
+        conn.execute_batch(SCHEMA_V7).unwrap();
+        conn.execute_batch(V7_COMPATIBILITY_DDL).unwrap();
+        conn.execute(
+            "INSERT INTO boot_session(boot_id, boot_time_ms, created_at_ms) VALUES ('test-boot', 1000, 1000)",
+            [],
+        )
+        .unwrap();
+        let boot_id = conn.last_insert_rowid();
+        conn.execute(
+            "INSERT INTO collection_session(boot_session_id, started_at_ms, app_version, schema_version) VALUES (?1, 1000, 'test', 7)",
+            [boot_id],
+        )
+        .unwrap();
+        let session_id = conn.last_insert_rowid();
+        conn.execute(
+            "INSERT INTO hardware_device(stable_key, category, vendor, model, capacity_bytes, first_seen_at_ms, last_seen_at_ms) VALUES ('runtime:gpu:legacy', 'gpu', 'NVIDIA', 'Legacy GPU', 1024, 1000, 1000)",
+            [],
+        )
+        .unwrap();
+        let device_id = conn.last_insert_rowid();
+        conn.execute(
+            "INSERT INTO sample_frame(collection_session_id, ts, sequence, duration_ms) VALUES (?1, 1000, 1, 2000)",
+            [session_id],
+        )
+        .unwrap();
+        let frame_id = conn.last_insert_rowid();
+        conn.execute(
+            "INSERT INTO gpu_sample(frame_id, device_id, usage_pct, temp_c, board_power_w, core_clock_mhz, vram_used_bytes) VALUES (?1, ?2, 0.0, 40.0, 100.0, 2000.0, 0)",
+            params![frame_id, device_id],
+        )
+        .unwrap();
+        conn.pragma_update(None, "user_version", 7).unwrap();
+    }
+
+    fn add_gpu_device(conn: &Connection, stable_key: &str) -> i64 {
+        conn.execute(
+            "INSERT INTO hardware_device(stable_key, category, first_seen_at_ms, last_seen_at_ms) VALUES (?1, 'gpu', 1000, 1000)",
+            [stable_key],
+        )
+        .unwrap();
+        conn.last_insert_rowid()
+    }
+
+    fn insert_gpu_power_row(
+        conn: &Connection,
+        frame_id: i64,
+        device_id: i64,
+        power_watts: Option<f64>,
+        power_scope: Option<&str>,
+    ) -> rusqlite::Result<usize> {
+        conn.execute(
+            "INSERT INTO gpu_sample(frame_id, device_id, board_power_w, power_scope) VALUES (?1, ?2, ?3, ?4)",
+            params![frame_id, device_id, power_watts, power_scope],
+        )
+    }
+
+    fn assert_power_scope_trigger_error(result: rusqlite::Result<usize>) {
+        let error = result.expect_err("invalid GPU power scope should be rejected by SQLite");
+        assert!(
+            error
+                .to_string()
+                .contains("gpu board power must use gpu_board scope"),
+            "expected power-scope trigger error, got {error:?}"
+        );
+    }
+
+    #[test]
+    fn gpu_power_scope_sql_triggers_are_null_safe_for_insert_and_update() {
+        let path = test_path("gpu-power-scope-sql");
+        cleanup(&path);
+        create_v7_gpu_fixture(&path);
+
+        let mut conn = Connection::open(&path).unwrap();
+        migrate_v7_to_v8(&mut conn, Some(&path)).unwrap();
+        let frame_id: i64 = conn
+            .query_row("SELECT id FROM sample_frame LIMIT 1", [], |row| row.get(0))
+            .unwrap();
+
+        for (index, power_watts, power_scope, valid) in [
+            ("insert-null-null", None, None, true),
+            (
+                "insert-board-power",
+                Some(100.0),
+                Some(GPU_BOARD_POWER_SCOPE),
+                true,
+            ),
+            ("insert-null-scope", Some(100.0), None, false),
+            (
+                "insert-scope-without-power",
+                None,
+                Some(GPU_BOARD_POWER_SCOPE),
+                false,
+            ),
+            ("insert-wall-power", Some(100.0), Some("wall"), false),
+        ] {
+            let device_id = add_gpu_device(&conn, index);
+            let result = insert_gpu_power_row(&conn, frame_id, device_id, power_watts, power_scope);
+            if valid {
+                assert!(result.is_ok(), "valid insert {index} failed: {result:?}");
+            } else {
+                assert_power_scope_trigger_error(result);
+            }
+        }
+
+        for (index, power_watts, power_scope) in [
+            ("update-null-scope", Some(100.0), None),
+            (
+                "update-scope-without-power",
+                None,
+                Some(GPU_BOARD_POWER_SCOPE),
+            ),
+            ("update-wall-power", Some(100.0), Some("wall")),
+        ] {
+            let device_id = add_gpu_device(&conn, index);
+            insert_gpu_power_row(&conn, frame_id, device_id, None, None).unwrap();
+            let result = conn.execute(
+                "UPDATE gpu_sample SET board_power_w = ?1, power_scope = ?2 WHERE frame_id = ?3 AND device_id = ?4",
+                params![power_watts, power_scope, frame_id, device_id],
+            );
+            assert_power_scope_trigger_error(result);
+            let state: (Option<f64>, Option<String>) = conn
+                .query_row(
+                    "SELECT board_power_w, power_scope FROM gpu_sample WHERE frame_id = ?1 AND device_id = ?2",
+                    params![frame_id, device_id],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .unwrap();
+            assert_eq!(state, (None, None));
+        }
+
+        drop(conn);
+        cleanup(&path);
+    }
+
+    #[test]
+    fn v8_open_verification_rejects_null_scope_power_state() {
+        let path = test_path("gpu-power-scope-open-verification");
+        cleanup(&path);
+        create_v7_gpu_fixture(&path);
+
+        let mut conn = Connection::open(&path).unwrap();
+        migrate_v7_to_v8(&mut conn, Some(&path)).unwrap();
+        conn.execute("DROP TRIGGER trg_gpu_sample_power_scope_update", [])
+            .unwrap();
+        conn.execute(
+            "UPDATE gpu_sample SET power_scope = NULL WHERE board_power_w IS NOT NULL",
+            [],
+        )
+        .unwrap();
+
+        let error = validate_v8_open(&mut conn)
+            .expect_err("open verification must reject invalid power scope");
+        assert!(
+            error
+                .to_string()
+                .contains("GPU power scope verification failed"),
+            "expected open verification error, got {error:?}"
+        );
+        drop(conn);
+        cleanup(&path);
+    }
+
+    #[test]
+    fn v8_open_rebuilds_legacy_power_scope_triggers() {
+        let path = test_path("gpu-power-scope-trigger-rebuild");
+        cleanup(&path);
+        create_v7_gpu_fixture(&path);
+
+        let mut conn = Connection::open(&path).unwrap();
+        migrate_v7_to_v8(&mut conn, Some(&path)).unwrap();
+        conn.execute_batch(
+            r#"
+            DROP TRIGGER trg_gpu_sample_power_scope_insert;
+            DROP TRIGGER trg_gpu_sample_power_scope_update;
+            CREATE TRIGGER trg_gpu_sample_power_scope_insert
+                BEFORE INSERT ON gpu_sample
+                WHEN NOT (
+                    (NEW.board_power_w IS NULL AND NEW.power_scope IS NULL)
+                    OR (NEW.board_power_w IS NOT NULL AND NEW.power_scope = 'gpu_board')
+                )
+            BEGIN
+                SELECT RAISE(ABORT, 'legacy power scope trigger');
+            END;
+            CREATE TRIGGER trg_gpu_sample_power_scope_update
+                BEFORE UPDATE OF board_power_w, power_scope ON gpu_sample
+                WHEN NOT (
+                    (NEW.board_power_w IS NULL AND NEW.power_scope IS NULL)
+                    OR (NEW.board_power_w IS NOT NULL AND NEW.power_scope = 'gpu_board')
+                )
+            BEGIN
+                SELECT RAISE(ABORT, 'legacy power scope trigger');
+            END;
+            "#,
+        )
+        .unwrap();
+
+        validate_v8_open(&mut conn).unwrap();
+        let frame_id: i64 = conn
+            .query_row("SELECT id FROM sample_frame LIMIT 1", [], |row| row.get(0))
+            .unwrap();
+        let device_id = add_gpu_device(&conn, "rebuild-check");
+        let error = insert_gpu_power_row(&conn, frame_id, device_id, Some(100.0), None)
+            .expect_err("recreated trigger must reject NULL scope");
+        assert!(error
+            .to_string()
+            .contains("gpu board power must use gpu_board scope"));
+
+        drop(conn);
+        cleanup(&path);
+    }
+
+    #[test]
+    fn v7_to_v8_gpu_migration_preserves_rows_and_adds_contract() {
+        let path = test_path("gpu-migration");
+        cleanup(&path);
+        create_v7_gpu_fixture(&path);
+
+        let mut conn = Connection::open(&path).unwrap();
+        migrate_v7_to_v8(&mut conn, Some(&path)).unwrap();
+        assert_eq!(
+            conn.pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))
+                .unwrap(),
+            8
+        );
+        for column in [
+            "memory_controller_usage_pct",
+            "memory_clock_mhz",
+            "vram_total_bytes",
+            "power_scope",
+        ] {
+            assert!(has_column(&conn, "gpu_sample", column).unwrap());
+        }
+        assert_eq!(
+            conn.query_row(
+                "SELECT usage_pct, vram_used_bytes, power_scope FROM gpu_sample",
+                [],
+                |row| {
+                    Ok((
+                        row.get::<_, f64>(0)?,
+                        row.get::<_, i64>(1)?,
+                        row.get::<_, String>(2)?,
+                    ))
+                },
+            )
+            .unwrap(),
+            (0.0, 0, GPU_BOARD_POWER_SCOPE.to_string())
+        );
+        assert_eq!(
+            conn.query_row("SELECT schema_version FROM collection_session", [], |row| {
+                row.get::<_, i64>(0)
+            },)
+                .unwrap(),
+            7
+        );
+        assert_eq!(
+            conn.query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' AND name = 'idx_gpu_sample_device_frame'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap(),
+            1
+        );
+        verify_database_integrity(&conn).unwrap();
+        drop(conn);
+        cleanup(&path);
+    }
+
+    #[test]
+    fn v7_to_v8_gpu_migration_failure_rolls_back_and_retries() {
+        let path = test_path("gpu-migration-retry");
+        cleanup(&path);
+        create_v7_gpu_fixture(&path);
+
+        let mut conn = Connection::open(&path).unwrap();
+        assert!(migrate_v7_to_v8_fail_at(&mut conn, Some(&path), "create").is_err());
+        assert_eq!(
+            conn.pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))
+                .unwrap(),
+            7
+        );
+        assert!(!has_column(&conn, "gpu_sample", "memory_controller_usage_pct").unwrap());
+        assert_eq!(
+            conn.query_row(
+                "SELECT status FROM migration_journal WHERE to_version = 8 AND stage = 'create' ORDER BY id DESC LIMIT 1",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .unwrap(),
+            "failed"
+        );
+
+        migrate_v7_to_v8(&mut conn, Some(&path)).unwrap();
+        assert_eq!(
+            conn.pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))
+                .unwrap(),
+            8
+        );
+        assert_eq!(
+            conn.query_row("SELECT COUNT(*) FROM gpu_sample", [], |row| row
+                .get::<_, i64>(0))
+                .unwrap(),
+            1
+        );
+        verify_database_integrity(&conn).unwrap();
+        drop(conn);
+        cleanup(&path);
+    }
 }

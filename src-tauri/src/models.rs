@@ -39,6 +39,8 @@ impl MetricCategory {
     }
 }
 
+pub const GPU_BOARD_POWER_SCOPE: &str = "gpu_board";
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum CapabilitySupportStatus {
@@ -227,6 +229,34 @@ pub struct DailyUsageSummary {
     pub is_hidden: bool,
 }
 
+#[derive(Debug, Clone, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct GpuSample {
+    /// Provider-assigned stable runtime identity; this is not a serial number or array index.
+    pub device_key: String,
+    pub vendor: Option<String>,
+    pub model: Option<String>,
+    pub capacity_bytes: Option<i64>,
+    pub utilization_percent: Option<f64>,
+    pub memory_controller_utilization_percent: Option<f64>,
+    pub temperature_celsius: Option<f64>,
+    pub power_watts: Option<f64>,
+    pub graphics_clock_mhz: Option<f64>,
+    pub memory_clock_mhz: Option<f64>,
+    pub vram_used_bytes: Option<i64>,
+    pub vram_total_bytes: Option<i64>,
+    pub power_scope: Option<String>,
+    pub quality_mask: i64,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct GpuSamplePoint {
+    pub timestamp_ms: i64,
+    pub sample_duration_ms: i64,
+    pub gpu: GpuSample,
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SystemSample {
@@ -238,6 +268,8 @@ pub struct SystemSample {
     pub memory_total_bytes: Option<i64>,
     pub disk_read_bytes_per_sec: Option<i64>,
     pub disk_write_bytes_per_sec: Option<i64>,
+    #[serde(default)]
+    pub gpus: Vec<GpuSample>,
     pub has_app_snapshot: bool,
 }
 

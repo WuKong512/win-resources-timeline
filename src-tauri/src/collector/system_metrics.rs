@@ -84,6 +84,7 @@ impl SystemSampler {
             memory_total_bytes: memory.map(|(total, _)| total as i64),
             disk_read_bytes_per_sec: disk.map(|value| value.0),
             disk_write_bytes_per_sec: disk.map(|value| value.1),
+            gpus: Vec::new(),
             has_app_snapshot: process_enabled,
         };
         let apps = if process_enabled {

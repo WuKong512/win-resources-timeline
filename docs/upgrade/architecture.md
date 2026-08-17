@@ -17,7 +17,7 @@ flowchart TD
     PLAN --> USAGE[Usage Tracker]
     PROVIDERS --> WRITER[Frame Writer]
     USAGE --> WRITER
-    WRITER --> DB[(SQLite v7)]
+    WRITER --> DB[(SQLite v8)]
     DB --> QUERY
     CRASH[Crash Detector / Evidence Builder] --> DB
     MAINT[Retention / Rollup] --> DB
@@ -54,14 +54,27 @@ flowchart TD
 
 ## PR-01 存储骨架
 
-PR-01 已把运行时写入边界接到 SQLite v7，但没有扩大 Provider、Tauri DTO 或 UI 范围：
+PR-01 已把运行时写入边界接到 SQLite v7；PR-04A 在此基础上增加了向前迁移的 GPU storage contract，但没有实现厂商采集 Provider：
 
 - `Database` 持有串行写连接；查询使用独立只读连接，并设置 busy timeout。打开数据库时先完成 schema 迁移、开放 foreground 区间恢复，再创建新的 boot/collection session。
 - `FrameWriter` 以 `ResourceSnapshot` 为队列单位。每个 frame 通过一个小事务写入 `sample_frame` 及已有的 system/process 子表；只有事务成功提交后才从队列移除。失败样本留在队首，重试次数和重试总数进入 `WriterHealth`，队列达到上限时只增加 drop count 并拒绝新样本。
 - 正常 shutdown 的 foreground final actions、frame drain 和 collection session close 共用单一 deadline；等待串行 writer mutex 和每次 SQLite 尝试都计入剩余时间，后者按剩余时间设置 busy timeout。drain 跳过等待中的退避但仍遵守 retry 上限；transient error 后成功清空队列不构成最终失败，只有 terminal drop、deadline 到期或其他未完成 drain 才返回错误；collection session 在最终 flush boundary 之后关闭。
 - `WriterHealth` 暴露 queue depth、writer delay、drop count、retry count、队首重试次数、最近提交耗时、最近提交时间和最近错误。collector 在健康状态中继续同步已有的丢弃计数；完整诊断展示不属于本 PR。
-- `rollup.rs` 只提供 rollup 表清单、待处理 frame 时间窗和维护状态接口。v7 DDL 已预留分钟、小时、日报和能耗表，但本 PR 不启动完整 rollup、保留清理或后台维护任务。
-- v7 查询保留按进程名合并不同可执行版本的既有语义；历史字段仍按来源和 NULL 语义表达，不能通过查询层补成完整 coverage。
+- `rollup.rs` 只提供 rollup 表清单、待处理 frame 时间窗和维护状态接口。v8 DDL 继续预留分钟、小时、日报和能耗表，但 PR-04A 不启动完整 GPU rollup、保留清理或后台维护任务。
+- v8 查询保留按进程名合并不同可执行版本的既有语义；历史字段仍按来源和 NULL 语义表达，不能通过查询层补成完整 coverage。
+
+## PR-04A GPU Storage Contract
+
+PR-04A 是正式硬件 Provider 之前的独立 storage 边界：
+
+- `gpu_sample` 按 `frame_id + hardware_device.id` 保存多 GPU 样本；`hardware_device.stable_key` 是 Provider 提供的稳定运行时身份，不使用数组下标或敏感 serial number 作为长期数据库身份。
+- v8 增加 memory-controller utilization、memory clock、VRAM total 和 `power_scope`；原有 `usage_pct`、`temp_c`、`board_power_w`、`core_clock_mhz`、`vram_used_bytes` 的语义保持兼容。
+- 缺失指标保存为 SQL `NULL`，合法零值保存为数值 `0`。unsupported、disabled、failed 不通过数值列编码，而由 `collection_session_metric` 的 enabled/support_status 和 `provider` 追溯；`GpuSample.quality_mask` 原样写入并恢复，不替代 NULL 或 capability 状态。
+- GPU board power 必须带 `power_scope = gpu_board`；它不是整机、墙上插座、PSU 输入或 total PC power。CPU Package 与 GPU Board 只有在范围不重叠时才允许在后续 energy 查询中派生合计。
+- `ResourceSnapshot -> FrameWriter -> gpu_sample -> Query Service` 与 baseline 使用同一 frame transaction；失败重试不会留下半个 frame 或半个 GPU frame。GPU 原始查询必须提供 `maxPoints`，范围为 500..10000，语义是每个 device 的最大返回点数；查询在 SQL 侧选择 bounded rows，`system_samples` 先选 bounded frame 集合再加载 GPU 子行。
+- `provider`/`collection_session_metric`/`hardware_device` 已提供历史来源追溯能力，但 PR-04A 没有生产 Provider 去维护完整的运行时 metadata truth；Provider 实际写入、能力降级和 lifecycle 维护属于 PR-04 验证范围。
+
+PR-04A 不声明 NVIDIA NVML production-ready，也不改变 PR-03 Provider executor/lifecycle contract。
 
 ## API 与版本边界
 
@@ -101,7 +114,7 @@ PR-03 将 Provider framework 接入现有 collector，但不新增硬件采集�
 - Windows baseline 在启动或相关 settings reload 前按请求类别 probe PDH disk query/counter；用户禁用 Disk 时不建立 Disk query。若 start/reconfigure 时再次初始化发现 Disk 已不可用，lifecycle outcome 会把 capability degradation 反馈给 Host，Host 更新 descriptor 并修正 CollectionPlan；Disk 只从 active plan 移除，CPU、memory、process 仍可运行。
 - 当前唯一接入的 production path 是把既有 Windows `sysinfo`/PDH CPU、内存、磁盘、进程 sampler 包装为 `windows-baseline` provider；没有引入 NVML、`nvidia-smi`、CPU 温度/功耗或其他新硬件源。
 
-真实 NVIDIA GPU、CPU sensor 和其他硬件 Provider 留到 PR-04，并须先满足 Spike-01 的能力、权限、语义与开销证据。
+真实 NVIDIA GPU、CPU sensor 和其他硬件 Provider 留到 PR-04，并须先满足对应 Spike-01 的短期 implementation admission 证据。单台开发机成功不能外推厂商全系列；但 24 小时 soak、完整数据库增长 soak、跨硬件矩阵和 release hardware matrix 属于 default-enable、support-matrix 或 release/stability gate，不是 PR-04A storage contract 的阻塞条件。
 
 ## UI 架构方向
 

@@ -1,4 +1,4 @@
-# SQLite schema v7 设计
+# SQLite schema v7 基线与 v8 GPU storage contract
 
 ## 原则
 
@@ -60,7 +60,7 @@ erDiagram
 | 表 | 主键/维度 | 代表字段 |
 | --- | --- | --- |
 | `cpu_sample` | frame_id | usage_pct, temp_c, package_power_w, effective_clock_mhz, quality_mask |
-| `gpu_sample` | frame_id + device_id | usage_pct, temp_c, board_power_w, core_clock_mhz, vram_used_bytes, quality_mask |
+| `gpu_sample` | frame_id + device_id | usage_pct, memory_controller_usage_pct, temp_c, board_power_w, core_clock_mhz, memory_clock_mhz, vram_used_bytes, vram_total_bytes, power_scope, quality_mask |
 | `memory_sample` | frame_id | used_bytes, available_bytes, usage_pct, quality_mask |
 | `disk_sample` | frame_id + device_id | read_bps, write_bps, active_pct, temp_c, quality_mask |
 | `network_sample` | frame_id + device_id | rx_bps, tx_bps, signal, rx/tx_phy_bps, quality_mask |
@@ -72,6 +72,27 @@ erDiagram
 类别关闭或能力探测不到设备时不生成对应类别行。单项关闭时列为 NULL，且 `collection_session_metric.enabled = false`；读取失败同样为 NULL，但 quality/status 指明失败。`selection_reason` 为位掩码：CPU Top-N、memory Top-N、I/O Top-N、foreground、watched、anomaly，可同时命中。
 
 多 GPU/磁盘/网卡按 device_id 独立保存。GPU 利用率不相加；磁盘和物理网络总量由查询层派生，网络汇总默认排除 loopback 和重复虚拟接口。未探测到电池时不创建 battery row。
+
+## PR-04A v8 GPU contract
+
+v7 已有的 `gpu_sample` 表能够承载部分 GPU 指标，但不能无损表达 Spike-01B 目标集合。PR-04A 以 forward-only v7→v8 migration 补齐最小字段，不创建 NVIDIA 专用表：
+
+| 产品 metric key | 存储列 | 单位/语义 |
+| --- | --- | --- |
+| `gpu.utilization_percent` | `usage_pct` | percent，按 device，合法零值为 `0` |
+| `gpu.memory_controller_utilization_percent` | `memory_controller_usage_pct` | percent，按 device |
+| `gpu.temperature_celsius` | `temp_c` | Celsius，按 device |
+| `gpu.power_watts` | `board_power_w` + `power_scope` | W；scope 必须是 `gpu_board` |
+| `gpu.graphics_clock_mhz` | `core_clock_mhz` | MHz，按 device |
+| `gpu.memory_clock_mhz` | `memory_clock_mhz` | MHz，按 device |
+| `gpu.vram_used_bytes` | `vram_used_bytes` | bytes，按 device |
+| `gpu.vram_total_bytes` | `vram_total_bytes` | bytes，按 device，亦可作为 hardware capacity 的采集值 |
+
+`NULL` 表示当前样本没有该 metric，不能被 writer 填成 `0`。合法零值保持为数值 `0`；`quality_mask` 是 provider-neutral 的质量位掩码，随样本写入并在 query DTO 中恢复。unsupported、disabled、failed 由 `collection_session_metric.enabled/support_status` 表达；provider/source 由 `provider`、`collection_session_metric.provider_id`、`collection_session`、`sample_frame` 和 `hardware_device` 联表追溯。PR-04A 只提供这条 historical traceability capability，生产 Provider 实际维护 metadata truth 属于 PR-04。`stable_key` 是不含 serial number 的 Provider runtime identity，不能使用长期数组 index 作为数据库身份。
+
+`ResourceSnapshot.system.gpus` 是 0/1/multiple `GpuSample` 的 runtime DTO。FrameWriter 在写 `sample_frame`、baseline 子表和 GPU 子表时使用同一 SQLite transaction；失败回滚不会留下半个 frame。Query Service 提供嵌套在 `SystemSample` 中的多设备结果，并提供按时间范围和可选 `device_key` 的 GPU 查询；原始 GPU query 的 `maxPoints` 为 500..10000，按 device 独立限制返回点数并在 SQL 侧完成选择。`system_samples` 先选择 bounded frame 集合，再读取这些 frame 的 GPU rows。
+
+当前 v8 不启动 GPU rollup worker。未来 rollup 必须按 device 计算利用率、温度、频率和 VRAM；不得把不同 GPU 的这些值错误相加。只有明确 scope 且时间范围不重叠的 board energy 才能在查询阶段派生合计。
 
 功率样本必须保存 `power_scope`。CPU Package、独立 GPU Board、battery、wall/EMI 等范围不能混为同一“整机功耗”；只有明确不重叠的 CPU/GPU 项才允许形成组件合计。
 

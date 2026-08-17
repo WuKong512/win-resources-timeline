@@ -62,11 +62,23 @@ Spike-01 只做短期可行性和成本测量。正式发布仍需性能文档�
 
 需要管理员权限、内核驱动、额外运行库或第三方软件的来源只能作为显式可选能力，并在设置中提前说明。未通过门槛的指标保持条件项、外部连接项或舍弃，不阻塞 CPU/内存等基础采集。
 
+## 准入层级与 PR 边界
+
+Spike-01 的结果需要标注所处层级，不能把所有验证要求混成一个“能否开始实现”的门：
+
+- **Implementation admission**：来源和许可明确；capability probe 可工作；权限、单位、范围、设备 scope、unsupported/failed/zero 语义可解释；基本调用开销合理；初始化、采样、停止和失败隔离可受控。达到这一层，才可以进入独立的 storage contract 和正式 Provider implementation work，但不自动得到 default-enable 或全系列支持声明。
+- **Default-enable admission**：在代表配置和代表硬件上，补齐足够的空闲/负载、启停重启、资源释放、错误降级和整机路径开销证据，确认默认采集预算与用户预期。
+- **Support-matrix evidence**：跨硬件、驱动和权限环境验证厂商/设备覆盖范围；单台机器的成功结果不能外推成厂商产品线支持。
+- **Release/stability gate**：24 小时 soak、数据库增长、升级/恢复演练和完整 release hardware matrix，用于发布和长期稳定性，而不是把尚未做完的验证伪装成实现证据。
+
+因此，24-hour soak、full database growth soak、AMD/Intel validation、广泛 NVIDIA hardware matrix 和完整 release hardware matrix 不阻止 PR-04A GPU storage contract 或在 short-term implementation admission 已足够时开始 PR-04 Provider work；它们仍然是后续 default-enable、support declaration 或 PR-07 release gate。任何单机报告都必须明确不能外推的范围。
+
 ## 与实施计划的关系
 
-- PR-01 的 schema v7 和 frame writer 可以与 Spike-01 并行，不等待具体硬件来源。
+- PR-01 的 schema v7 和 frame writer 可以与 Spike-01 并行，不等待具体硬件来源；PR-04A 再以 v7→v8 forward-only migration 补齐通用 GPU storage contract。
 - PR-03 可以实现 Provider 接口和 capability/health 语义，但不得凭假数据宣布某厂商指标受支持。
-- PR-04 的每个正式 Provider 必须引用对应探针报告；默认指标必须满足本页准入门槛。
+- PR-04 的每个正式 Provider 必须引用对应探针报告，并满足 implementation admission；default-enable、support-matrix 和 release gate 仍需分别验收。
+- PR-04A 不调用 NVML、不复制 `tools/metric-probe`，也不把任何厂商 Provider 或 CPU sensor 搬入 Tauri。
 - 探针代码与报告单独成 PR，不混入 schema、UI 或正式 Provider 实现。
 
 ## 首选官方依据
