@@ -315,21 +315,19 @@ END;
 
 const V8_COMPATIBILITY_DDL: &str = r#"
 CREATE INDEX IF NOT EXISTS idx_gpu_sample_device_frame ON gpu_sample(device_id, frame_id);
+DROP TRIGGER IF EXISTS trg_gpu_sample_power_scope_insert;
 CREATE TRIGGER IF NOT EXISTS trg_gpu_sample_power_scope_insert
     BEFORE INSERT ON gpu_sample
-    WHEN NOT (
-        (NEW.board_power_w IS NULL AND NEW.power_scope IS NULL)
-        OR (NEW.board_power_w IS NOT NULL AND NEW.power_scope = 'gpu_board')
-    )
+    WHEN (NEW.board_power_w IS NULL AND NEW.power_scope IS NOT NULL)
+      OR (NEW.board_power_w IS NOT NULL AND NEW.power_scope IS NOT 'gpu_board')
 BEGIN
     SELECT RAISE(ABORT, 'gpu board power must use gpu_board scope');
 END;
+DROP TRIGGER IF EXISTS trg_gpu_sample_power_scope_update;
 CREATE TRIGGER IF NOT EXISTS trg_gpu_sample_power_scope_update
     BEFORE UPDATE OF board_power_w, power_scope ON gpu_sample
-    WHEN NOT (
-        (NEW.board_power_w IS NULL AND NEW.power_scope IS NULL)
-        OR (NEW.board_power_w IS NOT NULL AND NEW.power_scope = 'gpu_board')
-    )
+    WHEN (NEW.board_power_w IS NULL AND NEW.power_scope IS NOT NULL)
+      OR (NEW.board_power_w IS NOT NULL AND NEW.power_scope IS NOT 'gpu_board')
 BEGIN
     SELECT RAISE(ABORT, 'gpu board power must use gpu_board scope');
 END;
@@ -1281,8 +1279,10 @@ fn validate_v7_open(conn: &mut Connection) -> rusqlite::Result<()> {
 fn validate_v8_open(conn: &mut Connection) -> rusqlite::Result<()> {
     ensure_v7_compatibility(conn)?;
     ensure_v8_compatibility(conn)?;
+    let expected_gpu_rows: i64 =
+        conn.query_row("SELECT COUNT(*) FROM gpu_sample", [], |row| row.get(0))?;
     let latest_postflight = latest_postflight(conn, 8)?;
-    match verify_database_integrity(conn) {
+    match verify_v8(conn, expected_gpu_rows).and_then(|_| verify_database_integrity(conn)) {
         Ok(()) => {
             if let Some((run_id, status)) = latest_postflight {
                 if status != "completed" {
@@ -1377,10 +1377,6 @@ fn ensure_v7_compatibility(conn: &mut Connection) -> rusqlite::Result<()> {
 fn ensure_v8_compatibility(conn: &mut Connection) -> rusqlite::Result<()> {
     let tx = conn.transaction()?;
     ensure_v8_columns(&tx)?;
-    tx.execute(
-        "UPDATE gpu_sample SET power_scope = 'gpu_board' WHERE board_power_w IS NOT NULL AND power_scope IS NULL",
-        [],
-    )?;
     tx.execute_batch(V8_COMPATIBILITY_DDL)?;
     tx.commit()
 }
@@ -1405,8 +1401,8 @@ fn ensure_v8_columns(conn: &Connection) -> rusqlite::Result<()> {
     Ok(())
 }
 
-fn verify_v8(tx: &Transaction<'_>, expected_gpu_rows: i64) -> rusqlite::Result<()> {
-    if let Some(error) = foreign_key_error(tx)? {
+fn verify_v8(conn: &Connection, expected_gpu_rows: i64) -> rusqlite::Result<()> {
+    if let Some(error) = foreign_key_error(conn)? {
         return Err(invalid_schema(&format!(
             "foreign_key_check failed during v7 to v8 migration: {error}"
         )));
@@ -1417,25 +1413,23 @@ fn verify_v8(tx: &Transaction<'_>, expected_gpu_rows: i64) -> rusqlite::Result<(
         "vram_total_bytes",
         "power_scope",
     ] {
-        if !has_column(tx, "gpu_sample", column)? {
+        if !has_column(conn, "gpu_sample", column)? {
             return Err(invalid_schema(&format!(
                 "gpu_sample is missing v8 column {column}"
             )));
         }
     }
-    let gpu_rows: i64 = tx.query_row("SELECT COUNT(*) FROM gpu_sample", [], |row| row.get(0))?;
+    let gpu_rows: i64 = conn.query_row("SELECT COUNT(*) FROM gpu_sample", [], |row| row.get(0))?;
     if gpu_rows != expected_gpu_rows {
         return Err(invalid_schema("v7 to v8 GPU row-count verification failed"));
     }
-    let invalid_power_scope: i64 = tx.query_row(
-        "SELECT COUNT(*) FROM gpu_sample WHERE NOT ((board_power_w IS NULL AND power_scope IS NULL) OR (board_power_w IS NOT NULL AND power_scope = 'gpu_board'))",
+    let invalid_power_scope: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM gpu_sample WHERE (board_power_w IS NULL AND power_scope IS NOT NULL) OR (board_power_w IS NOT NULL AND power_scope IS NOT 'gpu_board')",
         [],
         |row| row.get(0),
     )?;
     if invalid_power_scope != 0 {
-        return Err(invalid_schema(
-            "v7 to v8 GPU power scope verification failed",
-        ));
+        return Err(invalid_schema("v8 GPU power scope verification failed"));
     }
     Ok(())
 }
@@ -1821,6 +1815,183 @@ mod tests {
         )
         .unwrap();
         conn.pragma_update(None, "user_version", 7).unwrap();
+    }
+
+    fn add_gpu_device(conn: &Connection, stable_key: &str) -> i64 {
+        conn.execute(
+            "INSERT INTO hardware_device(stable_key, category, first_seen_at_ms, last_seen_at_ms) VALUES (?1, 'gpu', 1000, 1000)",
+            [stable_key],
+        )
+        .unwrap();
+        conn.last_insert_rowid()
+    }
+
+    fn insert_gpu_power_row(
+        conn: &Connection,
+        frame_id: i64,
+        device_id: i64,
+        power_watts: Option<f64>,
+        power_scope: Option<&str>,
+    ) -> rusqlite::Result<usize> {
+        conn.execute(
+            "INSERT INTO gpu_sample(frame_id, device_id, board_power_w, power_scope) VALUES (?1, ?2, ?3, ?4)",
+            params![frame_id, device_id, power_watts, power_scope],
+        )
+    }
+
+    fn assert_power_scope_trigger_error(result: rusqlite::Result<usize>) {
+        let error = result.expect_err("invalid GPU power scope should be rejected by SQLite");
+        assert!(
+            error
+                .to_string()
+                .contains("gpu board power must use gpu_board scope"),
+            "expected power-scope trigger error, got {error:?}"
+        );
+    }
+
+    #[test]
+    fn gpu_power_scope_sql_triggers_are_null_safe_for_insert_and_update() {
+        let path = test_path("gpu-power-scope-sql");
+        cleanup(&path);
+        create_v7_gpu_fixture(&path);
+
+        let mut conn = Connection::open(&path).unwrap();
+        migrate_v7_to_v8(&mut conn, Some(&path)).unwrap();
+        let frame_id: i64 = conn
+            .query_row("SELECT id FROM sample_frame LIMIT 1", [], |row| row.get(0))
+            .unwrap();
+
+        for (index, power_watts, power_scope, valid) in [
+            ("insert-null-null", None, None, true),
+            (
+                "insert-board-power",
+                Some(100.0),
+                Some(GPU_BOARD_POWER_SCOPE),
+                true,
+            ),
+            ("insert-null-scope", Some(100.0), None, false),
+            (
+                "insert-scope-without-power",
+                None,
+                Some(GPU_BOARD_POWER_SCOPE),
+                false,
+            ),
+            ("insert-wall-power", Some(100.0), Some("wall"), false),
+        ] {
+            let device_id = add_gpu_device(&conn, index);
+            let result = insert_gpu_power_row(&conn, frame_id, device_id, power_watts, power_scope);
+            if valid {
+                assert!(result.is_ok(), "valid insert {index} failed: {result:?}");
+            } else {
+                assert_power_scope_trigger_error(result);
+            }
+        }
+
+        for (index, power_watts, power_scope) in [
+            ("update-null-scope", Some(100.0), None),
+            (
+                "update-scope-without-power",
+                None,
+                Some(GPU_BOARD_POWER_SCOPE),
+            ),
+            ("update-wall-power", Some(100.0), Some("wall")),
+        ] {
+            let device_id = add_gpu_device(&conn, index);
+            insert_gpu_power_row(&conn, frame_id, device_id, None, None).unwrap();
+            let result = conn.execute(
+                "UPDATE gpu_sample SET board_power_w = ?1, power_scope = ?2 WHERE frame_id = ?3 AND device_id = ?4",
+                params![power_watts, power_scope, frame_id, device_id],
+            );
+            assert_power_scope_trigger_error(result);
+            let state: (Option<f64>, Option<String>) = conn
+                .query_row(
+                    "SELECT board_power_w, power_scope FROM gpu_sample WHERE frame_id = ?1 AND device_id = ?2",
+                    params![frame_id, device_id],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .unwrap();
+            assert_eq!(state, (None, None));
+        }
+
+        drop(conn);
+        cleanup(&path);
+    }
+
+    #[test]
+    fn v8_open_verification_rejects_null_scope_power_state() {
+        let path = test_path("gpu-power-scope-open-verification");
+        cleanup(&path);
+        create_v7_gpu_fixture(&path);
+
+        let mut conn = Connection::open(&path).unwrap();
+        migrate_v7_to_v8(&mut conn, Some(&path)).unwrap();
+        conn.execute("DROP TRIGGER trg_gpu_sample_power_scope_update", [])
+            .unwrap();
+        conn.execute(
+            "UPDATE gpu_sample SET power_scope = NULL WHERE board_power_w IS NOT NULL",
+            [],
+        )
+        .unwrap();
+
+        let error = validate_v8_open(&mut conn)
+            .expect_err("open verification must reject invalid power scope");
+        assert!(
+            error
+                .to_string()
+                .contains("GPU power scope verification failed"),
+            "expected open verification error, got {error:?}"
+        );
+        drop(conn);
+        cleanup(&path);
+    }
+
+    #[test]
+    fn v8_open_rebuilds_legacy_power_scope_triggers() {
+        let path = test_path("gpu-power-scope-trigger-rebuild");
+        cleanup(&path);
+        create_v7_gpu_fixture(&path);
+
+        let mut conn = Connection::open(&path).unwrap();
+        migrate_v7_to_v8(&mut conn, Some(&path)).unwrap();
+        conn.execute_batch(
+            r#"
+            DROP TRIGGER trg_gpu_sample_power_scope_insert;
+            DROP TRIGGER trg_gpu_sample_power_scope_update;
+            CREATE TRIGGER trg_gpu_sample_power_scope_insert
+                BEFORE INSERT ON gpu_sample
+                WHEN NOT (
+                    (NEW.board_power_w IS NULL AND NEW.power_scope IS NULL)
+                    OR (NEW.board_power_w IS NOT NULL AND NEW.power_scope = 'gpu_board')
+                )
+            BEGIN
+                SELECT RAISE(ABORT, 'legacy power scope trigger');
+            END;
+            CREATE TRIGGER trg_gpu_sample_power_scope_update
+                BEFORE UPDATE OF board_power_w, power_scope ON gpu_sample
+                WHEN NOT (
+                    (NEW.board_power_w IS NULL AND NEW.power_scope IS NULL)
+                    OR (NEW.board_power_w IS NOT NULL AND NEW.power_scope = 'gpu_board')
+                )
+            BEGIN
+                SELECT RAISE(ABORT, 'legacy power scope trigger');
+            END;
+            "#,
+        )
+        .unwrap();
+
+        validate_v8_open(&mut conn).unwrap();
+        let frame_id: i64 = conn
+            .query_row("SELECT id FROM sample_frame LIMIT 1", [], |row| row.get(0))
+            .unwrap();
+        let device_id = add_gpu_device(&conn, "rebuild-check");
+        let error = insert_gpu_power_row(&conn, frame_id, device_id, Some(100.0), None)
+            .expect_err("recreated trigger must reject NULL scope");
+        assert!(error
+            .to_string()
+            .contains("gpu board power must use gpu_board scope"));
+
+        drop(conn);
+        cleanup(&path);
     }
 
     #[test]

@@ -88,9 +88,9 @@ v7 已有的 `gpu_sample` 表能够承载部分 GPU 指标，但不能无损表�
 | `gpu.vram_used_bytes` | `vram_used_bytes` | bytes，按 device |
 | `gpu.vram_total_bytes` | `vram_total_bytes` | bytes，按 device，亦可作为 hardware capacity 的采集值 |
 
-`NULL` 表示当前样本没有该 metric，不能被 writer 填成 `0`。unsupported、disabled、failed 由 `collection_session_metric.enabled/support_status` 表达；provider/source 由 `provider`、`collection_session_metric.provider_id`、`collection_session`、`sample_frame` 和 `hardware_device` 联表追溯。`stable_key` 是不含 serial number 的 Provider runtime identity，不能使用长期数组 index 作为数据库身份。
+`NULL` 表示当前样本没有该 metric，不能被 writer 填成 `0`。合法零值保持为数值 `0`；`quality_mask` 是 provider-neutral 的质量位掩码，随样本写入并在 query DTO 中恢复。unsupported、disabled、failed 由 `collection_session_metric.enabled/support_status` 表达；provider/source 由 `provider`、`collection_session_metric.provider_id`、`collection_session`、`sample_frame` 和 `hardware_device` 联表追溯。PR-04A 只提供这条 historical traceability capability，生产 Provider 实际维护 metadata truth 属于 PR-04。`stable_key` 是不含 serial number 的 Provider runtime identity，不能使用长期数组 index 作为数据库身份。
 
-`ResourceSnapshot.system.gpus` 是 0/1/multiple `GpuSample` 的 runtime DTO。FrameWriter 在写 `sample_frame`、baseline 子表和 GPU 子表时使用同一 SQLite transaction；失败回滚不会留下半个 frame。Query Service 提供嵌套在 `SystemSample` 中的多设备结果，并提供按时间范围和可选 `device_key` 的 GPU 查询。
+`ResourceSnapshot.system.gpus` 是 0/1/multiple `GpuSample` 的 runtime DTO。FrameWriter 在写 `sample_frame`、baseline 子表和 GPU 子表时使用同一 SQLite transaction；失败回滚不会留下半个 frame。Query Service 提供嵌套在 `SystemSample` 中的多设备结果，并提供按时间范围和可选 `device_key` 的 GPU 查询；原始 GPU query 的 `maxPoints` 为 500..10000，按 device 独立限制返回点数并在 SQL 侧完成选择。`system_samples` 先选择 bounded frame 集合，再读取这些 frame 的 GPU rows。
 
 当前 v8 不启动 GPU rollup worker。未来 rollup 必须按 device 计算利用率、温度、频率和 VRAM；不得把不同 GPU 的这些值错误相加。只有明确 scope 且时间范围不重叠的 board energy 才能在查询阶段派生合计。
 

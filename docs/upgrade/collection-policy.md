@@ -89,7 +89,9 @@ PR-04A 只建立通用 GPU storage contract，不宣布任何厂商 Provider 已
 - 每个 `gpu_sample` 属于一个 `sample_frame` 和一个 `hardware_device`。多 GPU 永远按设备分别保存；利用率、温度、频率和 VRAM 不跨设备相加。
 - `gpu.utilization_percent`、`gpu.memory_controller_utilization_percent`、`gpu.temperature_celsius`、`gpu.power_watts`、`gpu.graphics_clock_mhz`、`gpu.memory_clock_mhz`、`gpu.vram_used_bytes`、`gpu.vram_total_bytes` 分别映射到可空 GPU sample 列。`NULL` 表示当前样本没有该值，数值 `0` 表示合法零值。
 - GPU board power 的单位是 W，且 `power_scope` 必须为 `gpu_board`。不得在 UI 或 energy rollup 中称为 whole-system power、wall power、PSU input 或 total machine power。
-- device/vendor/model/capacity 存在 `hardware_device`；provider、metric enabled/support status 和 interval 存在 `provider` / `collection_session_metric`。这些会话元数据是历史来源追溯的规范入口，不复制到每一行 GPU sample。
+- 每个 GPU sample 还保留 provider-neutral `quality_mask`；它必须在 snapshot、writer、数据库和 query DTO 之间原样往返，不能改变 NULL/合法零值语义。
+- device/vendor/model/capacity 存在 `hardware_device`；provider、metric enabled/support status 和 interval 存在 `provider` / `collection_session_metric`。这些是 storage contract 提供的历史来源追溯入口，不复制到每一行 GPU sample；生产 Provider 对它们的实际维护属于 PR-04。
+- `get_gpu_samples` 的 `maxPoints` 必须为 500..10000，且按 device 分别限制返回点数。长时间范围不得先在 Rust 中 materialize 全部 GPU rows 后再下采样；当前实现使用 SQL 侧 per-device selection。
 
 ## 准入层级
 

@@ -351,23 +351,34 @@ pub fn system_samples(
     max_points: usize,
 ) -> rusqlite::Result<Vec<SystemSample>> {
     valid_range(start_ms, end_ms)?;
+    let max_points = max_points.max(1) as i64;
     let mut stmt = conn.prepare(
-        r#"SELECT f.id, f.ts, f.duration_ms, cpu.usage_pct, memory.usage_pct, memory.used_bytes,
-                  CASE WHEN memory.used_bytes IS NOT NULL AND memory.available_bytes IS NOT NULL
-                       THEN memory.used_bytes + memory.available_bytes END,
-                  disk.read_bps, disk.write_bps, f.process_snapshot_present
-           FROM sample_frame f
-           LEFT JOIN cpu_sample cpu ON cpu.frame_id = f.id
-           LEFT JOIN memory_sample memory ON memory.frame_id = f.id
-           LEFT JOIN (
-             SELECT frame_id, SUM(read_bps) AS read_bps, SUM(write_bps) AS write_bps
-             FROM disk_sample GROUP BY frame_id
-           ) disk ON disk.frame_id = f.id
-           WHERE f.ts >= ?1 AND f.ts < ?2
-           ORDER BY f.ts"#,
+        r#"WITH ranked_frames AS (
+             SELECT f.id, f.ts, f.duration_ms, cpu.usage_pct,
+                    memory.usage_pct AS memory_percent, memory.used_bytes AS used_bytes,
+                    CASE WHEN memory.used_bytes IS NOT NULL AND memory.available_bytes IS NOT NULL
+                         THEN memory.used_bytes + memory.available_bytes END AS memory_total_bytes,
+                    disk.read_bps, disk.write_bps, f.process_snapshot_present,
+                    ROW_NUMBER() OVER (ORDER BY f.ts, f.id) AS point_number,
+                    COUNT(*) OVER () AS total_points
+             FROM sample_frame f
+             LEFT JOIN cpu_sample cpu ON cpu.frame_id = f.id
+             LEFT JOIN memory_sample memory ON memory.frame_id = f.id
+             LEFT JOIN (
+               SELECT frame_id, SUM(read_bps) AS read_bps, SUM(write_bps) AS write_bps
+               FROM disk_sample GROUP BY frame_id
+             ) disk ON disk.frame_id = f.id
+             WHERE f.ts >= ?1 AND f.ts < ?2
+           )
+           SELECT id, ts, duration_ms, usage_pct, memory_percent, used_bytes,
+                  memory_total_bytes, read_bps, write_bps, process_snapshot_present
+           FROM ranked_frames
+           WHERE total_points <= ?3
+              OR ((point_number - 1) % ((total_points + ?3 - 1) / ?3)) = 0
+           ORDER BY ts, id"#,
     )?;
     let frame_rows: Vec<(i64, SystemSample)> = stmt
-        .query_map(params![start_ms, end_ms], |r| {
+        .query_map(params![start_ms, end_ms, max_points], |r| {
             Ok((
                 r.get(0)?,
                 SystemSample {
@@ -385,39 +396,48 @@ pub fn system_samples(
             ))
         })?
         .collect::<rusqlite::Result<_>>()?;
-    let gpus_by_frame = gpu_samples_by_frame(conn, start_ms, end_ms)?;
-    let all: Vec<SystemSample> = frame_rows
+    let gpus_by_frame = gpu_samples_by_selected_frames(conn, start_ms, end_ms, max_points)?;
+    Ok(frame_rows
         .into_iter()
         .map(|(frame_id, mut sample)| {
             sample.gpus = gpus_by_frame.get(&frame_id).cloned().unwrap_or_default();
             sample
         })
-        .collect();
-    if all.len() <= max_points {
-        return Ok(all);
-    }
-    let stride = all.len().div_ceil(max_points.max(1));
-    Ok(all.into_iter().step_by(stride).collect())
+        .collect())
 }
 
-fn gpu_samples_by_frame(
+fn gpu_samples_by_selected_frames(
     conn: &Connection,
     start_ms: i64,
     end_ms: i64,
+    max_points: i64,
 ) -> rusqlite::Result<HashMap<i64, Vec<GpuSample>>> {
     let mut stmt = conn.prepare(
-        r#"SELECT f.id, d.stable_key, d.vendor, d.model, d.capacity_bytes,
+        r#"WITH ranked_frames AS (
+             SELECT f.id, f.ts,
+                    ROW_NUMBER() OVER (ORDER BY f.ts, f.id) AS point_number,
+                    COUNT(*) OVER () AS total_points
+             FROM sample_frame f
+             WHERE f.ts >= ?1 AND f.ts < ?2
+           ),
+           selected_frames AS (
+             SELECT id
+             FROM ranked_frames
+             WHERE total_points <= ?3
+                OR ((point_number - 1) % ((total_points + ?3 - 1) / ?3)) = 0
+           )
+           SELECT f.id, d.stable_key, d.vendor, d.model, d.capacity_bytes,
                   g.usage_pct, g.memory_controller_usage_pct, g.temp_c, g.board_power_w,
                   g.core_clock_mhz, g.memory_clock_mhz, g.vram_used_bytes,
-                  g.vram_total_bytes, g.power_scope
+                  g.vram_total_bytes, g.power_scope, g.quality_mask
            FROM gpu_sample g
            JOIN sample_frame f ON f.id = g.frame_id
            JOIN hardware_device d ON d.id = g.device_id
-           WHERE f.ts >= ?1 AND f.ts < ?2
+           JOIN selected_frames selected ON selected.id = f.id
            ORDER BY f.ts, d.id"#,
     )?;
     let rows = stmt
-        .query_map(params![start_ms, end_ms], |r| {
+        .query_map(params![start_ms, end_ms, max_points], |r| {
             Ok((
                 r.get::<_, i64>(0)?,
                 GpuSample {
@@ -434,6 +454,7 @@ fn gpu_samples_by_frame(
                     vram_used_bytes: r.get(11)?,
                     vram_total_bytes: r.get(12)?,
                     power_scope: r.get(13)?,
+                    quality_mask: r.get(14)?,
                 },
             ))
         })?
@@ -449,22 +470,39 @@ pub fn gpu_samples(
     conn: &Connection,
     start_ms: i64,
     end_ms: i64,
+    max_points: usize,
     device_key: Option<&str>,
 ) -> rusqlite::Result<Vec<GpuSamplePoint>> {
     valid_range(start_ms, end_ms)?;
+    let max_points = max_points.max(1) as i64;
     let mut stmt = conn.prepare(
-        r#"SELECT f.ts, f.duration_ms, d.stable_key, d.vendor, d.model, d.capacity_bytes,
+        r#"WITH ranked_gpu AS (
+             SELECT f.ts, f.duration_ms, d.stable_key, d.vendor, d.model, d.capacity_bytes,
                   g.usage_pct, g.memory_controller_usage_pct, g.temp_c, g.board_power_w,
                   g.core_clock_mhz, g.memory_clock_mhz, g.vram_used_bytes,
-                  g.vram_total_bytes, g.power_scope
-           FROM gpu_sample g
-           JOIN sample_frame f ON f.id = g.frame_id
-           JOIN hardware_device d ON d.id = g.device_id
-           WHERE f.ts >= ?1 AND f.ts < ?2
-             AND (?3 IS NULL OR d.stable_key = ?3)
-           ORDER BY f.ts, d.id"#,
+                  g.vram_total_bytes, g.power_scope, g.quality_mask, d.id AS device_id,
+                  ROW_NUMBER() OVER (PARTITION BY g.device_id ORDER BY f.ts, f.id) AS point_number,
+                  COUNT(*) OVER (PARTITION BY g.device_id) AS total_points
+             FROM gpu_sample g
+             JOIN sample_frame f ON f.id = g.frame_id
+             JOIN hardware_device d ON d.id = g.device_id
+             WHERE f.ts >= ?1 AND f.ts < ?2
+               AND (?3 IS NULL OR d.stable_key = ?3)
+           ),
+           selected_gpu AS (
+             SELECT *
+             FROM ranked_gpu
+             WHERE total_points <= ?4
+                OR ((point_number - 1) % ((total_points + ?4 - 1) / ?4)) = 0
+           )
+           SELECT ts, duration_ms, stable_key, vendor, model, capacity_bytes,
+                  usage_pct, memory_controller_usage_pct, temp_c, board_power_w,
+                  core_clock_mhz, memory_clock_mhz, vram_used_bytes,
+                  vram_total_bytes, power_scope, quality_mask
+           FROM selected_gpu
+           ORDER BY ts, device_id, point_number"#,
     )?;
-    let rows = stmt.query_map(params![start_ms, end_ms, device_key], |r| {
+    let rows = stmt.query_map(params![start_ms, end_ms, device_key, max_points], |r| {
         Ok(GpuSamplePoint {
             timestamp_ms: r.get(0)?,
             sample_duration_ms: r.get(1)?,
@@ -482,6 +520,7 @@ pub fn gpu_samples(
                 vram_used_bytes: r.get(12)?,
                 vram_total_bytes: r.get(13)?,
                 power_scope: r.get(14)?,
+                quality_mask: r.get(15)?,
             },
         })
     })?;

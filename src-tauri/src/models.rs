@@ -246,6 +246,7 @@ pub struct GpuSample {
     pub vram_used_bytes: Option<i64>,
     pub vram_total_bytes: Option<i64>,
     pub power_scope: Option<String>,
+    pub quality_mask: i64,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq)]

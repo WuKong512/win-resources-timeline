@@ -69,9 +69,10 @@ PR-04A 是正式硬件 Provider 之前的独立 storage 边界：
 
 - `gpu_sample` 按 `frame_id + hardware_device.id` 保存多 GPU 样本；`hardware_device.stable_key` 是 Provider 提供的稳定运行时身份，不使用数组下标或敏感 serial number 作为长期数据库身份。
 - v8 增加 memory-controller utilization、memory clock、VRAM total 和 `power_scope`；原有 `usage_pct`、`temp_c`、`board_power_w`、`core_clock_mhz`、`vram_used_bytes` 的语义保持兼容。
-- 缺失指标保存为 SQL `NULL`，合法零值保存为数值 `0`。unsupported、disabled、failed 不通过数值列编码，而由 `collection_session_metric` 的 enabled/support_status 和 `provider` 追溯。
+- 缺失指标保存为 SQL `NULL`，合法零值保存为数值 `0`。unsupported、disabled、failed 不通过数值列编码，而由 `collection_session_metric` 的 enabled/support_status 和 `provider` 追溯；`GpuSample.quality_mask` 原样写入并恢复，不替代 NULL 或 capability 状态。
 - GPU board power 必须带 `power_scope = gpu_board`；它不是整机、墙上插座、PSU 输入或 total PC power。CPU Package 与 GPU Board 只有在范围不重叠时才允许在后续 energy 查询中派生合计。
-- `ResourceSnapshot -> FrameWriter -> gpu_sample -> Query Service` 与 baseline 使用同一 frame transaction；失败重试不会留下半个 frame 或半个 GPU frame。
+- `ResourceSnapshot -> FrameWriter -> gpu_sample -> Query Service` 与 baseline 使用同一 frame transaction；失败重试不会留下半个 frame 或半个 GPU frame。GPU 原始查询必须提供 `maxPoints`，范围为 500..10000，语义是每个 device 的最大返回点数；查询在 SQL 侧选择 bounded rows，`system_samples` 先选 bounded frame 集合再加载 GPU 子行。
+- `provider`/`collection_session_metric`/`hardware_device` 已提供历史来源追溯能力，但 PR-04A 没有生产 Provider 去维护完整的运行时 metadata truth；Provider 实际写入、能力降级和 lifecycle 维护属于 PR-04 验证范围。
 
 PR-04A 不声明 NVIDIA NVML production-ready，也不改变 PR-03 Provider executor/lifecycle contract。
 

@@ -9,6 +9,19 @@ use crate::{
 };
 use tauri::State;
 
+const GPU_QUERY_MIN_POINTS: usize = 500;
+const GPU_QUERY_MAX_POINTS: usize = 10_000;
+
+fn validate_gpu_max_points(max_points: usize) -> Result<(), CommandError> {
+    if !(GPU_QUERY_MIN_POINTS..=GPU_QUERY_MAX_POINTS).contains(&max_points) {
+        return Err(crate::error::AppError::InvalidRequest(
+            "maxPoints must be between 500 and 10000".into(),
+        )
+        .into());
+    }
+    Ok(())
+}
+
 #[tauri::command]
 pub fn get_today_overview(
     state: State<'_, AppState>,
@@ -133,8 +146,10 @@ pub fn get_gpu_samples(
     state: State<'_, AppState>,
     start_ms: i64,
     end_ms: i64,
+    max_points: usize,
     device_key: Option<String>,
 ) -> Result<Vec<GpuSamplePoint>, CommandError> {
+    validate_gpu_max_points(max_points)?;
     if device_key
         .as_deref()
         .is_some_and(|value| value.trim().is_empty())
@@ -146,6 +161,18 @@ pub fn get_gpu_samples(
     }
     state
         .db
-        .read(|conn| query::gpu_samples(conn, start_ms, end_ms, device_key.as_deref()))
+        .read(|conn| query::gpu_samples(conn, start_ms, end_ms, max_points, device_key.as_deref()))
         .map_err(Into::into)
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn gpu_query_max_points_is_bounded() {
+        assert!(super::validate_gpu_max_points(0).is_err());
+        assert!(super::validate_gpu_max_points(499).is_err());
+        assert!(super::validate_gpu_max_points(500).is_ok());
+        assert!(super::validate_gpu_max_points(10_000).is_ok());
+        assert!(super::validate_gpu_max_points(10_001).is_err());
+    }
 }

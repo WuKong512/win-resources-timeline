@@ -22,7 +22,9 @@ PR-04A separates storage readiness from hardware Provider admission. The current
 | `gpu.vram_used_bytes` | `gpu_sample.vram_used_bytes` | bytes | per device | NULL means absent; `0` is legal | pending Spike-01B completion |
 | `gpu.vram_total_bytes` | `gpu_sample.vram_total_bytes` | bytes | per device | NULL means absent; `0` is a numeric value only if source reports it | pending Spike-01B completion |
 
-Unsupported, disabled, permission-denied and failed states are not encoded as numeric zero. They remain in `collection_session_metric.support_status/enabled`, with `collection_session_metric.provider_id -> provider.id` (and the provider's `kind`/`name`/`version`) plus `interval_ms` available for historical traceability.
+Unsupported, disabled, permission-denied and failed states are not encoded as numeric zero. They remain in `collection_session_metric.support_status/enabled`, with `collection_session_metric.provider_id -> provider.id` (and the provider's `kind`/`name`/`version`) plus `interval_ms` available as a storage-contract capability for historical traceability. PR-04A does not contain a production Provider that automatically maintains this metadata truth; that behavior is part of PR-04 admission.
+
+Every GPU row also carries provider-neutral `quality_mask`, including `0`. It is independent from nullable metric columns: `Some(0)` remains a legal numeric zero, while `None` remains SQL `NULL`.
 
 ## Runtime Evidence
 
@@ -31,6 +33,7 @@ Unsupported, disabled, permission-denied and failed states are not encoded as nu
 - GPU rows are written in the same transaction as `sample_frame`, CPU, memory, disk and process rows.
 - Invalid board-power scope aborts the frame transaction, leaving no partial frame/device/sample rows; a corrected retry commits cleanly.
 - Query service restores nested GPU samples in `SystemSample` and supports a time-range query with an optional stable device key.
+- `get_gpu_samples` requires `maxPoints` in the inclusive range 500..10000. The limit is per device, so two devices may each return up to the requested number of points; SQL-side per-device selection prevents the command from exposing an unlimited raw-row contract. `system_samples` selects its bounded frame set before loading GPU rows.
 - v7 GPU rows are preserved by migration; existing non-NULL `board_power_w` rows receive `power_scope = 'gpu_board'`.
 
 ## Remaining PR-04 Work

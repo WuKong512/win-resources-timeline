@@ -116,8 +116,9 @@ PR-04A 先建立通用 GPU storage contract，再进入正式硬件 Provider：
 
 - PR-04A 允许 v7 -> v8 forward-only migration、GPU model、FrameWriter/query path、fixtures 和 integrity tests；不调用 NVML，不复制 `tools/metric-probe`，不调用 `nvidia-smi`。
 - `gpu_sample` 以 `frame_id + device_id` 为维度，支持多 GPU。现有列映射 `usage_pct`/`temp_c`/`board_power_w`/`core_clock_mhz`/`vram_used_bytes`，v8 增加 memory-controller utilization、memory clock、VRAM total 和 `power_scope`。
-- `NULL`、合法零值以及 `collection_session_metric` 的 enabled/support_status 分别表达缺失、真实零值和 unsupported/disabled/failed；provider/source 从 session、device 和 provider 元数据追溯。
+- `NULL`、合法零值以及 `collection_session_metric` 的 enabled/support_status 分别表达缺失、真实零值和 unsupported/disabled/failed；`quality_mask` 原样保存。provider/source 从 session、device 和 provider 元数据追溯，但 PR-04A 只证明 schema path 具备该能力，生产 Provider 对 metadata truth 的维护留给 PR-04。
 - GPU board power 只允许 `power_scope = gpu_board`，不能冒充整机功耗。
+- GPU 原始 query 使用 500..10000 的 per-device `maxPoints` 上限，SQL 侧完成选择；`system_samples` 先限制 frame 集合再读取其 GPU rows。
 
 正式 NVIDIA NVML Provider 仍需对应 Spike-01B 补齐 administrator comparison、30-minute idle、30-minute representative-load、enable/disable/re-enable、shutdown/cleanup、DLL missing、partial unsupported/failure handling，以及可行时的 sleep/wake/low-power lifecycle evidence。
 

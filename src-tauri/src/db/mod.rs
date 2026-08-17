@@ -2440,6 +2440,7 @@ mod tests {
                         vram_used_bytes: Some(0),
                         vram_total_bytes: Some(16 * 1024 * 1024 * 1024),
                         power_scope: Some(GPU_BOARD_POWER_SCOPE.into()),
+                        quality_mask: 1,
                     },
                     GpuSample {
                         device_key: "runtime:gpu:secondary".into(),
@@ -2455,6 +2456,7 @@ mod tests {
                         vram_used_bytes: Some(0),
                         vram_total_bytes: Some(8 * 1024 * 1024 * 1024),
                         power_scope: None,
+                        quality_mask: 4,
                     },
                 ],
                 has_app_snapshot: false,
@@ -2522,6 +2524,7 @@ mod tests {
             samples[0].gpus[0].power_scope.as_deref(),
             Some(GPU_BOARD_POWER_SCOPE)
         );
+        assert_eq!(samples[0].gpus[0].quality_mask, 1);
         assert_eq!(samples[0].gpus[1].device_key, "runtime:gpu:secondary");
         assert_eq!(
             samples[0].gpus[1].memory_controller_utilization_percent,
@@ -2534,8 +2537,9 @@ mod tests {
             samples[0].gpus[1].vram_total_bytes,
             Some(8 * 1024 * 1024 * 1024)
         );
+        assert_eq!(samples[0].gpus[1].quality_mask, 4);
         let primary = db
-            .read(|conn| query::gpu_samples(conn, 1, 31_000, Some("runtime:gpu:primary")))
+            .read(|conn| query::gpu_samples(conn, 1, 31_000, 500, Some("runtime:gpu:primary")))
             .unwrap();
         assert_eq!(primary.len(), 1);
         assert_eq!(primary[0].timestamp_ms, 30_000);
@@ -2558,6 +2562,7 @@ mod tests {
             primary[0].gpu.power_scope.as_deref(),
             Some(GPU_BOARD_POWER_SCOPE)
         );
+        assert_eq!(primary[0].gpu.quality_mask, 1);
 
         db.read(|conn| {
             let metadata: (String, i64, String) = conn.query_row(
@@ -2575,6 +2580,188 @@ mod tests {
             Ok(())
         })
         .unwrap();
+
+        drop(db);
+        cleanup_test_files(&path);
+    }
+
+    #[test]
+    fn gpu_quality_mask_zero_and_nonzero_round_trip() {
+        let path = test_path("gpu-quality-round-trip");
+        cleanup_test_files(&path);
+        let db = Database::open(path.clone()).unwrap();
+        let snapshot = ResourceSnapshot {
+            system: SystemSample {
+                timestamp_ms: 35_000,
+                sample_duration_ms: 2_000,
+                cpu_percent: None,
+                memory_percent: None,
+                memory_used_bytes: None,
+                memory_total_bytes: None,
+                disk_read_bytes_per_sec: None,
+                disk_write_bytes_per_sec: None,
+                gpus: vec![
+                    GpuSample {
+                        device_key: "runtime:gpu:quality-zero".into(),
+                        vendor: None,
+                        model: None,
+                        capacity_bytes: None,
+                        utilization_percent: Some(0.0),
+                        memory_controller_utilization_percent: None,
+                        temperature_celsius: None,
+                        power_watts: None,
+                        graphics_clock_mhz: None,
+                        memory_clock_mhz: None,
+                        vram_used_bytes: None,
+                        vram_total_bytes: None,
+                        power_scope: None,
+                        quality_mask: 0,
+                    },
+                    GpuSample {
+                        device_key: "runtime:gpu:quality-four".into(),
+                        vendor: None,
+                        model: None,
+                        capacity_bytes: None,
+                        utilization_percent: None,
+                        memory_controller_utilization_percent: None,
+                        temperature_celsius: None,
+                        power_watts: None,
+                        graphics_clock_mhz: None,
+                        memory_clock_mhz: None,
+                        vram_used_bytes: Some(0),
+                        vram_total_bytes: None,
+                        power_scope: None,
+                        quality_mask: 4,
+                    },
+                ],
+                has_app_snapshot: false,
+            },
+            apps: Vec::new(),
+        };
+        db.with_writer(|conn| writer::insert_resource_snapshot(conn, &snapshot))
+            .unwrap();
+
+        let samples = db
+            .read(|conn| query::system_samples(conn, 35_000, 36_000, 500))
+            .unwrap();
+        assert_eq!(samples.len(), 1);
+        let zero = samples[0]
+            .gpus
+            .iter()
+            .find(|gpu| gpu.device_key == "runtime:gpu:quality-zero")
+            .unwrap();
+        assert_eq!(zero.quality_mask, 0);
+        assert_eq!(zero.utilization_percent, Some(0.0));
+        assert_eq!(zero.vram_used_bytes, None);
+        let four = samples[0]
+            .gpus
+            .iter()
+            .find(|gpu| gpu.device_key == "runtime:gpu:quality-four")
+            .unwrap();
+        assert_eq!(four.quality_mask, 4);
+        assert_eq!(four.utilization_percent, None);
+        assert_eq!(four.vram_used_bytes, Some(0));
+
+        let points = db
+            .read(|conn| query::gpu_samples(conn, 35_000, 36_000, 500, None))
+            .unwrap();
+        assert_eq!(points.len(), 2);
+        assert!(points.iter().any(|point| {
+            point.gpu.device_key == "runtime:gpu:quality-zero" && point.gpu.quality_mask == 0
+        }));
+        assert!(points.iter().any(|point| {
+            point.gpu.device_key == "runtime:gpu:quality-four" && point.gpu.quality_mask == 4
+        }));
+
+        drop(db);
+        cleanup_test_files(&path);
+    }
+
+    #[test]
+    fn gpu_query_is_bounded_per_device_and_preserves_order() {
+        let path = test_path("gpu-query-bounded");
+        cleanup_test_files(&path);
+        let db = Database::open(path.clone()).unwrap();
+        db.with_writer(|conn| {
+            let session_id: i64 = conn.query_row(
+                "SELECT CAST(value AS INTEGER) FROM settings WHERE key = 'runtime_collection_session_id'",
+                [],
+                |row| row.get(0),
+            )?;
+            conn.execute(
+                "INSERT INTO hardware_device(stable_key, category, first_seen_at_ms, last_seen_at_ms) VALUES ('runtime:gpu:bounded-a', 'gpu', 1000, 1000)",
+                [],
+            )?;
+            let device_a = conn.last_insert_rowid();
+            conn.execute(
+                "INSERT INTO hardware_device(stable_key, category, first_seen_at_ms, last_seen_at_ms) VALUES ('runtime:gpu:bounded-b', 'gpu', 1000, 1000)",
+                [],
+            )?;
+            let device_b = conn.last_insert_rowid();
+            let tx = conn.unchecked_transaction()?;
+            for index in 0..=500_i64 {
+                let timestamp = 1_000 + index;
+                tx.execute(
+                    "INSERT INTO sample_frame(collection_session_id, ts, sequence, duration_ms) VALUES (?1, ?2, ?3, 1000)",
+                    params![session_id, timestamp, index + 1],
+                )?;
+                let frame_id = tx.last_insert_rowid();
+                tx.execute(
+                    "INSERT INTO gpu_sample(frame_id, device_id, usage_pct, quality_mask) VALUES (?1, ?2, ?3, ?4)",
+                    params![frame_id, device_a, 0.0_f64, 1_i64],
+                )?;
+                tx.execute(
+                    "INSERT INTO gpu_sample(frame_id, device_id, vram_used_bytes, quality_mask) VALUES (?1, ?2, ?3, ?4)",
+                    params![frame_id, device_b, 0_i64, 4_i64],
+                )?;
+            }
+            tx.commit()
+        })
+        .unwrap();
+
+        let all = db
+            .read(|conn| query::gpu_samples(conn, 1_000, 2_000, 500, None))
+            .unwrap();
+        assert!(!all.is_empty());
+        let mut a_count = 0;
+        let mut b_count = 0;
+        let mut last_a = None;
+        let mut last_b = None;
+        for point in &all {
+            match point.gpu.device_key.as_str() {
+                "runtime:gpu:bounded-a" => {
+                    a_count += 1;
+                    assert_eq!(point.gpu.quality_mask, 1);
+                    assert!(last_a.is_none_or(|last| point.timestamp_ms >= last));
+                    last_a = Some(point.timestamp_ms);
+                }
+                "runtime:gpu:bounded-b" => {
+                    b_count += 1;
+                    assert_eq!(point.gpu.quality_mask, 4);
+                    assert_eq!(point.gpu.vram_used_bytes, Some(0));
+                    assert!(last_b.is_none_or(|last| point.timestamp_ms >= last));
+                    last_b = Some(point.timestamp_ms);
+                }
+                other => panic!("unexpected GPU device {other}"),
+            }
+        }
+        assert!(a_count <= 500);
+        assert!(b_count <= 500);
+        assert!(a_count > 0);
+        assert!(b_count > 0);
+
+        let only_a = db
+            .read(|conn| query::gpu_samples(conn, 1_000, 2_000, 500, Some("runtime:gpu:bounded-a")))
+            .unwrap();
+        assert_eq!(only_a.len(), a_count);
+        assert!(only_a
+            .iter()
+            .all(|point| point.gpu.device_key == "runtime:gpu:bounded-a"));
+
+        let empty = db
+            .read(|conn| query::gpu_samples(conn, 10_000, 11_000, 500, None))
+            .unwrap();
+        assert!(empty.is_empty());
 
         drop(db);
         cleanup_test_files(&path);
@@ -2655,6 +2842,7 @@ mod tests {
                     vram_used_bytes: None,
                     vram_total_bytes: None,
                     power_scope: power_scope.map(str::to_owned),
+                    quality_mask: 0,
                 }],
                 has_app_snapshot: false,
             },

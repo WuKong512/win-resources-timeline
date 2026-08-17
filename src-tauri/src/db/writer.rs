@@ -1114,8 +1114,8 @@ fn insert_snapshot(
             "INSERT INTO gpu_sample(
                  frame_id, device_id, usage_pct, memory_controller_usage_pct, temp_c,
                  board_power_w, core_clock_mhz, memory_clock_mhz, vram_used_bytes,
-                 vram_total_bytes, power_scope
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+                 vram_total_bytes, power_scope, quality_mask
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
             params![
                 frame_id,
                 device_id,
@@ -1128,6 +1128,7 @@ fn insert_snapshot(
                 gpu.vram_used_bytes,
                 gpu.vram_total_bytes,
                 gpu.power_scope.as_deref(),
+                gpu.quality_mask,
             ],
         )?;
     }

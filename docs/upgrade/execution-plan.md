@@ -13,7 +13,7 @@
 | PR-01 | v7 存储骨架 | 新 DDL、migration journal、备份/校验、frame writer、rollup 骨架 | PR-00 合并 |
 | PR-02 | 使用时间 | 事件驱动前台跟踪、电脑状态、应用身份、日报 | PR-01 |
 | PR-03 | Provider 框架 | capability、CollectionPlan、启停、health、设置 DTO | PR-01 |
-| PR-04A | GPU storage contract | v7→v8 forward-only migration、GPU model/writer/query、round-trip/integrity fixtures | PR-03；不实现正式硬件 Provider |
+| PR-04A | GPU storage contract | v7→v8 forward-only migration、GPU model/writer/query、per-device bounded query、quality round-trip/integrity fixtures | PR-03；不实现正式硬件 Provider |
 | PR-04 | 常用硬件指标 | Windows baseline + 已准入厂商 GPU，CPU 传感器可选 Provider | PR-04A；对应指标 Spike-01 short-term implementation admission |
 | PR-05 | 进程与崩溃 | Top-N selector、多级聚合、system events、case/hold/evidence summary | PR-01、PR-02/03 稳定接口 |
 | PR-06 | 新信息架构 UI | 时间线、使用统计、崩溃回溯、采集/保留设置 | 后端 DTO 稳定 |
@@ -72,7 +72,7 @@ PR-03 已在 schema v7 runtime settings storage 上落地 Provider framework；P
 - fake provider tests 覆盖 capability state、plan determinism、disable/re-enable、unsupported、startup/reconfigure retry、late lifecycle reconciliation、stale generation、sample timeout isolation、per-provider control deadline、Disk probe/start-time degradation、pause、shutdown 和 DTO 区分。
 - PR-04A 没有 NVML production integration、`nvidia-smi`、AMD/Intel Provider、CPU sensor、UI redesign 或 PR-05 内容；`tools/metric-probe` 保持独立且未修改。
 
-PR-04A 的完成不代表 NVML production admission。当前 Spike-01B 的单台 RTX 5070 Ti 60 秒 non-admin 结果只支持继续 feasibility work；administrator comparison、30-minute idle/representative-load、enable/disable/re-enable、cleanup/failure isolation 和可行时的 sleep/wake evidence 仍属于 PR-04 Provider 的短期 entry work。24-hour soak、数据库增长、跨硬件验证和完整 release matrix 属于后续 release/stability 或 support declaration gate。
+PR-04A 的完成不代表 NVML production admission。当前 Spike-01B 的单台 RTX 5070 Ti 60 秒 non-admin 结果只支持继续 feasibility work；administrator comparison、30-minute idle/representative-load、enable/disable/re-enable、cleanup/failure isolation 和可行时的 sleep/wake evidence 仍属于 PR-04 Provider 的短期 entry work。PR-04A 的 provider/session/device metadata 只证明 storage contract 具备 historical traceability capability，不证明生产 Provider 已自动维护完整 runtime truth。24-hour soak、数据库增长、跨硬件验证和完整 release matrix 属于后续 release/stability 或 support declaration gate。
 
 ## 架构基线完成定义
 
