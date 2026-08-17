@@ -25,12 +25,12 @@ Windows 原生 API 能稳定提供 CPU、内存、进程和磁盘基础指标，
 Provider 至少实现以下项目内部 contract：
 
 - `probe(context, requested_categories)`：在受控调用边界内返回实际 capability/reason 结果。
-- `start(plan, context)` / `reconfigure(plan, context)`：按 CollectionPlan 建立或调整采集资源。
+- `start(plan, context)` / `reconfigure(plan, context)`：按 CollectionPlan 建立或调整采集资源，并可返回新的 runtime capability descriptor；这用于闭合 probe 成功后初始化再次失败的 capability degradation。
 - `sample(context, timestamp, tracked_apps)`：context 携带绝对 deadline 和 cancellation signal。
 - `stop(context) -> Result`：同样受 deadline/cancellation 约束，能报告 `StopFailed` 或 `Timeout`。
 - `health()`：暴露最近成功、failure count 和简短错误摘要。
 
-`ProviderHost` 通过每个 provider 的轻量 worker executor 调用这些同步 trait 方法。collector 只在绝对 deadline 内等待 reply；超时会取消 context、保留待完成调用并把 provider 标为 failed，不能无限阻塞采样主循环或 shutdown。Provider 若能合作，应在 OS/驱动调用前后检查 context；不合作的调用被隔离，不能在同一 provider 上并发发起下一次调用。这里不是动态插件系统，也不引入新的 async runtime。
+`ProviderHost` 通过每个 provider 的轻量 worker executor 调用这些同步 trait 方法。每个 pending call 记录 operation、generation 和 reply；collector 只在 deadline 内等待。超时会取消 context、保留隔离 worker 中的调用并把 provider 标为 failed，但 late reply 不会被无条件丢弃：Start/Reconfigure/Stop 会按 operation 和 generation reconcile，Sample 的过期 payload 会被丢弃，Probe 的旧 generation 结果不能覆盖新的 capability truth。普通 probe/start/reconfigure/stop/pause/resume control operation 为每个 provider 重新分配独立 budget；shutdown 才共享 collector 传入的单一绝对 deadline。Provider 若能合作，应在 OS/驱动调用前后检查 context；不合作的调用被隔离，不能在同一 provider 上并发发起下一次调用。这里不是动态插件系统，也不引入新的 async runtime。
 
 ## CollectionPlan
 
@@ -95,6 +95,8 @@ PR-03 提供项目内部的 Provider contract，而不是动态插件系统：
 - executor worker 为 `probe/start/reconfigure/sample/stop` 提供 bounded wait；sample、startup、reconfigure 使用 bounded exponential backoff，最大 60 秒；不合作的超时调用不会拖住 collector 或 foreground/computer-state timeline。
 - `ProviderHost` 只对受影响的 provider 应用 start/stop/reconfigure delta。未变化的 settings 不重复启动或停止 provider；pause 会取消 retry、释放已启动资源，resume 按用户仍启用的 plan 重新 start。
 - stop 返回结果并进入 health/status；shutdown 把同一个绝对 deadline 传给所有 provider，stop failure 不无限重试，也不能被伪装成正常 `Stopped`。
+- timed-out lifecycle call 可以在隔离 worker 中继续完成；late Start/Reconfigure 成功会恢复实际 lifecycle 或触发一次针对当前 intent 的 reconcile，late failure 才进入当前 generation 的 bounded retry。Disable、pause、shutdown 和更新后的 plan 具有更高的 intent generation，旧完成不能恢复 Running；如果旧调用已经获得资源，Host 会在同一受控边界内清理。
+- start/reconfigure 返回的 capability outcome 会更新 Host 的 canonical descriptor 和 active CollectionPlan。因 TOCTOU 导致的 Disk runtime unavailable 会从 plan 移除 Disk，但不会无条件判死 CPU、memory、process。
 - Windows baseline 按当前 settings 请求的类别在 probe 阶段验证 PDH disk query/counter 初始化；不可用时仅 disk 进入 unsupported/reason，CPU、memory、process 仍可运行。合法磁盘吞吐 `0` 仍是值，不表示 unavailable。
 - fake provider tests 覆盖 supported/disabled/unsupported/failed、真正停止采样、重新启用、startup/reconfigure retry、timeout 隔离、stop failure/timeout、Disk probe、pause 语义和 shutdown 幂等停止。
 - 既有 Windows baseline sampler 通过 `windows-baseline` adapter 进入该框架，FrameWriter/SQLite 仍由 collector/writer 层负责。

@@ -79,4 +79,7 @@ PR-03 的启停语义如下：
 - `unsupported` 表示当前机器或来源不提供该能力；`failed` 表示能力存在但最近启动或采样失败；二者都不能伪装成用户 `disabled`。
 - 采样失败产生缺失/不可用样本和有界重试状态，不把失败写成 `0`。`0` 只表示真实且合法的数值。
 - Provider 的 probe、sample 和 stop 都在 bounded deadline/cancellation 边界内执行；startup/reconfigure failure 使用有界指数退避，shutdown 使用同一个绝对 deadline，超时不拖住其他 Provider 或使用时间线。
+- 普通 probe、start、reconfigure、disable stop、pause stop 和 resume start 都在每个 Provider 调用前重新计算独立 operation budget；只有 shutdown 复用 collector 的原始绝对 deadline，因此慢 Provider 不会污染下一个 Provider 的普通 control budget，也不会把 shutdown 扩展为 Provider 数量乘以单次 timeout。
+- 超时调用会保留隔离 worker 中的 pending completion。Host 按 operation 和 generation reconcile late lifecycle result；新 settings、disable、pause 或 shutdown 产生的新 intent 会拒绝旧 result 恢复 Running。过期 sample payload 丢弃，不写当前 frame；旧 probe result 不覆盖更新后的 capability generation。
 - Windows baseline 的 Disk 只有在当前 settings 请求该类别且 PDH query/counter 初始化 probe 成功时才进入 active plan；用户禁用 Disk 时不建立 PDH Disk query。probe 失败显示明确不可用原因，不用永久 `None` 或 `0` 冒充磁盘数据，CPU、memory、process 不因 Disk 缺失而停止。
+- probe 成功并不冻结能力 truth：如果 start/reconfigure 的 Disk sampler 初始化发生 TOCTOU failure，Provider 返回 capability outcome，Host 更新 canonical capability 和 CollectionPlan，Disk 变为明确 unavailable/failed，其他 baseline categories 继续运行。
