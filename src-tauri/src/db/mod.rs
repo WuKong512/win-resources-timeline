@@ -124,7 +124,7 @@ mod tests {
         db::{query, writer},
         models::{
             ActivityState, AppResourceSample, BootIdentity, CollectionSettings, ComputerState,
-            ForegroundApp, ResourceSnapshot, SystemSample,
+            ForegroundApp, GpuSample, ResourceSnapshot, SystemSample, GPU_BOARD_POWER_SCOPE,
         },
     };
     use rusqlite::params;
@@ -161,13 +161,13 @@ mod tests {
         let Some(name) = path.file_name().and_then(|value| value.to_str()) else {
             return;
         };
-        let prefix = format!("{name}.v7-backup-");
+        let prefixes = [format!("{name}.v7-backup-"), format!("{name}.v8-backup-")];
         if let Ok(entries) = std::fs::read_dir(parent) {
             for entry in entries.flatten() {
                 if entry
                     .file_name()
                     .to_str()
-                    .is_some_and(|value| value.starts_with(&prefix))
+                    .is_some_and(|value| prefixes.iter().any(|prefix| value.starts_with(prefix)))
                 {
                     let _ = std::fs::remove_file(entry.path());
                 }
@@ -365,7 +365,7 @@ mod tests {
     }
 
     #[test]
-    fn empty_v6_database_migrates_to_v7() {
+    fn empty_v6_database_migrates_to_v8() {
         let path = test_path("empty-v6");
         cleanup_test_files(&path);
         create_v6_fixture(&path, false);
@@ -373,7 +373,7 @@ mod tests {
         let db = Database::open(path.clone()).unwrap();
         db.read(|conn| {
             let version: i64 = conn.pragma_query_value(None, "user_version", |row| row.get(0))?;
-            assert_eq!(version, 7);
+            assert_eq!(version, 8);
             assert_eq!(conn.query_row("SELECT COUNT(*) FROM app", [], |row| row.get::<_, i64>(0))?, 0);
             assert_eq!(conn.query_row("SELECT COUNT(*) FROM sample_frame", [], |row| row.get::<_, i64>(0))?, 0);
             assert_eq!(conn.query_row("SELECT COUNT(*) FROM process_sample", [], |row| row.get::<_, i64>(0))?, 0);
@@ -393,7 +393,7 @@ mod tests {
                 [],
                 |row| Ok((row.get(0)?, row.get(1)?)),
             )?;
-            assert_eq!((runs, completed), (1, 9));
+            assert_eq!((runs, completed), (2, 18));
             Ok(())
         })
         .unwrap();
@@ -409,7 +409,7 @@ mod tests {
 
         let db = Database::open(path.clone()).unwrap();
         db.read(|conn| {
-            assert_eq!(conn.pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))?, 7);
+            assert_eq!(conn.pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))?, 8);
             assert_eq!(conn.query_row("SELECT COUNT(*) FROM app", [], |row| row.get::<_, i64>(0))?, 1);
             assert_eq!(
                 conn.query_row(
@@ -508,6 +508,7 @@ mod tests {
                         memory_total_bytes: None,
                         disk_read_bytes_per_sec: None,
                         disk_write_bytes_per_sec: None,
+                        gpus: Vec::new(),
                         has_app_snapshot: true,
                     },
                     apps: vec![AppResourceSample {
@@ -580,8 +581,11 @@ mod tests {
                     2
                 );
                 assert_eq!(
-                    conn.query_row("SELECT COUNT(*) FROM migration_journal", [], |row| row
-                        .get::<_, i64>(0))?,
+                    conn.query_row(
+                        "SELECT COUNT(*) FROM migration_journal WHERE to_version = 7",
+                        [],
+                        |row| row.get::<_, i64>(0)
+                    )?,
                     9
                 );
                 Ok(())
@@ -783,7 +787,7 @@ mod tests {
         db.read(|conn| {
             assert_eq!(
                 conn.pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))?,
-                7
+                8
             );
             let started_at_not_null: i64 = conn.query_row(
                 "SELECT \"notnull\" FROM pragma_table_info('migration_journal') WHERE name = 'started_at_ms'",
@@ -893,6 +897,7 @@ mod tests {
                 memory_total_bytes: Some(2_000),
                 disk_read_bytes_per_sec: Some(300),
                 disk_write_bytes_per_sec: Some(400),
+                gpus: Vec::new(),
                 has_app_snapshot: false,
             },
             apps: vec![AppResourceSample {
@@ -966,6 +971,7 @@ mod tests {
                     memory_total_bytes: Some(2_000),
                     disk_read_bytes_per_sec: Some(300),
                     disk_write_bytes_per_sec: Some(400),
+                    gpus: Vec::new(),
                     has_app_snapshot: false,
                 },
                 apps: vec![AppResourceSample {
@@ -1132,6 +1138,7 @@ mod tests {
                 memory_total_bytes: Some(2_000),
                 disk_read_bytes_per_sec: Some(300),
                 disk_write_bytes_per_sec: Some(400),
+                gpus: Vec::new(),
                 has_app_snapshot: true,
             },
             apps,
@@ -1362,6 +1369,7 @@ mod tests {
                 memory_total_bytes: None,
                 disk_read_bytes_per_sec: None,
                 disk_write_bytes_per_sec: None,
+                gpus: Vec::new(),
                 has_app_snapshot: false,
             },
             apps: Vec::new(),
@@ -1481,6 +1489,7 @@ mod tests {
                 memory_total_bytes: None,
                 disk_read_bytes_per_sec: None,
                 disk_write_bytes_per_sec: None,
+                gpus: Vec::new(),
                 has_app_snapshot: false,
             },
             apps: Vec::new(),
@@ -1537,6 +1546,7 @@ mod tests {
                 memory_total_bytes: None,
                 disk_read_bytes_per_sec: None,
                 disk_write_bytes_per_sec: None,
+                gpus: Vec::new(),
                 has_app_snapshot: false,
             },
             apps: Vec::new(),
@@ -1589,6 +1599,7 @@ mod tests {
                 memory_total_bytes: None,
                 disk_read_bytes_per_sec: None,
                 disk_write_bytes_per_sec: None,
+                gpus: Vec::new(),
                 has_app_snapshot: false,
             },
             apps: Vec::new(),
@@ -1642,6 +1653,7 @@ mod tests {
                 memory_total_bytes: None,
                 disk_read_bytes_per_sec: None,
                 disk_write_bytes_per_sec: None,
+                gpus: Vec::new(),
                 has_app_snapshot: false,
             },
             apps: Vec::new(),
@@ -2395,6 +2407,296 @@ mod tests {
             1
         );
         drop(conn);
+        cleanup_test_files(&path);
+    }
+
+    #[test]
+    fn gpu_storage_round_trips_multiple_devices_partial_metrics_and_zero() {
+        let path = test_path("gpu-round-trip");
+        cleanup_test_files(&path);
+        let db = Database::open(path.clone()).unwrap();
+        let snapshot = ResourceSnapshot {
+            system: SystemSample {
+                timestamp_ms: 30_000,
+                sample_duration_ms: 2_000,
+                cpu_percent: Some(10.0),
+                memory_percent: Some(20.0),
+                memory_used_bytes: Some(2_000),
+                memory_total_bytes: Some(8_000),
+                disk_read_bytes_per_sec: None,
+                disk_write_bytes_per_sec: None,
+                gpus: vec![
+                    GpuSample {
+                        device_key: "runtime:gpu:primary".into(),
+                        vendor: Some("NVIDIA".into()),
+                        model: Some("Test GPU A".into()),
+                        capacity_bytes: Some(16 * 1024 * 1024 * 1024),
+                        utilization_percent: Some(0.0),
+                        memory_controller_utilization_percent: Some(0.0),
+                        temperature_celsius: Some(42.5),
+                        power_watts: Some(150.25),
+                        graphics_clock_mhz: Some(2_535.0),
+                        memory_clock_mhz: Some(16_001.0),
+                        vram_used_bytes: Some(0),
+                        vram_total_bytes: Some(16 * 1024 * 1024 * 1024),
+                        power_scope: Some(GPU_BOARD_POWER_SCOPE.into()),
+                    },
+                    GpuSample {
+                        device_key: "runtime:gpu:secondary".into(),
+                        vendor: Some("NVIDIA".into()),
+                        model: Some("Test GPU B".into()),
+                        capacity_bytes: Some(8 * 1024 * 1024 * 1024),
+                        utilization_percent: Some(80.0),
+                        memory_controller_utilization_percent: None,
+                        temperature_celsius: None,
+                        power_watts: None,
+                        graphics_clock_mhz: None,
+                        memory_clock_mhz: None,
+                        vram_used_bytes: Some(0),
+                        vram_total_bytes: Some(8 * 1024 * 1024 * 1024),
+                        power_scope: None,
+                    },
+                ],
+                has_app_snapshot: false,
+            },
+            apps: Vec::new(),
+        };
+        db.with_writer(|conn| writer::insert_resource_snapshot(conn, &snapshot))
+            .unwrap();
+        assert_eq!(
+            db.read(|conn| conn.query_row(
+                "SELECT schema_version FROM collection_session WHERE ended_at_ms IS NULL",
+                [],
+                |row| row.get::<_, i64>(0),
+            ))
+            .unwrap(),
+            8
+        );
+
+        db.with_writer(|conn| {
+            let session_id: i64 = conn.query_row(
+                "SELECT CAST(value AS INTEGER) FROM settings WHERE key = 'runtime_collection_session_id'",
+                [],
+                |row| row.get(0),
+            )?;
+            let provider_id = conn
+                .execute(
+                    "INSERT INTO provider(kind, name, version, last_status) VALUES ('gpu', 'test-provider', '1', 'supported')",
+                    [],
+                )
+                .map(|_| conn.last_insert_rowid())?;
+            let device_id: i64 = conn.query_row(
+                "SELECT id FROM hardware_device WHERE stable_key = 'runtime:gpu:primary'",
+                [],
+                |row| row.get(0),
+            )?;
+            conn.execute(
+                "INSERT INTO collection_session_metric(session_id, metric_key, device_id, enabled, support_status, provider_id, interval_ms) VALUES (?1, 'gpu.power_watts', ?2, 1, 'supported', ?3, 2000)",
+                params![session_id, device_id, provider_id],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+
+        let samples = db
+            .read(|conn| query::system_samples(conn, 1, 31_000, 100))
+            .unwrap();
+        assert_eq!(samples.len(), 1);
+        assert_eq!(samples[0].gpus.len(), 2);
+        assert_eq!(samples[0].gpus[0].device_key, "runtime:gpu:primary");
+        assert_eq!(samples[0].gpus[0].utilization_percent, Some(0.0));
+        assert_eq!(
+            samples[0].gpus[0].memory_controller_utilization_percent,
+            Some(0.0)
+        );
+        assert_eq!(samples[0].gpus[0].temperature_celsius, Some(42.5));
+        assert_eq!(samples[0].gpus[0].power_watts, Some(150.25));
+        assert_eq!(samples[0].gpus[0].graphics_clock_mhz, Some(2_535.0));
+        assert_eq!(samples[0].gpus[0].memory_clock_mhz, Some(16_001.0));
+        assert_eq!(samples[0].gpus[0].vram_used_bytes, Some(0));
+        assert_eq!(
+            samples[0].gpus[0].vram_total_bytes,
+            Some(16 * 1024 * 1024 * 1024)
+        );
+        assert_eq!(
+            samples[0].gpus[0].power_scope.as_deref(),
+            Some(GPU_BOARD_POWER_SCOPE)
+        );
+        assert_eq!(samples[0].gpus[1].device_key, "runtime:gpu:secondary");
+        assert_eq!(
+            samples[0].gpus[1].memory_controller_utilization_percent,
+            None
+        );
+        assert_eq!(samples[0].gpus[1].temperature_celsius, None);
+        assert_eq!(samples[0].gpus[1].power_watts, None);
+        assert_eq!(samples[0].gpus[1].vram_used_bytes, Some(0));
+        assert_eq!(
+            samples[0].gpus[1].vram_total_bytes,
+            Some(8 * 1024 * 1024 * 1024)
+        );
+        let primary = db
+            .read(|conn| query::gpu_samples(conn, 1, 31_000, Some("runtime:gpu:primary")))
+            .unwrap();
+        assert_eq!(primary.len(), 1);
+        assert_eq!(primary[0].timestamp_ms, 30_000);
+        assert_eq!(primary[0].gpu.device_key, "runtime:gpu:primary");
+        assert_eq!(primary[0].gpu.utilization_percent, Some(0.0));
+        assert_eq!(
+            primary[0].gpu.memory_controller_utilization_percent,
+            Some(0.0)
+        );
+        assert_eq!(primary[0].gpu.temperature_celsius, Some(42.5));
+        assert_eq!(primary[0].gpu.power_watts, Some(150.25));
+        assert_eq!(primary[0].gpu.graphics_clock_mhz, Some(2_535.0));
+        assert_eq!(primary[0].gpu.memory_clock_mhz, Some(16_001.0));
+        assert_eq!(primary[0].gpu.vram_used_bytes, Some(0));
+        assert_eq!(
+            primary[0].gpu.vram_total_bytes,
+            Some(16 * 1024 * 1024 * 1024)
+        );
+        assert_eq!(
+            primary[0].gpu.power_scope.as_deref(),
+            Some(GPU_BOARD_POWER_SCOPE)
+        );
+
+        db.read(|conn| {
+            let metadata: (String, i64, String) = conn.query_row(
+                "SELECT p.name, csm.interval_ms, csm.support_status
+                 FROM collection_session_metric csm
+                 JOIN provider p ON p.id = csm.provider_id
+                 WHERE csm.metric_key = 'gpu.power_watts'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )?;
+            assert_eq!(
+                metadata,
+                ("test-provider".into(), 2_000, "supported".into())
+            );
+            Ok(())
+        })
+        .unwrap();
+
+        drop(db);
+        cleanup_test_files(&path);
+    }
+
+    #[test]
+    fn gpu_storage_zero_devices_writes_no_gpu_rows() {
+        let path = test_path("gpu-zero-devices");
+        cleanup_test_files(&path);
+        let db = Database::open(path.clone()).unwrap();
+        let snapshot = ResourceSnapshot {
+            system: SystemSample {
+                timestamp_ms: 40_000,
+                sample_duration_ms: 2_000,
+                cpu_percent: Some(1.0),
+                memory_percent: None,
+                memory_used_bytes: None,
+                memory_total_bytes: None,
+                disk_read_bytes_per_sec: None,
+                disk_write_bytes_per_sec: None,
+                gpus: Vec::new(),
+                has_app_snapshot: false,
+            },
+            apps: Vec::new(),
+        };
+        db.with_writer(|conn| writer::insert_resource_snapshot(conn, &snapshot))
+            .unwrap();
+        db.read(|conn| {
+            assert_eq!(
+                conn.query_row("SELECT COUNT(*) FROM gpu_sample", [], |row| row
+                    .get::<_, i64>(0))?,
+                0
+            );
+            assert_eq!(
+                conn.query_row(
+                    "SELECT COUNT(*) FROM hardware_device WHERE category = 'gpu'",
+                    [],
+                    |row| row.get::<_, i64>(0)
+                )?,
+                0
+            );
+            let samples = query::system_samples(conn, 1, 41_000, 100)?;
+            assert_eq!(samples.len(), 1);
+            assert!(samples[0].gpus.is_empty());
+            Ok(())
+        })
+        .unwrap();
+        drop(db);
+        cleanup_test_files(&path);
+    }
+
+    #[test]
+    fn gpu_storage_power_scope_error_rolls_back_frame_and_retry_is_clean() {
+        let path = test_path("gpu-power-scope-rollback");
+        cleanup_test_files(&path);
+        let db = Database::open(path.clone()).unwrap();
+        let snapshot = |power_scope: Option<&str>| ResourceSnapshot {
+            system: SystemSample {
+                timestamp_ms: 50_000,
+                sample_duration_ms: 2_000,
+                cpu_percent: None,
+                memory_percent: None,
+                memory_used_bytes: None,
+                memory_total_bytes: None,
+                disk_read_bytes_per_sec: None,
+                disk_write_bytes_per_sec: None,
+                gpus: vec![GpuSample {
+                    device_key: "runtime:gpu:rollback".into(),
+                    vendor: None,
+                    model: None,
+                    capacity_bytes: None,
+                    utilization_percent: Some(25.0),
+                    memory_controller_utilization_percent: None,
+                    temperature_celsius: None,
+                    power_watts: Some(10.0),
+                    graphics_clock_mhz: None,
+                    memory_clock_mhz: None,
+                    vram_used_bytes: None,
+                    vram_total_bytes: None,
+                    power_scope: power_scope.map(str::to_owned),
+                }],
+                has_app_snapshot: false,
+            },
+            apps: Vec::new(),
+        };
+
+        assert!(db
+            .with_writer(|conn| writer::insert_resource_snapshot(conn, &snapshot(None)))
+            .is_err());
+        db.read(|conn| {
+            assert_eq!(
+                conn.query_row("SELECT COUNT(*) FROM sample_frame", [], |row| row
+                    .get::<_, i64>(0))?,
+                0
+            );
+            assert_eq!(
+                conn.query_row("SELECT COUNT(*) FROM gpu_sample", [], |row| row
+                    .get::<_, i64>(0))?,
+                0
+            );
+            assert_eq!(
+                conn.query_row("SELECT COUNT(*) FROM hardware_device", [], |row| row
+                    .get::<_, i64>(0))?,
+                0
+            );
+            Ok(())
+        })
+        .unwrap();
+
+        db.with_writer(|conn| {
+            writer::insert_resource_snapshot(conn, &snapshot(Some(GPU_BOARD_POWER_SCOPE)))
+        })
+        .unwrap();
+        assert_eq!(
+            db.read(
+                |conn| conn.query_row("SELECT COUNT(*) FROM gpu_sample", [], |row| row
+                    .get::<_, i64>(0))
+            )
+            .unwrap(),
+            1
+        );
+        drop(db);
         cleanup_test_files(&path);
     }
 }

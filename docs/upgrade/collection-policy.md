@@ -81,6 +81,26 @@ PR-03 的启停语义如下：
 - Provider 的 probe、sample 和 stop 都在 bounded deadline/cancellation 边界内执行；startup/reconfigure failure 使用有界指数退避，shutdown 使用同一个绝对 deadline，超时不拖住其他 Provider 或使用时间线。
 - 普通 probe、start、reconfigure、disable stop、pause stop 和 resume start 都在每个 Provider 调用前重新计算独立 operation budget；只有 shutdown 复用 collector 的原始绝对 deadline，因此慢 Provider 不会污染下一个 Provider 的普通 control budget，也不会把 shutdown 扩展为 Provider 数量乘以单次 timeout。
 - ProviderHost 分开保存 desired plan、effective plan 和 observed/runtime lifecycle：desired plan 保留用户仍想采集的类别，effective plan 过滤当前 unsupported capability，runtime state 表达实际 stopped/running/failed/paused。能力恢复时从 desired intent 重新编译 effective plan，不能从已过滤的 effective plan 反推用户设置。
+
+## GPU 存储口径
+
+PR-04A 只建立通用 GPU storage contract，不宣布任何厂商 Provider 已准入：
+
+- 每个 `gpu_sample` 属于一个 `sample_frame` 和一个 `hardware_device`。多 GPU 永远按设备分别保存；利用率、温度、频率和 VRAM 不跨设备相加。
+- `gpu.utilization_percent`、`gpu.memory_controller_utilization_percent`、`gpu.temperature_celsius`、`gpu.power_watts`、`gpu.graphics_clock_mhz`、`gpu.memory_clock_mhz`、`gpu.vram_used_bytes`、`gpu.vram_total_bytes` 分别映射到可空 GPU sample 列。`NULL` 表示当前样本没有该值，数值 `0` 表示合法零值。
+- GPU board power 的单位是 W，且 `power_scope` 必须为 `gpu_board`。不得在 UI 或 energy rollup 中称为 whole-system power、wall power、PSU input 或 total machine power。
+- device/vendor/model/capacity 存在 `hardware_device`；provider、metric enabled/support status 和 interval 存在 `provider` / `collection_session_metric`。这些会话元数据是历史来源追溯的规范入口，不复制到每一行 GPU sample。
+
+## 准入层级
+
+硬件路线按以下层级判断，不能混为一个 gate：
+
+1. **Spike-01 short-term implementation admission**：来源/许可、probe、权限、单位/范围、unsupported/failed/zero 语义、基本调用开销和受控 lifecycle 足够支持开始正式 Provider 实现。
+2. **PR-04A storage contract**：在没有任何 production NVML/AMD/Intel/CPU sensor 的前提下，提供可迁移、可回滚、可查询的 GPU 数据存储路径。
+3. **PR-04 production Provider admission**：每个正式 Provider 仍必须引用对应 Spike 报告，并补齐该来源尚缺的短期证据。
+4. **Default-enable / support-matrix / release-stability gate**：24 小时 soak、数据库增长 soak、代表硬件矩阵、AMD/Intel 覆盖和完整 release hardware matrix 在这里评估；它们不是 PR-04A 的实现入口条件。
+
+当前 Spike-01B 仍只支持在 RTX 5070 Ti 开发机上继续 NVML feasibility work。Administrator comparison、30-minute idle、30-minute representative-load、cleanup/re-enable、failure/partial-support 和可行时的 sleep/wake evidence 完成前，NVIDIA production Provider 保持 pending。
 - 超时调用会保留隔离 worker 中的 pending completion。Host 按 operation 和 generation reconcile late lifecycle result；新 settings、disable、pause 或 shutdown 产生的新 intent 会拒绝旧 result 恢复 Running。过期 sample payload 丢弃，不写当前 frame；旧 probe result 不覆盖更新后的 capability generation。
 - current-generation 的 late Probe success/failure 若改变 capability truth，会同步更新 canonical descriptor 和 effective CollectionPlan；Unsupported -> Supported 可以恢复用户仍启用的 active category，Supported -> Unsupported 会移除它。若用户已经 disable、pause 或 shutdown，只更新 capability/status，不自动启动 provider。
 - late Stop failure 若当前 intent 仍 inactive，则保持 Failed/StopFailed 并清除 retry；若用户已重新 enable，则为当前 generation 安排 bounded cleanup-before-start recovery，不会留下 enabled + failed + no retry 的永久状态。pause/shutdown 不会因旧 stop completion 安排新的 start。

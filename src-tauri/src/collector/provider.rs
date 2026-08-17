@@ -2249,6 +2249,7 @@ mod tests {
                     memory_total_bytes: None,
                     disk_read_bytes_per_sec: Some(0),
                     disk_write_bytes_per_sec: Some(0),
+                    gpus: Vec::new(),
                     has_app_snapshot: false,
                 },
                 apps: Vec::<AppResourceSample>::new(),

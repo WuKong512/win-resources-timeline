@@ -5,11 +5,12 @@ use crate::{
     },
     models::{
         AppIdentity, AppResourceHistoryPoint, AppResourceSample, AppUsageSummary,
-        DailyUsageSummary, ForegroundInterval, ResourceApp, SystemSample, TodayOverview,
+        DailyUsageSummary, ForegroundInterval, GpuSample, GpuSamplePoint, ResourceApp,
+        SystemSample, TodayOverview,
     },
 };
 use rusqlite::{params, Connection, OptionalExtension};
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
 
 fn valid_range(start_ms: i64, end_ms: i64) -> rusqlite::Result<()> {
     if end_ms <= start_ms {
@@ -351,7 +352,7 @@ pub fn system_samples(
 ) -> rusqlite::Result<Vec<SystemSample>> {
     valid_range(start_ms, end_ms)?;
     let mut stmt = conn.prepare(
-        r#"SELECT f.ts, f.duration_ms, cpu.usage_pct, memory.usage_pct, memory.used_bytes,
+        r#"SELECT f.id, f.ts, f.duration_ms, cpu.usage_pct, memory.usage_pct, memory.used_bytes,
                   CASE WHEN memory.used_bytes IS NOT NULL AND memory.available_bytes IS NOT NULL
                        THEN memory.used_bytes + memory.available_bytes END,
                   disk.read_bps, disk.write_bps, f.process_snapshot_present
@@ -365,26 +366,126 @@ pub fn system_samples(
            WHERE f.ts >= ?1 AND f.ts < ?2
            ORDER BY f.ts"#,
     )?;
-    let all: Vec<SystemSample> = stmt
+    let frame_rows: Vec<(i64, SystemSample)> = stmt
         .query_map(params![start_ms, end_ms], |r| {
-            Ok(SystemSample {
-                timestamp_ms: r.get(0)?,
-                sample_duration_ms: r.get(1)?,
-                cpu_percent: r.get(2)?,
-                memory_percent: r.get(3)?,
-                memory_used_bytes: r.get(4)?,
-                memory_total_bytes: r.get(5)?,
-                disk_read_bytes_per_sec: r.get(6)?,
-                disk_write_bytes_per_sec: r.get(7)?,
-                has_app_snapshot: r.get::<_, i64>(8)? != 0,
-            })
+            Ok((
+                r.get(0)?,
+                SystemSample {
+                    timestamp_ms: r.get(1)?,
+                    sample_duration_ms: r.get(2)?,
+                    cpu_percent: r.get(3)?,
+                    memory_percent: r.get(4)?,
+                    memory_used_bytes: r.get(5)?,
+                    memory_total_bytes: r.get(6)?,
+                    disk_read_bytes_per_sec: r.get(7)?,
+                    disk_write_bytes_per_sec: r.get(8)?,
+                    gpus: Vec::new(),
+                    has_app_snapshot: r.get::<_, i64>(9)? != 0,
+                },
+            ))
         })?
         .collect::<rusqlite::Result<_>>()?;
+    let gpus_by_frame = gpu_samples_by_frame(conn, start_ms, end_ms)?;
+    let all: Vec<SystemSample> = frame_rows
+        .into_iter()
+        .map(|(frame_id, mut sample)| {
+            sample.gpus = gpus_by_frame.get(&frame_id).cloned().unwrap_or_default();
+            sample
+        })
+        .collect();
     if all.len() <= max_points {
         return Ok(all);
     }
     let stride = all.len().div_ceil(max_points.max(1));
     Ok(all.into_iter().step_by(stride).collect())
+}
+
+fn gpu_samples_by_frame(
+    conn: &Connection,
+    start_ms: i64,
+    end_ms: i64,
+) -> rusqlite::Result<HashMap<i64, Vec<GpuSample>>> {
+    let mut stmt = conn.prepare(
+        r#"SELECT f.id, d.stable_key, d.vendor, d.model, d.capacity_bytes,
+                  g.usage_pct, g.memory_controller_usage_pct, g.temp_c, g.board_power_w,
+                  g.core_clock_mhz, g.memory_clock_mhz, g.vram_used_bytes,
+                  g.vram_total_bytes, g.power_scope
+           FROM gpu_sample g
+           JOIN sample_frame f ON f.id = g.frame_id
+           JOIN hardware_device d ON d.id = g.device_id
+           WHERE f.ts >= ?1 AND f.ts < ?2
+           ORDER BY f.ts, d.id"#,
+    )?;
+    let rows = stmt
+        .query_map(params![start_ms, end_ms], |r| {
+            Ok((
+                r.get::<_, i64>(0)?,
+                GpuSample {
+                    device_key: r.get(1)?,
+                    vendor: r.get(2)?,
+                    model: r.get(3)?,
+                    capacity_bytes: r.get(4)?,
+                    utilization_percent: r.get(5)?,
+                    memory_controller_utilization_percent: r.get(6)?,
+                    temperature_celsius: r.get(7)?,
+                    power_watts: r.get(8)?,
+                    graphics_clock_mhz: r.get(9)?,
+                    memory_clock_mhz: r.get(10)?,
+                    vram_used_bytes: r.get(11)?,
+                    vram_total_bytes: r.get(12)?,
+                    power_scope: r.get(13)?,
+                },
+            ))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    let mut grouped = HashMap::new();
+    for (frame_id, gpu) in rows {
+        grouped.entry(frame_id).or_insert_with(Vec::new).push(gpu);
+    }
+    Ok(grouped)
+}
+
+pub fn gpu_samples(
+    conn: &Connection,
+    start_ms: i64,
+    end_ms: i64,
+    device_key: Option<&str>,
+) -> rusqlite::Result<Vec<GpuSamplePoint>> {
+    valid_range(start_ms, end_ms)?;
+    let mut stmt = conn.prepare(
+        r#"SELECT f.ts, f.duration_ms, d.stable_key, d.vendor, d.model, d.capacity_bytes,
+                  g.usage_pct, g.memory_controller_usage_pct, g.temp_c, g.board_power_w,
+                  g.core_clock_mhz, g.memory_clock_mhz, g.vram_used_bytes,
+                  g.vram_total_bytes, g.power_scope
+           FROM gpu_sample g
+           JOIN sample_frame f ON f.id = g.frame_id
+           JOIN hardware_device d ON d.id = g.device_id
+           WHERE f.ts >= ?1 AND f.ts < ?2
+             AND (?3 IS NULL OR d.stable_key = ?3)
+           ORDER BY f.ts, d.id"#,
+    )?;
+    let rows = stmt.query_map(params![start_ms, end_ms, device_key], |r| {
+        Ok(GpuSamplePoint {
+            timestamp_ms: r.get(0)?,
+            sample_duration_ms: r.get(1)?,
+            gpu: GpuSample {
+                device_key: r.get(2)?,
+                vendor: r.get(3)?,
+                model: r.get(4)?,
+                capacity_bytes: r.get(5)?,
+                utilization_percent: r.get(6)?,
+                memory_controller_utilization_percent: r.get(7)?,
+                temperature_celsius: r.get(8)?,
+                power_watts: r.get(9)?,
+                graphics_clock_mhz: r.get(10)?,
+                memory_clock_mhz: r.get(11)?,
+                vram_used_bytes: r.get(12)?,
+                vram_total_bytes: r.get(13)?,
+                power_scope: r.get(14)?,
+            },
+        })
+    })?;
+    rows.collect()
 }
 
 pub fn app_resource_samples(

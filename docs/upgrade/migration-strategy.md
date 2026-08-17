@@ -1,4 +1,4 @@
-# schema v6 → v7 迁移策略
+# schema v6 → v7、v7 → v8 迁移策略
 
 ## 不可违反的约束
 
@@ -10,7 +10,7 @@
 
 ## 上线方式
 
-建议分两个版本交付：先引入 v7 schema、双读/回填和验证，再切换默认写入并在稳定版本后删除兼容代码。若实现复杂度要求一次迁移，也必须把 DDL、回填、校验和切换拆成有日志的阶段。
+建议分阶段交付：先引入 v7 schema 与旧数据回填，再由独立的 PR-04A 引入 v8 GPU storage contract，最后切换到通过 Spike-01 implementation admission 的正式 Provider。若实现复杂度要求一次迁移，也必须把 DDL、回填、校验和切换拆成有日志的阶段。
 
 ## 迁移阶段
 
@@ -50,7 +50,7 @@ DDL/回填事务失败时回滚并继续使用原 v6 数据库；如果数据库
 
 PR-01 将上述策略落成 `src-tauri/src/db/schema.rs` 中的单入口迁移：
 
-1. `Database::open` 对 v6 数据库先启用 `foreign_keys=ON`、WAL、`synchronous=NORMAL` 和 5 秒 busy timeout；schema 版本高于 7 时拒绝打开。
+1. `Database::open` 对 v6 数据库先启用 `foreign_keys=ON`、WAL、`synchronous=NORMAL` 和 5 秒 busy timeout；schema 版本高于 8 时拒绝打开。
 2. Preflight 执行 `quick_check`、`integrity_check` 和 `foreign_key_check`，并记录主库、`-wal`、`-shm` 大小及备份目录可用性。
 3. Backup 使用 SQLite `VACUUM INTO` 生成 `*.v7-backup-<timestamp>-<pid>.sqlite3`。迁移不直接复制正在使用的主库、WAL 或 SHM 文件。
 4. `migration_journal` 为每次 v6 → v7 运行记录 `preflight`、`backup`、`create`、三类 backfill、`verify`、`commit` 和 `postflight` 阶段。重启时，未完成的 pending/started 阶段先标记为 interrupted，再开始新的 run。
@@ -59,6 +59,18 @@ PR-01 将上述策略落成 `src-tauri/src/db/schema.rs` 中的单入口迁移�
 7. 行数、时间范围、关键总量、外键和完整性检查全部通过后，事务才设置 `PRAGMA user_version = 7` 并提交；提交后再次执行 postflight。失败的回填事务保持 v6 `user_version` 和旧表可读，journal 保留失败信息。
 
 当前测试使用临时目录中的脱敏 v6 fixture，覆盖空库、带 foreground/system/process 数据、重复打开、失败回滚、备份、范围/总量/NULL 语义、外键和完整性校验。真实用户数据库不参与测试或迁移演练。
+
+## PR-04A v7 → v8 GPU storage contract
+
+PR-04A 不重建数据库，也不改变 v7 的历史表关系。它在一个有 journal/backup/preflight/postflight 的 forward-only transaction 中：
+
+1. 为 `gpu_sample` 增加 `memory_controller_usage_pct`、`memory_clock_mhz`、`vram_total_bytes` 和 nullable `power_scope`。
+2. 为多设备时间查询增加 `(device_id, frame_id)` 索引，并安装 GPU board power scope invariant。
+3. 将 v7 中已有的非 NULL `board_power_w` 解释为既有字段语义所承诺的 `gpu_board`，回填 `power_scope`；不把它改写成整机功耗。
+4. 保留 `hardware_device.stable_key`、`provider`、`collection_session_metric` 和 `sample_frame.collection_session_id` 作为 device/provider/session 追溯链。新 runtime session 使用 `schema_version = 8`，历史 session 不被伪造改写。
+5. 在 `verify` 阶段检查 GPU 行数、NULL/zero 语义、power scope、foreign key、quick/integrity check，失败时保持 v7 `user_version` 和原 GPU 行可读。
+
+PR-04A 的 storage migration 不等于 NVML admission。当前 Spike-01B 的短期 evidence 仍需独立补齐 administrator comparison、30-minute idle/representative-load、enable/disable/re-enable、shutdown/cleanup、DLL missing、partial unsupported/failure handling 和可行时的 sleep/wake lifecycle。24 小时 soak、数据库增长、跨厂商验证和完整 release matrix 属于后续 default-enable/support/release gate。
 
 ## 测试矩阵
 

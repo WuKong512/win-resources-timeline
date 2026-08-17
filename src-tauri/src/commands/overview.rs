@@ -2,8 +2,8 @@ use crate::{
     db::query,
     error::CommandError,
     models::{
-        AppResourceHistoryPoint, AppResourceSample, DailyUsageSummary, ResourceApp, SystemSample,
-        TodayOverview,
+        AppResourceHistoryPoint, AppResourceSample, DailyUsageSummary, GpuSamplePoint, ResourceApp,
+        SystemSample, TodayOverview,
     },
     AppState,
 };
@@ -125,5 +125,27 @@ pub fn get_system_samples(
     state
         .db
         .read(|conn| query::system_samples(conn, start_ms, end_ms, max_points))
+        .map_err(Into::into)
+}
+
+#[tauri::command]
+pub fn get_gpu_samples(
+    state: State<'_, AppState>,
+    start_ms: i64,
+    end_ms: i64,
+    device_key: Option<String>,
+) -> Result<Vec<GpuSamplePoint>, CommandError> {
+    if device_key
+        .as_deref()
+        .is_some_and(|value| value.trim().is_empty())
+    {
+        return Err(crate::error::AppError::InvalidRequest(
+            "deviceKey must be non-empty when provided".into(),
+        )
+        .into());
+    }
+    state
+        .db
+        .read(|conn| query::gpu_samples(conn, start_ms, end_ms, device_key.as_deref()))
         .map_err(Into::into)
 }

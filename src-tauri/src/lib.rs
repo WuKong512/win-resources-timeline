@@ -77,6 +77,7 @@ pub fn run() {
             commands::timeline::get_app_usage_timeline,
             commands::timeline::get_timeline_available_dates,
             commands::overview::get_system_samples,
+            commands::overview::get_gpu_samples,
             commands::overview::get_resource_available_dates,
             commands::overview::get_app_resource_samples,
             commands::overview::get_resource_apps,

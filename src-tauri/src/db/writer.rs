@@ -1,8 +1,8 @@
 use crate::{
     db::usage::{intersect_foreground, StateRange, TimeRange},
     models::{
-        ActivityState, BootIdentity, CollectionSettings, ComputerState, ForegroundApp,
-        MetricCategory, ResourceSnapshot, SystemSample,
+        ActivityState, BootIdentity, CollectionSettings, ComputerState, ForegroundApp, GpuSample,
+        MetricCategory, ResourceSnapshot, SystemSample, GPU_BOARD_POWER_SCOPE,
     },
 };
 use rusqlite::{params, Connection, OptionalExtension, Transaction};
@@ -494,7 +494,7 @@ fn start_runtime_session_tx(
     };
     tx.execute(
         "INSERT INTO collection_session(boot_session_id, started_at_ms, app_version, schema_version, config_hash)
-         VALUES (?1, ?2, ?3, 7, NULL)",
+         VALUES (?1, ?2, ?3, 8, NULL)",
         params![boot_id, now, env!("CARGO_PKG_VERSION")],
     )?;
     let collection_id = tx.last_insert_rowid();
@@ -1107,6 +1107,30 @@ fn insert_snapshot(
             params![frame_id, device_id, system.disk_read_bytes_per_sec, system.disk_write_bytes_per_sec],
         )?;
     }
+    for gpu in &system.gpus {
+        validate_gpu_power_scope(gpu)?;
+        let device_id = ensure_gpu_device_tx(&tx, gpu, system.timestamp_ms)?;
+        tx.execute(
+            "INSERT INTO gpu_sample(
+                 frame_id, device_id, usage_pct, memory_controller_usage_pct, temp_c,
+                 board_power_w, core_clock_mhz, memory_clock_mhz, vram_used_bytes,
+                 vram_total_bytes, power_scope
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+            params![
+                frame_id,
+                device_id,
+                gpu.utilization_percent,
+                gpu.memory_controller_utilization_percent,
+                gpu.temperature_celsius,
+                gpu.power_watts,
+                gpu.graphics_clock_mhz,
+                gpu.memory_clock_mhz,
+                gpu.vram_used_bytes,
+                gpu.vram_total_bytes,
+                gpu.power_scope.as_deref(),
+            ],
+        )?;
+    }
     for app in apps {
         let executable_id = upsert_resource_app_tx(&tx, app, system.timestamp_ms)?;
         let instance_key = format!("runtime:{}", app.app_key);
@@ -1479,6 +1503,67 @@ fn ensure_device_tx(
         [stable_key],
         |row| row.get(0),
     )
+}
+
+fn ensure_gpu_device_tx(
+    tx: &rusqlite::Transaction<'_>,
+    gpu: &GpuSample,
+    now: i64,
+) -> rusqlite::Result<i64> {
+    if gpu.device_key.trim().is_empty() {
+        return Err(rusqlite::Error::InvalidParameterName(
+            "GPU device_key must be non-empty".into(),
+        ));
+    }
+    if let Some(category) = tx
+        .query_row(
+            "SELECT category FROM hardware_device WHERE stable_key = ?1",
+            [&gpu.device_key],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?
+    {
+        if category != "gpu" {
+            return Err(rusqlite::Error::InvalidParameterName(
+                "GPU device_key conflicts with a non-GPU device".into(),
+            ));
+        }
+    }
+    tx.execute(
+        "INSERT INTO hardware_device(
+             stable_key, category, vendor, model, capacity_bytes, first_seen_at_ms, last_seen_at_ms
+         ) VALUES (?1, 'gpu', ?2, ?3, ?4, ?5, ?5)
+         ON CONFLICT(stable_key) DO UPDATE SET
+             category = 'gpu',
+             vendor = COALESCE(excluded.vendor, hardware_device.vendor),
+             model = COALESCE(excluded.model, hardware_device.model),
+             capacity_bytes = COALESCE(excluded.capacity_bytes, hardware_device.capacity_bytes),
+             last_seen_at_ms = excluded.last_seen_at_ms",
+        params![
+            gpu.device_key,
+            gpu.vendor,
+            gpu.model,
+            gpu.capacity_bytes,
+            now
+        ],
+    )?;
+    tx.query_row(
+        "SELECT id FROM hardware_device WHERE stable_key = ?1 AND category = 'gpu'",
+        [&gpu.device_key],
+        |row| row.get(0),
+    )
+}
+
+fn validate_gpu_power_scope(gpu: &GpuSample) -> rusqlite::Result<()> {
+    match (gpu.power_watts, gpu.power_scope.as_deref()) {
+        (None, None) | (Some(_), Some(GPU_BOARD_POWER_SCOPE)) => Ok(()),
+        (Some(_), _) => Err(rusqlite::Error::InvalidParameterName(
+            "GPU board power requires power_scope=gpu_board".into(),
+        )),
+        (None, Some(_)) => Err(rusqlite::Error::InvalidParameterName(
+            "GPU power_scope requires a power_watts value".into(),
+        )),
+    }
 }
 
 fn current_boot_session_id(conn: &Connection) -> rusqlite::Result<i64> {
