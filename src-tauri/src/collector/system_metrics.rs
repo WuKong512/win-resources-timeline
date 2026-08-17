@@ -1,6 +1,7 @@
-use crate::models::{AppResourceSample, ResourceSnapshot, SystemSample};
+use crate::models::MetricCategory;
+use crate::models::{AppResourceSample, ProviderErrorCode, ResourceSnapshot, SystemSample};
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{BTreeSet, HashMap, HashSet},
     time::Instant,
 };
 use sysinfo::System;
@@ -15,48 +16,81 @@ pub struct SystemSampler {
 }
 
 impl SystemSampler {
+    #[allow(dead_code)]
     pub fn new() -> Self {
-        let mut system = System::new();
-        system.refresh_cpu();
-        system.refresh_memory();
-        system.refresh_processes();
+        let categories: BTreeSet<_> = MetricCategory::ALL.into_iter().collect();
+        Self::new_for_categories(&categories)
+    }
+
+    pub fn new_for_categories(categories: &BTreeSet<MetricCategory>) -> Self {
         Self {
-            system,
+            system: System::new(),
             last_sample: Instant::now(),
             warmed_up: false,
-            disk: DiskIoSampler::new(),
+            disk: DiskIoSampler::new_if(categories.contains(&MetricCategory::Disk)),
         }
     }
+
+    pub fn disk_available(&self) -> bool {
+        self.disk.is_available()
+    }
+    #[allow(dead_code)]
     pub fn sample(
         &mut self,
         timestamp_ms: i64,
         tracked_app_keys: &HashSet<String>,
     ) -> Option<ResourceSnapshot> {
+        let categories: BTreeSet<_> = MetricCategory::ALL.into_iter().collect();
+        self.sample_with_categories(timestamp_ms, tracked_app_keys, &categories)
+    }
+
+    pub fn sample_with_categories(
+        &mut self,
+        timestamp_ms: i64,
+        tracked_app_keys: &HashSet<String>,
+        categories: &BTreeSet<MetricCategory>,
+    ) -> Option<ResourceSnapshot> {
         let elapsed = self.last_sample.elapsed();
         self.last_sample = Instant::now();
-        self.system.refresh_cpu();
-        self.system.refresh_memory();
-        self.system.refresh_processes();
+        let cpu_enabled = categories.contains(&MetricCategory::Cpu);
+        let memory_enabled = categories.contains(&MetricCategory::Memory);
+        let disk_enabled = categories.contains(&MetricCategory::Disk);
+        let process_enabled = categories.contains(&MetricCategory::Process);
+        if cpu_enabled {
+            self.system.refresh_cpu();
+        }
+        if memory_enabled {
+            self.system.refresh_memory();
+        }
+        if process_enabled {
+            self.system.refresh_processes();
+        }
         if !self.warmed_up {
             self.warmed_up = true;
             return None;
         }
-        let total = self.system.total_memory();
-        let used = self.system.used_memory();
-        let disk = self.disk.sample();
+        let memory =
+            memory_enabled.then(|| (self.system.total_memory(), self.system.used_memory()));
+        let disk = disk_enabled.then(|| self.disk.sample()).flatten();
         let sample_duration_ms = elapsed.as_millis().max(1) as i64;
         let system = SystemSample {
             timestamp_ms,
             sample_duration_ms,
-            cpu_percent: Some(self.system.global_cpu_info().cpu_usage() as f64),
-            memory_percent: (total > 0).then_some(used as f64 * 100.0 / total as f64),
-            memory_used_bytes: Some(used as i64),
-            memory_total_bytes: Some(total as i64),
+            cpu_percent: cpu_enabled.then(|| self.system.global_cpu_info().cpu_usage() as f64),
+            memory_percent: memory.and_then(|(total, used)| {
+                (total > 0).then_some(used as f64 * 100.0 / total as f64)
+            }),
+            memory_used_bytes: memory.map(|(_, used)| used as i64),
+            memory_total_bytes: memory.map(|(total, _)| total as i64),
             disk_read_bytes_per_sec: disk.map(|value| value.0),
             disk_write_bytes_per_sec: disk.map(|value| value.1),
-            has_app_snapshot: false,
+            has_app_snapshot: process_enabled,
         };
-        let apps = collect_app_samples(&self.system, sample_duration_ms, tracked_app_keys);
+        let apps = if process_enabled {
+            collect_app_samples(&self.system, sample_duration_ms, tracked_app_keys)
+        } else {
+            Vec::new()
+        };
         Some(ResourceSnapshot { system, apps })
     }
 }
@@ -168,46 +202,64 @@ struct DiskIoSampler {
 
 #[cfg(windows)]
 impl DiskIoSampler {
-    fn new() -> Self {
+    fn new_if(enabled: bool) -> Self {
+        if enabled {
+            Self::try_new().unwrap_or_else(|_| Self::unavailable())
+        } else {
+            Self::unavailable()
+        }
+    }
+
+    fn try_new() -> Result<Self, ProviderErrorCode> {
         use windows::{
             core::PCWSTR,
             Win32::{
-                Foundation::ERROR_SUCCESS,
+                Foundation::{ERROR_ACCESS_DENIED, ERROR_SUCCESS},
                 System::Performance::{PdhAddEnglishCounterW, PdhCollectQueryData, PdhOpenQueryW},
             },
         };
 
         unsafe {
             let mut query = 0;
-            if PdhOpenQueryW(PCWSTR::null(), 0, &mut query) != ERROR_SUCCESS.0 {
-                return Self::unavailable();
+            let status = PdhOpenQueryW(PCWSTR::null(), 0, &mut query);
+            if status != ERROR_SUCCESS.0 {
+                return Err(pdh_error_code(status, ERROR_ACCESS_DENIED.0));
             }
             let read_path = wide(r"\PhysicalDisk(_Total)\Disk Read Bytes/sec");
             let write_path = wide(r"\PhysicalDisk(_Total)\Disk Write Bytes/sec");
             let mut read_counter = 0;
             let mut write_counter = 0;
-            if PdhAddEnglishCounterW(
+            let read_status = PdhAddEnglishCounterW(
                 query,
                 PCWSTR::from_raw(read_path.as_ptr()),
                 0,
                 &mut read_counter,
-            ) != ERROR_SUCCESS.0
-                || PdhAddEnglishCounterW(
-                    query,
-                    PCWSTR::from_raw(write_path.as_ptr()),
-                    0,
-                    &mut write_counter,
-                ) != ERROR_SUCCESS.0
-            {
+            );
+            let write_status = PdhAddEnglishCounterW(
+                query,
+                PCWSTR::from_raw(write_path.as_ptr()),
+                0,
+                &mut write_counter,
+            );
+            if read_status != ERROR_SUCCESS.0 || write_status != ERROR_SUCCESS.0 {
                 windows::Win32::System::Performance::PdhCloseQuery(query);
-                return Self::unavailable();
+                let status = if read_status != ERROR_SUCCESS.0 {
+                    read_status
+                } else {
+                    write_status
+                };
+                return Err(pdh_error_code(status, ERROR_ACCESS_DENIED.0));
             }
-            let _ = PdhCollectQueryData(query);
-            Self {
+            let collect_status = PdhCollectQueryData(query);
+            if collect_status != ERROR_SUCCESS.0 {
+                windows::Win32::System::Performance::PdhCloseQuery(query);
+                return Err(pdh_error_code(collect_status, ERROR_ACCESS_DENIED.0));
+            }
+            Ok(Self {
                 query,
                 read_counter,
                 write_counter,
-            }
+            })
         }
     }
 
@@ -252,6 +304,19 @@ impl DiskIoSampler {
             (value.CStatus == ERROR_SUCCESS.0).then_some(value.Anonymous.doubleValue)
         }
     }
+
+    fn is_available(&self) -> bool {
+        self.query != 0 && self.read_counter != 0 && self.write_counter != 0
+    }
+}
+
+#[cfg(windows)]
+fn pdh_error_code(status: u32, access_denied: u32) -> ProviderErrorCode {
+    if status == access_denied {
+        ProviderErrorCode::PermissionDenied
+    } else {
+        ProviderErrorCode::ProviderMissing
+    }
 }
 
 #[cfg(windows)]
@@ -275,12 +340,35 @@ struct DiskIoSampler;
 
 #[cfg(not(windows))]
 impl DiskIoSampler {
-    fn new() -> Self {
+    fn new_if(_enabled: bool) -> Self {
         Self
     }
 
     fn sample(&mut self) -> Option<(i64, i64)> {
         None
+    }
+
+    fn is_available(&self) -> bool {
+        false
+    }
+}
+
+pub trait DiskCapabilityProbe: Send {
+    fn probe(&self) -> Result<(), ProviderErrorCode>;
+}
+
+pub struct PdhDiskCapabilityProbe;
+
+impl DiskCapabilityProbe for PdhDiskCapabilityProbe {
+    fn probe(&self) -> Result<(), ProviderErrorCode> {
+        #[cfg(windows)]
+        {
+            DiskIoSampler::try_new().map(drop)
+        }
+        #[cfg(not(windows))]
+        {
+            Err(ProviderErrorCode::ProviderMissing)
+        }
     }
 }
 

@@ -60,9 +60,20 @@
 
 v7 首次发布应分阶段启用，可通过设置/feature flag 关闭新 Provider 和 crash evidence builder，但不能回写破坏 v7 数据。发布包保留诊断导出和备份恢复说明。若性能或稳定性未达标，回退采集计划和 UI 功能，不通过删除用户历史数据回退。
 
+## PR-03 当前落地状态
+
+PR-03 已在现有 schema v7 和 runtime settings storage 上落地 Provider framework：
+
+- collector 通过 `windows-baseline` adapter 运行既有 CPU、内存、磁盘、进程 production sampler。
+- settings DTO 支持 `enabledCategories` 与 `disabledProviders`；collector status 暴露 provider capability/lifecycle/health。
+- CollectionPlan 在 startup、settings reload 和 capability 变化时编译；ProviderHost 分开保存用户 desired plan 与 capability-filtered effective plan，apply delta 只影响变化的 provider；pause、resume、shutdown 复用既有 collector 生命周期。
+- provider probe 在 startup 生成实际 capability；executor 为 probe/start/reconfigure/sample/stop 提供 bounded deadline/cancellation 边界，pending completion 按 operation/generation reconcile，startup/reconfigure failure 自动指数退避，stop failure/timeout 进入 health 且不阻塞 shutdown；普通 control operation 使用 per-provider budget，shutdown 保留单一绝对 deadline。
+- fake provider tests 覆盖 capability state、plan determinism、disable/re-enable、unsupported、startup/reconfigure retry、late lifecycle reconciliation、stale generation、sample timeout isolation、per-provider control deadline、Disk probe/start-time degradation、pause、shutdown 和 DTO 区分。
+- 本 PR 没有 schema v8、NVML production integration、`nvidia-smi`、CPU sensor 或新硬件指标；`tools/metric-probe` 保持独立且未修改。
+
 ## 架构基线完成定义
 
 - 设计主题文档与索引齐全，术语和表名一致。
 - 明确产品非目标、隐私默认值、性能预算和数据安全约束。
 - 后续 PR 顺序、依赖和验收条件可直接转为 issue/checklist。
-- 本 PR 不包含运行时代码、schema 或 UI 变更。
+- PR-03 的 Provider runtime/DTO 接口已落地；schema v7 和现有 UI 信息架构保持不变，硬件 Provider 与新信息架构 UI 仍由后续 PR 负责。

@@ -856,6 +856,7 @@ mod tests {
             system_sample_interval_ms: 30_000,
             idle_threshold_seconds: 600,
             system_sample_retention_days: 14,
+            ..CollectionSettings::default()
         };
         db.with_writer(|conn| writer::save_collection_settings(conn, &expected, 123))
             .unwrap();

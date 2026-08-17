@@ -71,3 +71,18 @@ Windows 节能模式开启时默认从均衡/详细切换到轻量，退出后�
 ## 用户控制
 
 用户可以选择采样预设、类别/指标开关、进程各层保留期、崩溃保护数量和数据库空间上限。关闭类别必须停止对应 Provider。设置页展示实际/预计空间、数据覆盖率和不可恢复提示；已删除或压缩掉的详细历史不能因后来延长保留期而恢复。
+
+PR-03 的启停语义如下：
+
+- `enabled` 是用户计划状态；collector pause 是运行时暂停，两者不互相持久化或混淆。
+- 关闭类别时，CollectionPlan 不再为该类别调度采样；如果 provider 已无启用类别，则调用 `stop` 并释放采集资源，而不是只跳过数据库写入。
+- `unsupported` 表示当前机器或来源不提供该能力；`failed` 表示能力存在但最近启动或采样失败；二者都不能伪装成用户 `disabled`。
+- 采样失败产生缺失/不可用样本和有界重试状态，不把失败写成 `0`。`0` 只表示真实且合法的数值。
+- Provider 的 probe、sample 和 stop 都在 bounded deadline/cancellation 边界内执行；startup/reconfigure failure 使用有界指数退避，shutdown 使用同一个绝对 deadline，超时不拖住其他 Provider 或使用时间线。
+- 普通 probe、start、reconfigure、disable stop、pause stop 和 resume start 都在每个 Provider 调用前重新计算独立 operation budget；只有 shutdown 复用 collector 的原始绝对 deadline，因此慢 Provider 不会污染下一个 Provider 的普通 control budget，也不会把 shutdown 扩展为 Provider 数量乘以单次 timeout。
+- ProviderHost 分开保存 desired plan、effective plan 和 observed/runtime lifecycle：desired plan 保留用户仍想采集的类别，effective plan 过滤当前 unsupported capability，runtime state 表达实际 stopped/running/failed/paused。能力恢复时从 desired intent 重新编译 effective plan，不能从已过滤的 effective plan 反推用户设置。
+- 超时调用会保留隔离 worker 中的 pending completion。Host 按 operation 和 generation reconcile late lifecycle result；新 settings、disable、pause 或 shutdown 产生的新 intent 会拒绝旧 result 恢复 Running。过期 sample payload 丢弃，不写当前 frame；旧 probe result 不覆盖更新后的 capability generation。
+- current-generation 的 late Probe success/failure 若改变 capability truth，会同步更新 canonical descriptor 和 effective CollectionPlan；Unsupported -> Supported 可以恢复用户仍启用的 active category，Supported -> Unsupported 会移除它。若用户已经 disable、pause 或 shutdown，只更新 capability/status，不自动启动 provider。
+- late Stop failure 若当前 intent 仍 inactive，则保持 Failed/StopFailed 并清除 retry；若用户已重新 enable，则为当前 generation 安排 bounded cleanup-before-start recovery，不会留下 enabled + failed + no retry 的永久状态。pause/shutdown 不会因旧 stop completion 安排新的 start。
+- Windows baseline 的 Disk 只有在当前 settings 请求该类别且 PDH query/counter 初始化 probe 成功时才进入 active plan；用户禁用 Disk 时不建立 PDH Disk query。probe 失败显示明确不可用原因，不用永久 `None` 或 `0` 冒充磁盘数据，CPU、memory、process 不因 Disk 缺失而停止。
+- probe 成功并不冻结能力 truth：如果 start/reconfigure 的 Disk sampler 初始化发生 TOCTOU failure，Provider 返回 capability outcome，Host 更新 canonical capability 和 CollectionPlan，Disk 变为明确 unavailable/failed，其他 baseline categories 继续运行。
