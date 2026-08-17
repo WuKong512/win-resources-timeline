@@ -86,7 +86,23 @@ pub struct CollectionPlan {
 }
 
 impl CollectionPlan {
+    #[allow(dead_code)]
     pub fn build(settings: &CollectionSettings, descriptors: &[ProviderDescriptor]) -> Self {
+        Self::build_with_capability_filter(settings, descriptors, true)
+    }
+
+    pub fn build_desired(
+        settings: &CollectionSettings,
+        descriptors: &[ProviderDescriptor],
+    ) -> Self {
+        Self::build_with_capability_filter(settings, descriptors, false)
+    }
+
+    fn build_with_capability_filter(
+        settings: &CollectionSettings,
+        descriptors: &[ProviderDescriptor],
+        filter_unsupported: bool,
+    ) -> Self {
         let requested_categories: BTreeSet<_> =
             settings.enabled_categories.iter().copied().collect();
         let disabled_providers: BTreeSet<_> = settings
@@ -104,7 +120,8 @@ impl CollectionPlan {
                 .iter()
                 .filter(|capability| {
                     !provider_disabled
-                        && capability.support_status == CapabilitySupportStatus::Supported
+                        && (!filter_unsupported
+                            || capability.support_status == CapabilitySupportStatus::Supported)
                         && requested_categories.contains(&capability.category)
                 })
                 .map(|capability| capability.category)
@@ -679,6 +696,7 @@ enum ProviderRetryAction {
 
 pub struct ProviderHost {
     providers: BTreeMap<String, ProviderRuntime>,
+    desired_plan: CollectionPlan,
     plan: CollectionPlan,
     paused: bool,
     shutting_down: bool,
@@ -720,6 +738,7 @@ impl ProviderHost {
         }
         Self {
             providers: runtimes,
+            desired_plan: CollectionPlan::default(),
             plan: CollectionPlan::default(),
             paused: false,
             shutting_down: false,
@@ -727,12 +746,12 @@ impl ProviderHost {
     }
 
     #[allow(dead_code)]
-    pub fn probe_all(&mut self, deadline: Instant) {
+    pub fn probe_all(&mut self) {
         let requested_categories: BTreeSet<_> = MetricCategory::ALL.into_iter().collect();
-        self.probe_all_with_categories(deadline, &requested_categories, &BTreeSet::new());
+        self.probe_all_with_categories(&requested_categories, &BTreeSet::new());
     }
 
-    pub fn probe_all_for_settings(&mut self, deadline: Instant, settings: &CollectionSettings) {
+    pub fn probe_all_for_settings(&mut self, settings: &CollectionSettings) {
         let requested_categories: BTreeSet<_> =
             settings.enabled_categories.iter().copied().collect();
         let disabled_providers: BTreeSet<_> = settings
@@ -740,69 +759,81 @@ impl ProviderHost {
             .iter()
             .map(|provider| provider.trim().to_lowercase())
             .collect();
-        self.probe_all_with_categories(deadline, &requested_categories, &disabled_providers);
+        self.probe_all_with_categories(&requested_categories, &disabled_providers);
     }
 
     fn probe_all_with_categories(
         &mut self,
-        deadline: Instant,
         requested_categories: &BTreeSet<MetricCategory>,
         disabled_providers: &BTreeSet<String>,
     ) {
         let provider_ids: Vec<_> = self.providers.keys().cloned().collect();
         for provider_id in provider_ids {
-            let control_deadline = per_provider_deadline(deadline);
             if let Some(runtime) = self.providers.get_mut(&provider_id) {
                 runtime.probe_generation = runtime.probe_generation.saturating_add(1);
             }
-            self.reconcile_pending_for(&provider_id, control_deadline, Instant::now());
-            let Some(runtime) = self.providers.get_mut(&provider_id) else {
-                continue;
-            };
-            if runtime.executor.pending() {
-                continue;
-            }
-            let provider_key = runtime.descriptor.id.trim().to_lowercase();
-            let requested_categories = if disabled_providers.contains(&provider_key) {
-                Arc::new(BTreeSet::new())
-            } else {
-                Arc::new(requested_categories.clone())
-            };
-            let generation = runtime.probe_generation;
-            match runtime
-                .executor
-                .probe(generation, control_deadline, requested_categories)
-            {
-                Ok((capabilities, health)) => {
-                    runtime.descriptor.capabilities = capabilities;
-                    runtime.provider_health = health;
-                    runtime.probe_failed = false;
-                    runtime.consecutive_failures = 0;
-                    runtime.last_error = None;
-                    if !runtime.started {
-                        runtime.lifecycle = ProviderLifecycleState::Stopped;
+            // Draining an older pending call is its own bounded operation. If it
+            // completes just before the budget expires, the new probe still gets a
+            // full independent control budget.
+            self.reconcile_pending_for(&provider_id, normal_control_deadline(), Instant::now());
+            let control_deadline = normal_control_deadline();
+            let capability_changed = {
+                let Some(runtime) = self.providers.get_mut(&provider_id) else {
+                    continue;
+                };
+                if runtime.executor.pending() {
+                    continue;
+                }
+                let provider_key = runtime.descriptor.id.trim().to_lowercase();
+                let requested_categories = if disabled_providers.contains(&provider_key) {
+                    Arc::new(BTreeSet::new())
+                } else {
+                    Arc::new(requested_categories.clone())
+                };
+                let generation = runtime.probe_generation;
+                match runtime
+                    .executor
+                    .probe(generation, control_deadline, requested_categories)
+                {
+                    Ok((capabilities, health)) => {
+                        let capability_changed = runtime.descriptor.capabilities != capabilities;
+                        runtime.descriptor.capabilities = capabilities;
+                        runtime.provider_health = health;
+                        runtime.probe_failed = false;
+                        runtime.consecutive_failures = 0;
+                        runtime.last_error = None;
+                        if !runtime.started {
+                            runtime.lifecycle = ProviderLifecycleState::Stopped;
+                        }
+                        capability_changed
+                    }
+                    Err(error) => {
+                        let previous = runtime.descriptor.capabilities.clone();
+                        record_failure(runtime, error.clone());
+                        runtime.probe_failed = true;
+                        runtime.descriptor.capabilities = runtime
+                            .descriptor
+                            .capabilities
+                            .iter()
+                            .cloned()
+                            .map(|mut capability| {
+                                if capability.support_status == CapabilitySupportStatus::Supported {
+                                    capability.support_status =
+                                        CapabilitySupportStatus::Unsupported;
+                                    capability.reason_code = Some(error.code);
+                                }
+                                capability
+                            })
+                            .collect();
+                        runtime.lifecycle = ProviderLifecycleState::Failed;
+                        runtime.retry_action = None;
+                        runtime.retry_at = None;
+                        previous != runtime.descriptor.capabilities
                     }
                 }
-                Err(error) => {
-                    record_failure(runtime, error.clone());
-                    runtime.probe_failed = true;
-                    runtime.descriptor.capabilities = runtime
-                        .descriptor
-                        .capabilities
-                        .iter()
-                        .cloned()
-                        .map(|mut capability| {
-                            if capability.support_status == CapabilitySupportStatus::Supported {
-                                capability.support_status = CapabilitySupportStatus::Unsupported;
-                                capability.reason_code = Some(error.code);
-                            }
-                            capability
-                        })
-                        .collect();
-                    runtime.lifecycle = ProviderLifecycleState::Failed;
-                    runtime.retry_action = None;
-                    runtime.retry_at = None;
-                }
+            };
+            if capability_changed {
+                self.sync_plan_with_capabilities(&provider_id, Instant::now());
             }
         }
     }
@@ -858,6 +889,8 @@ impl ProviderHost {
                     match completion.reply {
                         ProviderReply::Probe { result, health } => match result {
                             Ok(capabilities) => {
+                                capability_changed =
+                                    runtime.descriptor.capabilities != capabilities;
                                 runtime.descriptor.capabilities = capabilities;
                                 runtime.provider_health = health;
                                 runtime.probe_failed = false;
@@ -868,16 +901,22 @@ impl ProviderHost {
                                 }
                             }
                             Err(error) => {
+                                let previous = runtime.descriptor.capabilities.clone();
                                 record_probe_failure(runtime, error);
+                                capability_changed = previous != runtime.descriptor.capabilities;
                             }
                         },
-                        _ => record_probe_failure(
-                            runtime,
-                            ProviderError::new(
-                                ProviderErrorCode::ProviderMissing,
-                                "invalid provider probe reply",
-                            ),
-                        ),
+                        _ => {
+                            let previous = runtime.descriptor.capabilities.clone();
+                            record_probe_failure(
+                                runtime,
+                                ProviderError::new(
+                                    ProviderErrorCode::ProviderMissing,
+                                    "invalid provider probe reply",
+                                ),
+                            );
+                            capability_changed = previous != runtime.descriptor.capabilities;
+                        }
                     }
                 }
                 ProviderOperation::Sample => {
@@ -1006,14 +1045,32 @@ impl ProviderHost {
                             runtime.stop_failure = runtime.last_error.clone();
                             runtime.lifecycle = ProviderLifecycleState::Failed;
                             runtime.next_sample_at = None;
-                            clear_retry(runtime);
+                            if desired_active {
+                                // A stale stop failure must not strand a newly enabled
+                                // provider. Reconfigure performs cleanup-before-start for
+                                // providers whose native stop state is uncertain.
+                                runtime.retry_action = Some(ProviderRetryAction::Reconfigure);
+                                let interval_ms = runtime
+                                    .plan
+                                    .as_ref()
+                                    .map(|plan| plan.interval_ms)
+                                    .unwrap_or(1);
+                                runtime.retry_at = Some(
+                                    now + failure_backoff(
+                                        interval_ms,
+                                        runtime.consecutive_failures,
+                                    ),
+                                );
+                            } else {
+                                clear_retry(runtime);
+                            }
                         }
                     }
                 }
             }
         }
         if capability_changed {
-            self.sync_plan_with_capabilities(provider_id);
+            self.sync_plan_with_capabilities(provider_id, now);
             if let Some(runtime) = self.providers.get(provider_id) {
                 cleanup = cleanup
                     || (runtime.started
@@ -1040,19 +1097,27 @@ impl ProviderHost {
         }
     }
 
-    fn sync_plan_with_capabilities(&mut self, provider_id: &str) {
-        let capabilities = self
-            .providers
-            .get(provider_id)
-            .map(|runtime| runtime.descriptor.capabilities.clone());
-        let Some(capabilities) = capabilities else {
-            return;
-        };
-        if let Some(runtime) = self.providers.get_mut(provider_id) {
-            filter_plan_by_capabilities(runtime.plan.as_mut(), &capabilities);
+    fn effective_plan(&self) -> CollectionPlan {
+        let mut plan = self.desired_plan.clone();
+        for (provider_id, provider_plan) in &mut plan.providers {
+            if let Some(runtime) = self.providers.get(provider_id) {
+                filter_plan_by_capabilities(Some(provider_plan), &runtime.descriptor.capabilities);
+            }
         }
-        if let Some(plan) = self.plan.providers.get_mut(provider_id) {
-            filter_plan_by_capabilities(Some(plan), &capabilities);
+        plan
+    }
+
+    fn sync_plan_with_capabilities(&mut self, _provider_id: &str, now: Instant) {
+        let next_plan = self.effective_plan();
+        if self.shutting_down {
+            self.plan = next_plan.clone();
+            for (provider_id, runtime) in &mut self.providers {
+                runtime.plan = next_plan.providers.get(provider_id).cloned();
+            }
+            return;
+        }
+        if next_plan != self.plan {
+            self.apply_plan_inner(next_plan, now, false);
         }
     }
 
@@ -1068,8 +1133,15 @@ impl ProviderHost {
         &self.plan
     }
 
+    #[allow(dead_code)]
     pub fn apply_plan(&mut self, next_plan: CollectionPlan, now: Instant) {
+        self.desired_plan = next_plan.clone();
         self.apply_plan_inner(next_plan, now, false);
+    }
+
+    pub fn apply_desired_plan(&mut self, desired_plan: CollectionPlan, now: Instant) {
+        self.desired_plan = desired_plan;
+        self.apply_plan_inner(self.effective_plan(), now, false);
     }
 
     fn apply_plan_inner(&mut self, next_plan: CollectionPlan, now: Instant, force: bool) {
@@ -1104,7 +1176,7 @@ impl ProviderHost {
                 Instant::now() + PROVIDER_CONTROL_TIMEOUT,
                 now,
             );
-            let (paused, started, pending, generation) = {
+            let (paused, started, pending, generation, retry_action) = {
                 let Some(runtime) = self.providers.get_mut(&provider_id) else {
                     continue;
                 };
@@ -1130,6 +1202,7 @@ impl ProviderHost {
                         runtime.started,
                         runtime.executor.pending(),
                         runtime.generation,
+                        None,
                     )
                 } else if !next_provider_plan.enabled {
                     let stop_result = stop_runtime(
@@ -1149,6 +1222,7 @@ impl ProviderHost {
                         runtime.started,
                         runtime.executor.pending(),
                         runtime.generation,
+                        None,
                     )
                 } else {
                     (
@@ -1156,6 +1230,7 @@ impl ProviderHost {
                         runtime.started,
                         runtime.executor.pending(),
                         runtime.generation,
+                        runtime.retry_action,
                     )
                 }
             };
@@ -1168,15 +1243,20 @@ impl ProviderHost {
             if started && !plan_changed {
                 continue;
             }
-            let action = if started {
-                if let Some(runtime) = self.providers.get_mut(&provider_id) {
+            let action = retry_action.unwrap_or_else(|| {
+                if started {
+                    if let Some(runtime) = self.providers.get_mut(&provider_id) {
+                        runtime.started = false;
+                    }
+                    ProviderRetryAction::Reconfigure
+                } else {
+                    ProviderRetryAction::Start
+                }
+            });
+            if let Some(runtime) = self.providers.get_mut(&provider_id) {
+                if action == ProviderRetryAction::Reconfigure {
                     runtime.started = false;
                 }
-                ProviderRetryAction::Reconfigure
-            } else {
-                ProviderRetryAction::Start
-            };
-            if let Some(runtime) = self.providers.get_mut(&provider_id) {
                 attempt_start(
                     runtime,
                     &next_provider_plan,
@@ -1186,7 +1266,7 @@ impl ProviderHost {
                     Instant::now() + PROVIDER_CONTROL_TIMEOUT,
                 );
             }
-            self.sync_plan_with_capabilities(&provider_id);
+            self.sync_plan_with_capabilities(&provider_id, now);
             let should_cleanup = self.providers.get(&provider_id).is_some_and(|runtime| {
                 runtime.started && runtime.plan.as_ref().is_some_and(|plan| !plan.enabled)
             });
@@ -1255,7 +1335,7 @@ impl ProviderHost {
                         Instant::now() + PROVIDER_CONTROL_TIMEOUT,
                     );
                 }
-                self.sync_plan_with_capabilities(&provider_id);
+                self.sync_plan_with_capabilities(&provider_id, now);
             }
             let Some(runtime) = self.providers.get_mut(&provider_id) else {
                 continue;
@@ -1302,7 +1382,7 @@ impl ProviderHost {
         samples
     }
 
-    pub fn pause(&mut self, deadline: Instant) -> Result<(), ProviderError> {
+    pub fn pause(&mut self) -> Result<(), ProviderError> {
         if self.paused {
             return Ok(());
         }
@@ -1313,8 +1393,10 @@ impl ProviderHost {
             if let Some(runtime) = self.providers.get_mut(&provider_id) {
                 runtime.generation = runtime.generation.saturating_add(1);
             }
-            let provider_deadline = per_provider_deadline(deadline);
-            self.reconcile_pending_for(&provider_id, provider_deadline, Instant::now());
+            // Reconciliation and the pause stop are separate control calls; a
+            // late completion must not consume the stop operation's full budget.
+            self.reconcile_pending_for(&provider_id, normal_control_deadline(), Instant::now());
+            let provider_deadline = normal_control_deadline();
             let Some(runtime) = self.providers.get_mut(&provider_id) else {
                 continue;
             };
@@ -1341,7 +1423,7 @@ impl ProviderHost {
             return;
         }
         self.paused = false;
-        self.apply_plan_inner(self.plan.clone(), now, true);
+        self.apply_plan_inner(self.effective_plan(), now, true);
     }
 
     pub fn stop_all(&mut self, deadline: Instant) -> Result<(), ProviderError> {
@@ -1520,8 +1602,8 @@ fn filter_plan_by_capabilities(
     }
 }
 
-fn per_provider_deadline(outer_deadline: Instant) -> Instant {
-    std::cmp::min(outer_deadline, Instant::now() + PROVIDER_CONTROL_TIMEOUT)
+fn normal_control_deadline() -> Instant {
+    Instant::now() + PROVIDER_CONTROL_TIMEOUT
 }
 
 fn record_failure(runtime: &mut ProviderRuntime, error: ProviderError) {
@@ -1919,6 +2001,7 @@ mod tests {
         probe_gate: Option<Gate>,
         sample_gate: Option<Gate>,
         stop_failure: Option<ProviderErrorCode>,
+        stop_failures_remaining: Arc<Mutex<u32>>,
         stop_delay: Option<Duration>,
         stop_gate: Option<Gate>,
         probe_results: Arc<Mutex<VecDeque<Vec<ProviderCapabilitySpec>>>>,
@@ -1952,6 +2035,7 @@ mod tests {
                     probe_gate: None,
                     sample_gate: None,
                     stop_failure: None,
+                    stop_failures_remaining: Arc::new(Mutex::new(0)),
                     stop_delay: None,
                     stop_gate: None,
                     probe_results: Arc::new(Mutex::new(VecDeque::new())),
@@ -2022,6 +2106,13 @@ mod tests {
 
         fn stop_failure(mut self, code: ProviderErrorCode) -> Self {
             self.stop_failure = Some(code);
+            *self.stop_failures_remaining.lock().unwrap() = u32::MAX;
+            self
+        }
+
+        fn stop_failures(mut self, count: u32, code: ProviderErrorCode) -> Self {
+            self.stop_failure = Some(code);
+            *self.stop_failures_remaining.lock().unwrap() = count;
             self
         }
 
@@ -2180,7 +2271,20 @@ mod tests {
                 }
             }
             if let Some(code) = self.stop_failure {
-                return Err(ProviderError::without_message(code));
+                let should_fail = {
+                    let mut remaining = self.stop_failures_remaining.lock().unwrap();
+                    if *remaining == u32::MAX {
+                        true
+                    } else if *remaining > 0 {
+                        *remaining -= 1;
+                        true
+                    } else {
+                        false
+                    }
+                };
+                if should_fail {
+                    return Err(ProviderError::without_message(code));
+                }
             }
             Ok(())
         }
@@ -2199,6 +2303,10 @@ mod tests {
 
     fn plan_for(host: &ProviderHost, settings: &CollectionSettings) -> CollectionPlan {
         CollectionPlan::build(settings, &host.descriptors())
+    }
+
+    fn desired_plan_for(host: &ProviderHost, settings: &CollectionSettings) -> CollectionPlan {
+        CollectionPlan::build_desired(settings, &host.descriptors())
     }
 
     fn sample_at(host: &mut ProviderHost, at: Instant, timestamp_ms: i64) -> Vec<ProviderSample> {
@@ -2386,7 +2494,7 @@ mod tests {
         let (probe, calls) = FakeDiskProbe::new(Ok(()));
         let provider = WindowsBaselineProvider::with_disk_probe(Box::new(probe));
         let mut host = ProviderHost::new(vec![Box::new(provider)]);
-        host.probe_all(Instant::now() + Duration::from_secs(2));
+        host.probe_all();
         assert_eq!(*calls.lock().unwrap(), 1);
         let descriptor = &host.descriptors()[0];
         assert_eq!(
@@ -2404,7 +2512,7 @@ mod tests {
         let (probe, calls) = FakeDiskProbe::new(Err(ProviderErrorCode::ProviderMissing));
         let provider = WindowsBaselineProvider::with_disk_probe(Box::new(probe));
         let mut host = ProviderHost::new(vec![Box::new(provider)]);
-        host.probe_all(Instant::now() + Duration::from_secs(2));
+        host.probe_all();
         assert_eq!(*calls.lock().unwrap(), 1);
         let settings = settings_with(vec![
             MetricCategory::Cpu,
@@ -2474,7 +2582,7 @@ mod tests {
             MetricCategory::Disk,
             MetricCategory::Process,
         ]);
-        host.probe_all_for_settings(Instant::now() + Duration::from_secs(2), &settings);
+        host.probe_all_for_settings(&settings);
         let plan = plan_for(&host, &settings);
         assert!(plan
             .provider(WINDOWS_BASELINE_PROVIDER_ID)
@@ -2524,7 +2632,7 @@ mod tests {
             MetricCategory::Memory,
             MetricCategory::Process,
         ]);
-        host.probe_all_for_settings(Instant::now() + Duration::from_secs(2), &settings);
+        host.probe_all_for_settings(&settings);
         let plan = plan_for(&host, &settings);
         host.apply_plan(plan, Instant::now());
         assert_eq!(*calls.lock().unwrap(), 0);
@@ -2778,7 +2886,7 @@ mod tests {
         let enabled = settings_with(vec![MetricCategory::Cpu]);
         let now = Instant::now();
         host.apply_plan(plan_for(&host, &enabled), now);
-        assert!(host.pause(Instant::now() + Duration::from_secs(1)).is_err());
+        assert!(host.pause().is_err());
         gate.release();
 
         for index in 0..200 {
@@ -2897,14 +3005,101 @@ mod tests {
             .probe_gate(gate.clone())
             .probe_results(vec![vec![old_capability], vec![new_capability]]);
         let mut host = ProviderHost::new(vec![Box::new(provider)]);
-        let deadline = Instant::now() + Duration::from_secs(1);
-        host.probe_all(deadline);
-        host.probe_all(Instant::now() + Duration::from_secs(1));
+        host.probe_all();
+        host.probe_all();
         gate.release();
-        host.probe_all(Instant::now() + Duration::from_secs(1));
+        host.probe_all();
         assert_eq!(
             capability_for(&host.descriptors()[0], MetricCategory::Cpu).support_status,
             CapabilitySupportStatus::Supported
+        );
+    }
+
+    #[test]
+    fn late_probe_success_restores_desired_plan_and_starts_provider() {
+        let gate = Gate::new();
+        let (provider, counters) = FakeProvider::new(
+            "late-probe-restore",
+            vec![ProviderCapabilitySpec::supported(MetricCategory::Cpu)],
+            ProviderSchedule::Fixed(10),
+        );
+        let provider = provider.probe_gate(gate.clone());
+        let mut host = ProviderHost::new(vec![Box::new(provider)]);
+        let settings = settings_with(vec![MetricCategory::Cpu]);
+
+        host.probe_all_for_settings(&settings);
+        assert!(gate.entered());
+        host.apply_desired_plan(desired_plan_for(&host, &settings), Instant::now());
+        assert!(!host.plan().provider("late-probe-restore").unwrap().enabled);
+
+        gate.release();
+        for index in 0..200 {
+            let _ = sample_at(
+                &mut host,
+                Instant::now() + Duration::from_millis(index),
+                index as i64,
+            );
+            if host.statuses()[0].lifecycle == ProviderLifecycleState::Running {
+                break;
+            }
+            thread::yield_now();
+        }
+
+        assert_eq!(
+            capability_for(&host.descriptors()[0], MetricCategory::Cpu).support_status,
+            CapabilitySupportStatus::Supported
+        );
+        assert!(host.plan().provider("late-probe-restore").unwrap().enabled);
+        assert_eq!(counters.lock().unwrap().start_count, 1);
+        assert_eq!(
+            host.statuses()[0].lifecycle,
+            ProviderLifecycleState::Running
+        );
+    }
+
+    #[test]
+    fn late_probe_success_does_not_override_new_disabled_intent() {
+        let gate = Gate::new();
+        let (provider, counters) = FakeProvider::new(
+            "late-probe-disabled",
+            vec![ProviderCapabilitySpec::supported(MetricCategory::Cpu)],
+            ProviderSchedule::Fixed(10),
+        );
+        let provider = provider.probe_gate(gate.clone());
+        let mut host = ProviderHost::new(vec![Box::new(provider)]);
+        let enabled = settings_with(vec![MetricCategory::Cpu]);
+        host.probe_all_for_settings(&enabled);
+        assert!(gate.entered());
+        host.apply_desired_plan(desired_plan_for(&host, &enabled), Instant::now());
+        host.apply_desired_plan(
+            desired_plan_for(&host, &settings_with(Vec::new())),
+            Instant::now(),
+        );
+
+        gate.release();
+        for index in 0..200 {
+            let _ = sample_at(
+                &mut host,
+                Instant::now() + Duration::from_millis(index),
+                index as i64,
+            );
+            if capability_for(&host.descriptors()[0], MetricCategory::Cpu).support_status
+                == CapabilitySupportStatus::Supported
+            {
+                break;
+            }
+            thread::yield_now();
+        }
+
+        assert_eq!(
+            capability_for(&host.descriptors()[0], MetricCategory::Cpu).support_status,
+            CapabilitySupportStatus::Supported
+        );
+        assert!(!host.plan().provider("late-probe-disabled").unwrap().enabled);
+        assert_eq!(counters.lock().unwrap().start_count, 0);
+        assert_eq!(
+            host.statuses()[0].capabilities[0].state,
+            CapabilityState::SupportedDisabled
         );
     }
 
@@ -2982,7 +3177,7 @@ mod tests {
             ProviderSchedule::Fixed(10),
         );
         let mut host = ProviderHost::new(vec![Box::new(slow), Box::new(healthy)]);
-        host.probe_all(Instant::now() + Duration::from_secs(1));
+        host.probe_all();
         let healthy = host
             .descriptors()
             .into_iter()
@@ -2991,6 +3186,66 @@ mod tests {
         assert_eq!(
             capability_for(&healthy, MetricCategory::Memory).support_status,
             CapabilitySupportStatus::Supported
+        );
+    }
+
+    #[test]
+    fn slow_pause_stop_does_not_consume_next_provider_budget() {
+        let (slow, slow_counters) = FakeProvider::new(
+            "a-slow-pause-stop",
+            vec![ProviderCapabilitySpec::supported(MetricCategory::Cpu)],
+            ProviderSchedule::Fixed(10),
+        );
+        let slow = slow.stop_delay(Duration::from_millis(80));
+        let (healthy, healthy_counters) = FakeProvider::new(
+            "b-healthy-pause-stop",
+            vec![ProviderCapabilitySpec::supported(MetricCategory::Memory)],
+            ProviderSchedule::Fixed(10),
+        );
+        let mut host = ProviderHost::new(vec![Box::new(slow), Box::new(healthy)]);
+        let settings = settings_with(vec![MetricCategory::Cpu, MetricCategory::Memory]);
+        host.apply_plan(plan_for(&host, &settings), Instant::now());
+
+        assert!(host.pause().is_err());
+        assert_eq!(slow_counters.lock().unwrap().stop_count, 1);
+        assert_eq!(healthy_counters.lock().unwrap().stop_count, 1);
+        assert_eq!(
+            host.statuses()
+                .into_iter()
+                .find(|status| status.provider_id == "b-healthy-pause-stop")
+                .unwrap()
+                .lifecycle,
+            ProviderLifecycleState::Paused
+        );
+    }
+
+    #[test]
+    fn slow_disable_stop_does_not_consume_next_provider_budget() {
+        let (slow, slow_counters) = FakeProvider::new(
+            "a-slow-disable-stop",
+            vec![ProviderCapabilitySpec::supported(MetricCategory::Cpu)],
+            ProviderSchedule::Fixed(10),
+        );
+        let slow = slow.stop_delay(Duration::from_millis(80));
+        let (healthy, healthy_counters) = FakeProvider::new(
+            "b-healthy-disable-stop",
+            vec![ProviderCapabilitySpec::supported(MetricCategory::Memory)],
+            ProviderSchedule::Fixed(10),
+        );
+        let mut host = ProviderHost::new(vec![Box::new(slow), Box::new(healthy)]);
+        let enabled = settings_with(vec![MetricCategory::Cpu, MetricCategory::Memory]);
+        host.apply_plan(plan_for(&host, &enabled), Instant::now());
+        host.apply_plan(plan_for(&host, &settings_with(Vec::new())), Instant::now());
+
+        assert_eq!(slow_counters.lock().unwrap().stop_count, 1);
+        assert_eq!(healthy_counters.lock().unwrap().stop_count, 1);
+        assert_eq!(
+            host.statuses()
+                .into_iter()
+                .find(|status| status.provider_id == "b-healthy-disable-stop")
+                .unwrap()
+                .lifecycle,
+            ProviderLifecycleState::Stopped
         );
     }
 
@@ -3054,7 +3309,7 @@ mod tests {
         let settings = settings_with(vec![MetricCategory::Cpu]);
         let now = Instant::now();
         host.apply_plan(plan_for(&host, &settings), now);
-        host.pause(Instant::now() + Duration::from_secs(2)).unwrap();
+        host.pause().unwrap();
         assert_eq!(host.statuses()[0].lifecycle, ProviderLifecycleState::Paused);
         assert!(sample_at(&mut host, now + Duration::from_secs(1), 1).is_empty());
         assert_eq!(counters.lock().unwrap().start_count, 1);
@@ -3157,6 +3412,151 @@ mod tests {
     }
 
     #[test]
+    fn disabled_stop_failure_stays_failed_without_retry() {
+        let (provider, counters) = FakeProvider::new(
+            "disabled-stop-fails",
+            vec![ProviderCapabilitySpec::supported(MetricCategory::Cpu)],
+            ProviderSchedule::Fixed(10),
+        );
+        let provider = provider.stop_failure(ProviderErrorCode::StopFailed);
+        let mut host = ProviderHost::new(vec![Box::new(provider)]);
+        let enabled = settings_with(vec![MetricCategory::Cpu]);
+        host.apply_plan(plan_for(&host, &enabled), Instant::now());
+        host.apply_plan(plan_for(&host, &settings_with(Vec::new())), Instant::now());
+        assert_eq!(counters.lock().unwrap().stop_count, 1);
+        assert_eq!(host.statuses()[0].lifecycle, ProviderLifecycleState::Failed);
+
+        let _ = sample_at(&mut host, Instant::now() + Duration::from_secs(1), 1);
+        assert_eq!(counters.lock().unwrap().stop_count, 1);
+        assert_eq!(host.statuses()[0].lifecycle, ProviderLifecycleState::Failed);
+        assert_eq!(
+            host.statuses()[0].last_error.as_ref().unwrap().code,
+            ProviderErrorCode::StopFailed
+        );
+    }
+
+    #[test]
+    fn stale_stop_failure_with_reenable_schedules_bounded_recovery() {
+        let gate = Gate::new();
+        let (provider, counters) = FakeProvider::new(
+            "stale-stop-failure",
+            vec![ProviderCapabilitySpec::supported(MetricCategory::Cpu)],
+            ProviderSchedule::Fixed(10),
+        );
+        let provider = provider
+            .stop_failures(1, ProviderErrorCode::StopFailed)
+            .stop_gate(gate.clone());
+        let mut host = ProviderHost::new(vec![Box::new(provider)]);
+        let enabled = settings_with(vec![MetricCategory::Cpu]);
+        let now = Instant::now();
+        host.apply_plan(plan_for(&host, &enabled), now);
+        host.apply_plan(
+            plan_for(&host, &settings_with(Vec::new())),
+            now + Duration::from_millis(1),
+        );
+        assert_eq!(counters.lock().unwrap().stop_count, 1);
+
+        host.apply_plan(plan_for(&host, &enabled), now + Duration::from_millis(2));
+        gate.release();
+        for index in 0..200 {
+            let _ = sample_at(
+                &mut host,
+                now + Duration::from_millis(20 + index * 20),
+                index as i64,
+            );
+            let counters = counters.lock().unwrap();
+            if counters.reconfigure_count >= 1
+                && host.statuses()[0].lifecycle == ProviderLifecycleState::Running
+            {
+                break;
+            }
+            drop(counters);
+            thread::yield_now();
+        }
+
+        let counters = counters.lock().unwrap();
+        assert_eq!(counters.start_count, 2);
+        assert_eq!(counters.reconfigure_count, 1);
+        assert_eq!(counters.stop_count, 2);
+        assert_eq!(
+            host.statuses()[0].lifecycle,
+            ProviderLifecycleState::Running
+        );
+        assert!(host.statuses()[0].failure_count >= 1);
+    }
+
+    #[test]
+    fn stop_failure_consumed_during_reenable_apply_uses_cleanup_reconfigure() {
+        let gate = Gate::new();
+        let (provider, counters) = FakeProvider::new(
+            "stop-failure-during-reenable",
+            vec![ProviderCapabilitySpec::supported(MetricCategory::Cpu)],
+            ProviderSchedule::Fixed(10),
+        );
+        let provider = provider
+            .stop_failures(1, ProviderErrorCode::StopFailed)
+            .stop_gate(gate.clone());
+        let mut host = ProviderHost::new(vec![Box::new(provider)]);
+        let enabled = settings_with(vec![MetricCategory::Cpu]);
+        let now = Instant::now();
+
+        host.apply_plan(plan_for(&host, &enabled), now);
+        host.apply_plan(
+            plan_for(&host, &settings_with(Vec::new())),
+            now + Duration::from_millis(1),
+        );
+        gate.release();
+
+        host.apply_plan(plan_for(&host, &enabled), now + Duration::from_millis(2));
+
+        let counters = counters.lock().unwrap();
+        assert_eq!(counters.start_count, 2);
+        assert_eq!(counters.reconfigure_count, 1);
+        assert_eq!(counters.stop_count, 2);
+        assert_eq!(
+            host.statuses()[0].lifecycle,
+            ProviderLifecycleState::Running
+        );
+    }
+
+    #[test]
+    fn late_stop_failure_while_paused_does_not_restart_provider() {
+        let gate = Gate::new();
+        let (provider, counters) = FakeProvider::new(
+            "paused-stop-failure",
+            vec![ProviderCapabilitySpec::supported(MetricCategory::Cpu)],
+            ProviderSchedule::Fixed(10),
+        );
+        let provider = provider
+            .stop_failures(1, ProviderErrorCode::StopFailed)
+            .stop_gate(gate.clone());
+        let mut host = ProviderHost::new(vec![Box::new(provider)]);
+        let enabled = settings_with(vec![MetricCategory::Cpu]);
+        host.apply_plan(plan_for(&host, &enabled), Instant::now());
+        assert!(host.pause().is_err());
+        gate.release();
+
+        for index in 0..100 {
+            let _ = sample_at(
+                &mut host,
+                Instant::now() + Duration::from_millis(index),
+                index as i64,
+            );
+            if host.statuses()[0].lifecycle == ProviderLifecycleState::Failed {
+                break;
+            }
+            thread::yield_now();
+        }
+
+        assert_eq!(counters.lock().unwrap().start_count, 1);
+        assert_eq!(counters.lock().unwrap().reconfigure_count, 0);
+        assert_ne!(
+            host.statuses()[0].lifecycle,
+            ProviderLifecycleState::Running
+        );
+    }
+
+    #[test]
     fn stop_timeout_does_not_wait_past_deadline() {
         let (provider, counters) = FakeProvider::new(
             "stop-timeout",
@@ -3206,7 +3606,7 @@ mod tests {
         assert_eq!(system_counters.lock().unwrap().reconfigure_count, 1);
         assert_eq!(fixed_counters.lock().unwrap().stop_count, 0);
 
-        host.pause(Instant::now() + Duration::from_secs(2)).unwrap();
+        host.pause().unwrap();
         assert!(host.plan().provider("system").unwrap().enabled);
         assert_eq!(host.statuses()[1].lifecycle, ProviderLifecycleState::Paused);
         host.resume(start + Duration::from_millis(2));

@@ -44,6 +44,10 @@ PR-03 的 CollectionPlan 由以下输入生成：
 
 Plan 只在 startup、settings reload 或相关 capability 变化时重建；sample hot path 消费已编译的 plan，不每次 heartbeat 全量重建。
 
+ProviderHost 内部把三种状态分开：`desired plan` 保存用户 settings、provider/category 开关和采样周期，是用户 intent 的唯一来源；`effective plan` 是 desired plan 与当前 capability/policy 的交集，只有它进入 active sample path；runtime state 则记录 observed 的 `Stopped`、`Running`、`Failed`、`Paused` 以及 pending lifecycle operation。能力暂时不可用时只改变 effective plan，不丢失 desired intent，因此 current-generation 的 late probe 从 `Unsupported` 恢复为 `Supported` 后，可以重新计算并恢复用户仍然启用的类别；如果用户已经 disable、pause 或 shutdown，则只恢复 capability truth，不启动 provider。
+
+`CollectionPlan::build_desired` 不过滤 unsupported capability；Host 在 apply 时生成 effective plan。对外暴露的 `plan()` 和 status 反映 effective/runtime truth，不能从已经过滤的 plan 反推用户 intent。
+
 普通用户只选择轻量、均衡、详细预设；高级模式才覆盖类别或指标周期。系统进入 Windows 节能模式时，默认将均衡计划切换为轻量计划；退出节能模式后恢复。此自动行为可以关闭，事件类采集不因计划降频。
 
 ## 启停语义
@@ -92,10 +96,13 @@ Windows 原始进程 CPU time 保留为内部单调累计计数，采样时计�
 PR-03 提供项目内部的 Provider contract，而不是动态插件系统：
 
 - `ProviderHost` 在编译 CollectionPlan 前执行 provider `probe`，并用实际 capability 结果生成 plan；静态 descriptor 只是 probe 的初始 contract，不是最终可用性结论。Probe 可接收当前 settings 请求的类别范围，因此用户禁用的可选类别不会为了 capability 检查而建立采集 query；重新启用时再进行 probe。
+- 普通 `probe_all_for_settings(settings)` 和 `pause()` 不接收一个含义模糊的 outer deadline；每个 Provider 在进入 probe/stop 等 control call 前单独生成 bounded operation budget。只有 `stop_all(shutdown_deadline)` 使用 collector 传入的单一绝对 shutdown deadline，避免普通操作共享总预算，也避免 shutdown 按 Provider 数量延长。
 - executor worker 为 `probe/start/reconfigure/sample/stop` 提供 bounded wait；sample、startup、reconfigure 使用 bounded exponential backoff，最大 60 秒；不合作的超时调用不会拖住 collector 或 foreground/computer-state timeline。
 - `ProviderHost` 只对受影响的 provider 应用 start/stop/reconfigure delta。未变化的 settings 不重复启动或停止 provider；pause 会取消 retry、释放已启动资源，resume 按用户仍启用的 plan 重新 start。
 - stop 返回结果并进入 health/status；shutdown 把同一个绝对 deadline 传给所有 provider，stop failure 不无限重试，也不能被伪装成正常 `Stopped`。
 - timed-out lifecycle call 可以在隔离 worker 中继续完成；late Start/Reconfigure 成功会恢复实际 lifecycle 或触发一次针对当前 intent 的 reconcile，late failure 才进入当前 generation 的 bounded retry。Disable、pause、shutdown 和更新后的 plan 具有更高的 intent generation，旧完成不能恢复 Running；如果旧调用已经获得资源，Host 会在同一受控边界内清理。
+- late Probe 只有在当前 probe generation 下才能更新 canonical descriptor；如果 capability truth 发生变化，Host 从保存的 desired plan 重新计算 effective plan，可恢复或移除 active category，并按当前 pause/shutdown/user intent 进入正常 lifecycle。旧 generation 的 probe 结果只会被丢弃，不会覆盖 descriptor 或 plan。
+- late Stop failure 也按当前 intent reconcile：用户仍 disabled 时保持 Failed/StopFailed 且不无限重试；用户在旧 Stop pending 期间重新 enable 时，Host 为当前 intent 安排有界 `Reconfigure` recovery，以 cleanup-before-start 的路径恢复 Running；pause/shutdown 优先级更高，不会因旧 completion 安排新的 start。
 - start/reconfigure 返回的 capability outcome 会更新 Host 的 canonical descriptor 和 active CollectionPlan。因 TOCTOU 导致的 Disk runtime unavailable 会从 plan 移除 Disk，但不会无条件判死 CPU、memory、process。
 - Windows baseline 按当前 settings 请求的类别在 probe 阶段验证 PDH disk query/counter 初始化；不可用时仅 disk 进入 unsupported/reason，CPU、memory、process 仍可运行。合法磁盘吞吐 `0` 仍是值，不表示 unavailable。
 - fake provider tests 覆盖 supported/disabled/unsupported/failed、真正停止采样、重新启用、startup/reconfigure retry、timeout 隔离、stop failure/timeout、Disk probe、pause 语义和 shutdown 幂等停止。

@@ -489,9 +489,9 @@ fn run_collector(
         .with_writer(writer::collection_settings)
         .unwrap_or_default();
     let mut provider_host = ProviderHost::new(vec![Box::new(WindowsBaselineProvider::new())]);
-    provider_host.probe_all_for_settings(Instant::now() + Duration::from_secs(2), &settings);
-    provider_host.apply_plan(
-        CollectionPlan::build(&settings, &provider_host.descriptors()),
+    provider_host.probe_all_for_settings(&settings);
+    provider_host.apply_desired_plan(
+        CollectionPlan::build_desired(&settings, &provider_host.descriptors()),
         Instant::now(),
     );
     sync_provider_status(&status, provider_host.statuses());
@@ -722,8 +722,7 @@ fn run_collector(
                     value.last_heartbeat_at_ms = Some(now);
                 }
                 if paused {
-                    if let Err(error) = provider_host.pause(Instant::now() + Duration::from_secs(2))
-                    {
+                    if let Err(error) = provider_host.pause() {
                         eprintln!("collector provider pause failed: {error:?}");
                     }
                 } else {
@@ -741,10 +740,9 @@ fn run_collector(
                     .with_writer(|conn| writer::save_collection_settings(conn, &next, now))
                     .map_err(|error| error.to_string());
                 if result.is_ok() {
-                    provider_host
-                        .probe_all_for_settings(Instant::now() + Duration::from_secs(2), &next);
-                    provider_host.apply_plan(
-                        CollectionPlan::build(&next, &provider_host.descriptors()),
+                    provider_host.probe_all_for_settings(&next);
+                    provider_host.apply_desired_plan(
+                        CollectionPlan::build_desired(&next, &provider_host.descriptors()),
                         Instant::now(),
                     );
                     settings = next;
