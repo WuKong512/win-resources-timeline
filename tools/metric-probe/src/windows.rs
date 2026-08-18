@@ -56,6 +56,7 @@ pub enum ReadStatus {
     PermissionDenied,
     ProviderMissing,
     Failed,
+    RuntimeFailed,
 }
 
 #[derive(Debug, Clone)]
@@ -837,6 +838,7 @@ fn record_process_failure(
         ReadStatus::PermissionDenied => summary.permission_denied += 1,
         ReadStatus::Failed if is_process_race_reason(reason_code) => summary.raced += 1,
         ReadStatus::Failed => summary.probe_failed += 1,
+        ReadStatus::RuntimeFailed => summary.probe_failed += 1,
         ReadStatus::Value | ReadStatus::Unsupported | ReadStatus::ProviderMissing => {}
     }
 }
@@ -982,6 +984,7 @@ fn support_status(status: ReadStatus) -> SupportStatus {
         ReadStatus::PermissionDenied => SupportStatus::PermissionDenied,
         ReadStatus::ProviderMissing => SupportStatus::ProviderMissing,
         ReadStatus::Failed => SupportStatus::ProbeFailed,
+        ReadStatus::RuntimeFailed => SupportStatus::RuntimeFailed,
     }
 }
 

@@ -12,6 +12,8 @@ pub enum SupportStatus {
     PermissionDenied,
     ProviderMissing,
     ProbeFailed,
+    RuntimeFailed,
+    Disabled,
 }
 
 impl SupportStatus {
@@ -65,6 +67,7 @@ pub struct MetricRecord {
     pub call_latency_ms: Distribution,
     pub source: String,
     pub known_semantic_limitations: Vec<String>,
+    pub failure_reasons: BTreeMap<String, usize>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub latest_value: Option<f64>,
     pub samples: Vec<MetricSample>,
@@ -102,6 +105,7 @@ impl MetricRecord {
             call_latency_ms: Distribution::from_values(&[]),
             source: source.into(),
             known_semantic_limitations,
+            failure_reasons: BTreeMap::new(),
             latest_value: None,
             samples: Vec::new(),
             interval_values: Vec::new(),
@@ -153,6 +157,7 @@ impl MetricRecord {
         call_latency_ms: f64,
     ) {
         self.failed_sample_count += 1;
+        *self.failure_reasons.entry(reason_code.clone()).or_insert(0) += 1;
         self.latency_values.push(call_latency_ms);
         self.call_latency_ms = Distribution::from_values(&self.latency_values);
         if self.sample_count == 0 && self.support_status.is_successful() {
