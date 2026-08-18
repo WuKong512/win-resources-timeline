@@ -15,7 +15,8 @@ This report adds evidence alongside the existing 60-second development-machine r
 - Physical memory: 33,996,718,080 bytes
 - GPU: NVIDIA GeForce RTX 5070 Ti
 - NVIDIA driver: 610.88
-- Long and deterministic runs: non-administrator process, `elevated=false`
+- Existing long and deterministic runs: non-administrator process, `elevated=false`
+- Administrator comparison: independent PowerShell role check returned `IsInRole(Administrator) = True`; the probe read `machine.elevated = true`
 - Power scope: `gpu_board`; the power metric is not whole-system or wall power
 
 ## Evidence Matrix
@@ -24,8 +25,8 @@ This report adds evidence alongside the existing 60-second development-machine r
 |---|---|
 | 60 s non-admin enabled | PASS |
 | 60 s disabled control | PASS |
-| Administrator comparison | PENDING: attempted normal UAC launch still reported `elevated=false` |
-| 30 min idle | PASS on this machine |
+| Administrator comparison | PASS: valid elevated token, stable sampling, and no material short-run regression |
+| 30 min idle | PASS |
 | 30 min representative load | PASS for the observed ordinary Chrome/desktop window; not a stress test |
 | Enable-disable-re-enable | PASS |
 | Shutdown / cleanup | PASS for exercised sessions |
@@ -34,11 +35,11 @@ This report adds evidence alongside the existing 60-second development-machine r
 | Transient metric failure isolation | PASS: deterministic timeout injection and recovery |
 | Init-time fatal runtime failure | PASS: deterministic GPU-lost initialization injection |
 | Sampling-stage fatal runtime failure | PASS: deterministic GPU-lost sampling injection |
-| Sleep / wake | PENDING: manual evidence required; not safely automated here |
-| Low-power state | Not applicable / not exercised on this desktop |
-| 24 h soak | DEFERRED to PR-07 release validation |
-| Database-growth soak | DEFERRED to PR-07 release validation |
-| Cross-hardware NVIDIA | DEFERRED; this is one RTX 5070 Ti |
+| Sleep / wake | PASS: real Windows Sleep -> Wake with bounded dropped samples and post-wake recovery |
+| Low-power state | N/A / not exercised |
+| 24 h soak | DEFERRED |
+| Database-growth soak | DEFERRED |
+| Cross-hardware NVIDIA | DEFERRED |
 | AMD | DEFERRED |
 | Intel | DEFERRED |
 
@@ -77,17 +78,22 @@ Release run, non-admin, from `2026-08-18T05:22:25Z` through `2026-08-18T05:52:25
 
 ## Administrator Comparison
 
-A same-configuration 60-second run was launched through the normal Windows `Start-Process -Verb RunAs` path from `2026-08-18T05:19:04Z` through `2026-08-18T05:20:04Z` UTC. Its report recorded `elevated=false`, so it is not a valid administrator comparison and is not marked PASS. It nevertheless showed the same device discovery, eight supported metrics, 30/30 samples, zero drops, zero failures and similar resource counts as the non-admin short run. This observation is correlation only, not evidence that elevation has no effect.
+A valid same-configuration 60-second Release run was executed from a PowerShell session independently confirmed as Administrator:
 
-Manual administrator procedure:
+`[Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator) = True`
 
-```powershell
-Start-Process powershell -Verb RunAs -ArgumentList '-NoProfile','-Command','tools\metric-probe\target\release\metric-probe.exe run --duration-seconds 60 --core-interval-ms 2000 --output-dir artifacts/metric-probe/spike-01b-admin-manual --no-process-probe --no-disk-probe --no-network-probe --no-power-probe'
-$r = Get-Content artifacts/metric-probe/spike-01b-admin-manual/report.json | ConvertFrom-Json
-$r.machine.elevated
-```
+The probe itself read the actual process token as `machine.elevated = true`.
 
-The result is valid only when the final command prints `True` and the same configuration is used.
+- Configuration: 60 seconds, 2000 ms interval, non-GPU probe categories disabled.
+- Core samples: 30 expected, 30 executed, 0 dropped.
+- Late wakeups: 0.
+- All eight NVIDIA NVML metrics: `supported`, 30 successful samples and 0 failed samples each.
+- Average probe CPU share: approximately 0.101042%; peak approximately 0.146484%.
+- Working set: 30,695,424 bytes start, 30,740,480 bytes peak, 30,711,808 bytes end; end-minus-start +16,384 bytes.
+- Threads: 4 start, 4 peak, 1 end.
+- Handles: 122 start, average, peak and end; delta 0.
+
+No material capability, sampling-stability, or resource-behavior regression was observed relative to the non-administrator short run on this development machine. This result is limited to this machine and does not establish uniform permission behavior for all NVIDIA devices. An earlier elevation attempt that reported `elevated=false` is historical only and is superseded by this valid token-confirmed comparison.
 
 ## Lifecycle And Cleanup
 
@@ -129,30 +135,43 @@ The injected initialization returned `runtime_failed` with reason `nvml_gpu_lost
 
 The provider initialized successfully and completed one normal sample. The next injected utilization call returned `NVML_ERROR_GPU_IS_LOST`, which mapped to `runtime_failed` / `nvml_gpu_lost`; the failed sample had no numeric value, other metric calls continued for that bounded sample, the exact expected metric-call count showed no synchronous retry loop, and shutdown/library release completed. This is deterministic probe-only boundary evidence, not evidence that the physical GPU was actually lost.
 
-## Sleep / Wake Manual Evidence
+## Real Windows Sleep / Wake
 
-This Codex execution environment did not safely initiate and observe Windows sleep/wake, so this item is explicitly `PENDING`, not PASS. No previous GPU value should be filled across the sleep interval.
+A 900-second non-administrator Release probe was run across a real Windows Sleep -> Wake cycle using the normal Windows power action. No simulated thread sleep or timestamp injection was used.
 
-Manual procedure:
+Scheduler evidence:
 
-1. Start the Release probe for at least 900 seconds with the same GPU-only configuration.
-2. After the first several samples, use the normal Windows Start > Power > Sleep action.
-3. Wake the machine, allow the probe to continue, and let it finish.
-4. Run the following result command against the raw report:
+- Wall duration: 900,000 ms.
+- Core samples: 450 expected, 386 executed, 64 dropped; the accounting closes exactly: `450 = 386 + 64`.
+- Late wakeups: 1.
+- Maximum timestamp gap: 133,866 ms (133.866 seconds).
+- Last pre-sleep utilization sample: `2026-08-18 20:49:48 +08:00`.
+- First post-wake utilization sample: `2026-08-18 20:52:02 +08:00`.
+- Normal surrounding interval: approximately 2 seconds.
 
-```powershell
-$r = Get-Content artifacts/metric-probe/spike-01b-sleep-wake-manual/report.json | ConvertFrom-Json; $m = $r.metrics | Where-Object { $_.provider -eq 'nvidia-nvml' -and $_.metric_key -eq 'gpu.utilization_percent' }; $p = @($m.samples | Sort-Object timestamp_ms); $gaps = for ($i = 1; $i -lt $p.Count; $i++) { [pscustomobject]@{ gap_ms = $p[$i].timestamp_ms - $p[$i-1].timestamp_ms; previous_ms = $p[$i-1].timestamp_ms; current_ms = $p[$i].timestamp_ms } }; $gaps | Sort-Object gap_ms -Descending | Select-Object -First 5; $r.sampling; $m.support_status; $m.reason_code
-```
+The approximately 133.9-second gap is consistent with the manually performed Windows sleep window. A timestamp gap alone would not prove sleep; this result is accepted as Sleep/Wake evidence because the user actually executed the Windows Sleep -> Wake action. The probe did not backfill or fabricate continuous 2-second samples across the sleep interval. Missed periods were recorded as dropped samples.
 
-The manual result must record the last pre-sleep timestamp, first post-wake timestamp, gap, first post-wake NVML result, whether re-init was necessary, absence of fabricated duplicate samples, and final cleanup. A scheduling gap alone must not be labeled as sleep.
+Wake recovery evidence:
+
+- The first post-wake utilization sample was a valid numeric value of 5%, followed by 4%, 9%, 1%, 1%, and 1% at the normal cadence.
+- Utilization had 384 successful samples and 384 unique timestamps; no duplicate timestamp or sleep-gap fabricated sample was observed.
+- Temperature: 386 successful samples, 0 failed.
+- VRAM used: 386 successful samples, 0 failed.
+- VRAM total: 386 successful samples, 0 failed.
+- Utilization, memory-controller utilization, power, graphics clock, and memory clock: 384 successful samples and 2 failed samples each, followed by continued successful sampling.
+- All eight metrics remained `supported`.
+- The five affected metrics ended with reason `partial_sampling_failures`; this records bounded sampling failures within the run, not loss of support.
+- The available evidence shows the existing probe session resumed successful NVML sampling after wake; no explicit reinitialization event was observed in the available evidence. This does not infer driver-internal behavior.
+
+The exact native failure reason for the bounded failures was not surfaced in the inspected report projection, so this report does not label them as timeout, GPU lost, or driver reset.
 
 ## Admission Decision
 
-**PR-04 NVIDIA implementation admission: PARTIAL**
+**PR-04 NVIDIA implementation admission: PASS on this development machine**
 
-Most short-term implementation-admission evidence is complete on this development machine, including the 30-minute idle/load windows, lifecycle release/re-enable behavior, loader failure handling, partial unsupported metrics, and transient/sampling-stage failure classification. The admission remains `PARTIAL` because two genuinely manual entry items remain: a valid administrator comparison and sleep/wake observation. Until both are completed, this report does not declare the PR-04 production NVIDIA Provider entry gate satisfied. No production NVML Provider was added in this Spike.
+The short-term implementation-admission gate is satisfied for the current development machine. The valid administrator comparison and real Windows Sleep/Wake observation completed the remaining manual evidence items. This is a machine-scoped implementation-admission result; it does not claim NVIDIA product-family support, all GeForce support, default enablement, production readiness, broad driver compatibility, a complete release support matrix, long-term leak safety, a completed 24-hour soak, or a completed database-growth gate.
 
-The evidence remains limited to this development machine and does not say that NVIDIA GPUs are supported, that all GeForce GPUs are production ready, or that NVML is proven low overhead on all machines. Default-enable policy, support-matrix coverage, release hardware gates, and PR-04 runtime integration tests remain later work. PR-04 must preserve unsupported, permission, missing-provider, runtime-failure and legal-zero semantics.
+The next permitted stage is to begin a scoped PR-04 production NVIDIA Provider implementation behind capability detection and the existing provider/lifecycle contracts. This does not mean the NVIDIA feature is done. PR-04 must preserve unsupported, permission, missing-provider, runtime-failure and legal-zero semantics and must perform its own runtime integration tests. No production NVML Provider was added in this Spike.
 
 ## Deferred Scope
 
