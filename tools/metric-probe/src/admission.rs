@@ -15,6 +15,24 @@ use std::{
 const LIFECYCLE_SCHEMA: &str = "spike-01b-admission-lifecycle/v1";
 const SCENARIO_SCHEMA: &str = "spike-01b-admission-scenarios/v1";
 
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum EvidenceResult {
+    Pass,
+    Fail,
+    NotApplicable,
+}
+
+impl EvidenceResult {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Pass => "pass",
+            Self::Fail => "fail",
+            Self::NotApplicable => "not_applicable",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct LifecycleReport {
     pub schema_version: String,
@@ -47,7 +65,7 @@ pub struct LifecyclePhase {
     pub failed_sample_count: u64,
     pub gpu_metric_call_count: u64,
     pub failed_gpu_metric_call_count: u64,
-    pub nvml_calls_performed: bool,
+    pub gpu_metric_calls_performed: bool,
     pub library_released: bool,
     pub session_resources_released: bool,
     pub resource_start: Option<ResourceSnapshot>,
@@ -95,9 +113,14 @@ pub struct ScenarioResult {
     pub gpu_metric_call_count: u64,
     pub failed_gpu_metric_call_count: u64,
     pub metrics: Vec<ScenarioMetric>,
-    pub unsupported_metrics_have_no_numeric_zero: bool,
-    pub one_metric_failure_did_not_disable_device: bool,
-    pub transient_failure_recovered: bool,
+    pub provider_established: bool,
+    pub library_load_attempts: u64,
+    pub library_load_successes: u64,
+    pub library_release_count: u64,
+    pub unsupported_metrics_have_no_numeric_zero: EvidenceResult,
+    pub one_metric_failure_did_not_disable_device: EvidenceResult,
+    pub transient_failure_recovered: EvidenceResult,
+    pub sampling_stage_fatal_failure: EvidenceResult,
     pub other_probe_categories_unaffected: bool,
     pub cleanup_completed: bool,
     pub library_released: bool,
@@ -112,6 +135,7 @@ pub struct ScenarioMetric {
     pub failed_sample_count: usize,
     pub latest_value: Option<f64>,
     pub failure_reasons: BTreeMap<String, usize>,
+    pub failure_statuses: BTreeMap<String, usize>,
 }
 
 pub fn run_lifecycle(config: LifecycleConfig) -> Result<(PathBuf, PathBuf), String> {
@@ -156,7 +180,7 @@ fn run_lifecycle_windows(config: LifecycleConfig) -> Result<(PathBuf, PathBuf), 
         && phases
             .iter()
             .find(|phase| phase.phase == "disabled")
-            .map(|phase| !phase.nvml_calls_performed)
+            .map(|phase| !phase.gpu_metric_calls_performed)
             .unwrap_or(false);
     let report = LifecycleReport {
         schema_version: LIFECYCLE_SCHEMA.to_string(),
@@ -264,7 +288,7 @@ fn run_active_phase(phase: &str, duration_ms: u64) -> LifecyclePhase {
         failed_sample_count,
         gpu_metric_call_count,
         failed_gpu_metric_call_count,
-        nvml_calls_performed: gpu_metric_call_count > 0,
+        gpu_metric_calls_performed: gpu_metric_call_count > 0,
         library_released,
         session_resources_released,
         resource_start,
@@ -291,7 +315,7 @@ fn run_disabled_phase(duration_ms: u64) -> LifecyclePhase {
         failed_sample_count: 0,
         gpu_metric_call_count: 0,
         failed_gpu_metric_call_count: 0,
-        nvml_calls_performed: false,
+        gpu_metric_calls_performed: false,
         library_released: true,
         session_resources_released: true,
         resource_start,
@@ -320,9 +344,14 @@ fn run_scenarios_windows(config: ScenarioConfig) -> Result<(PathBuf, PathBuf), S
             NvmlInjection::TransientMetricFailure,
         ),
         (
-            "provider_runtime_failure",
+            "provider_initialization_runtime_failure",
             "gpu_lost_during_initialization",
-            NvmlInjection::ProviderRuntimeFailure,
+            NvmlInjection::ProviderInitializationRuntimeFailure,
+        ),
+        (
+            "sampling_stage_fatal_failure",
+            "gpu_lost_after_first_sample",
+            NvmlInjection::GpuLostAfterFirstSample,
         ),
     ];
     let report = ScenarioReport {
@@ -363,7 +392,7 @@ fn run_scenario(
     use crate::{nvml::NvmlProvider, windows::ReadResult};
 
     let other_categories_before = other_probe_category_statuses();
-    let result = NvmlProvider::new_injected(injection);
+    let (result, init_stats) = NvmlProvider::new_injected_with_stats(injection);
     let ReadResult {
         status,
         reason_code,
@@ -380,19 +409,26 @@ fn run_scenario(
             gpu_metric_call_count: 0,
             failed_gpu_metric_call_count: 0,
             metrics: Vec::new(),
-            unsupported_metrics_have_no_numeric_zero: true,
-            one_metric_failure_did_not_disable_device: true,
-            transient_failure_recovered: false,
+            provider_established: false,
+            library_load_attempts: init_stats.library_load_attempts,
+            library_load_successes: init_stats.library_load_successes,
+            library_release_count: init_stats.library_release_count,
+            unsupported_metrics_have_no_numeric_zero: EvidenceResult::NotApplicable,
+            one_metric_failure_did_not_disable_device: EvidenceResult::NotApplicable,
+            transient_failure_recovered: EvidenceResult::NotApplicable,
+            sampling_stage_fatal_failure: EvidenceResult::NotApplicable,
             other_probe_categories_unaffected: other_probe_categories_are_unaffected(
                 other_categories_before,
                 other_probe_category_statuses(),
             ),
-            cleanup_completed: true,
-            library_released: true,
+            cleanup_completed: init_stats.library_load_successes
+                == init_stats.library_release_count,
+            library_released: init_stats.library_load_successes == init_stats.library_release_count,
         };
     };
 
     let mut metrics = metric_records();
+    let mut failure_statuses = BTreeMap::new();
     for index in 0..sample_count {
         for sample in provider.sample_all() {
             let timestamp_ms = crate::unix_now_ms() + index as i64;
@@ -402,6 +438,7 @@ fn run_scenario(
                     .expect("metric exists"),
                 sample.utilization_percent,
                 timestamp_ms,
+                &mut failure_statuses,
             );
             record_metric(
                 metrics
@@ -409,6 +446,7 @@ fn run_scenario(
                     .expect("metric exists"),
                 sample.memory_controller_utilization_percent,
                 timestamp_ms,
+                &mut failure_statuses,
             );
             record_metric(
                 metrics
@@ -416,11 +454,13 @@ fn run_scenario(
                     .expect("metric exists"),
                 sample.temperature_celsius,
                 timestamp_ms,
+                &mut failure_statuses,
             );
             record_metric(
                 metrics.get_mut("gpu.power_watts").expect("metric exists"),
                 sample.power_watts,
                 timestamp_ms,
+                &mut failure_statuses,
             );
             record_metric(
                 metrics
@@ -428,6 +468,7 @@ fn run_scenario(
                     .expect("metric exists"),
                 sample.graphics_clock_mhz,
                 timestamp_ms,
+                &mut failure_statuses,
             );
             record_metric(
                 metrics
@@ -435,6 +476,7 @@ fn run_scenario(
                     .expect("metric exists"),
                 sample.memory_clock_mhz,
                 timestamp_ms,
+                &mut failure_statuses,
             );
             record_metric(
                 metrics
@@ -442,6 +484,7 @@ fn run_scenario(
                     .expect("metric exists"),
                 sample.vram_used_bytes,
                 timestamp_ms,
+                &mut failure_statuses,
             );
             record_metric(
                 metrics
@@ -449,6 +492,7 @@ fn run_scenario(
                     .expect("metric exists"),
                 sample.vram_total_bytes,
                 timestamp_ms,
+                &mut failure_statuses,
             );
         }
     }
@@ -458,6 +502,9 @@ fn run_scenario(
         .into_values()
         .map(|mut metric| {
             metric.finalize();
+            let failure_statuses_for_metric = failure_statuses
+                .remove(&metric.metric_key)
+                .unwrap_or_default();
             ScenarioMetric {
                 metric_key: metric.metric_key,
                 support_status: metric.support_status,
@@ -466,30 +513,81 @@ fn run_scenario(
                 failed_sample_count: metric.failed_sample_count,
                 latest_value: metric.latest_value,
                 failure_reasons: metric.failure_reasons,
+                failure_statuses: failure_statuses_for_metric,
             }
         })
         .collect();
     metrics.sort_by(|left, right| left.metric_key.cmp(&right.metric_key));
-    let unsupported_metrics_have_no_numeric_zero = metrics
-        .iter()
-        .filter(|metric| metric.support_status == SupportStatus::Unsupported)
-        .all(|metric| metric.latest_value.is_none());
-    let one_metric_failure_did_not_disable_device = metrics
-        .iter()
-        .find(|metric| metric.metric_key == "gpu.utilization_percent")
-        .map(|metric| metric.sample_count == sample_count as usize)
-        .unwrap_or(false);
-    let transient_failure_recovered = scenario == "transient_metric_failure"
-        && metrics
+    let unsupported_metrics_have_no_numeric_zero = unsupported_metrics_result(&metrics);
+    let one_metric_failure_did_not_disable_device = if scenario == "transient_metric_failure" {
+        match (
+            metrics
+                .iter()
+                .find(|metric| metric.metric_key == "gpu.utilization_percent"),
+            metrics
+                .iter()
+                .find(|metric| metric.metric_key == "gpu.power_watts"),
+        ) {
+            (Some(utilization), Some(power))
+                if utilization.sample_count == sample_count as usize
+                    && power.failed_sample_count == 1 =>
+            {
+                EvidenceResult::Pass
+            }
+            _ => EvidenceResult::Fail,
+        }
+    } else {
+        EvidenceResult::NotApplicable
+    };
+    let transient_failure_recovered = if scenario == "transient_metric_failure" {
+        match metrics
             .iter()
             .find(|metric| metric.metric_key == "gpu.power_watts")
-            .map(|metric| {
-                metric.support_status == SupportStatus::Supported
+        {
+            Some(metric)
+                if metric.support_status == SupportStatus::Supported
                     && metric.sample_count == sample_count.saturating_sub(1) as usize
                     && metric.failed_sample_count == 1
                     && metric.failure_reasons.contains_key("nvml_timeout")
+                    && metric.latest_value == Some(41.776) =>
+            {
+                EvidenceResult::Pass
+            }
+            _ => EvidenceResult::Fail,
+        }
+    } else {
+        EvidenceResult::NotApplicable
+    };
+    let sampling_stage_fatal_failure = if scenario == "sampling_stage_fatal_failure" {
+        let fatal_metric = metrics
+            .iter()
+            .find(|metric| metric.metric_key == "gpu.utilization_percent");
+        let other_metrics_sampled = metrics
+            .iter()
+            .filter(|metric| {
+                !matches!(
+                    metric.metric_key.as_str(),
+                    "gpu.utilization_percent" | "gpu.memory_controller_utilization_percent"
+                )
             })
-            .unwrap_or(false);
+            .all(|metric| metric.sample_count == sample_count as usize);
+        match fatal_metric {
+            Some(metric)
+                if sample_count > 1
+                    && metric.sample_count == sample_count.saturating_sub(1) as usize
+                    && metric.failed_sample_count == 1
+                    && metric.failure_reasons.contains_key("nvml_gpu_lost")
+                    && metric.failure_statuses.get("runtime_failed") == Some(&1)
+                    && other_metrics_sampled
+                    && stats.gpu_metric_call_count == sample_count.saturating_mul(6) =>
+            {
+                EvidenceResult::Pass
+            }
+            _ => EvidenceResult::Fail,
+        }
+    } else {
+        EvidenceResult::NotApplicable
+    };
     let other_probe_categories_unaffected = other_probe_categories_are_unaffected(
         other_categories_before,
         other_probe_category_statuses(),
@@ -504,9 +602,14 @@ fn run_scenario(
         gpu_metric_call_count: stats.gpu_metric_call_count,
         failed_gpu_metric_call_count: stats.failed_gpu_metric_call_count,
         metrics,
+        provider_established: true,
+        library_load_attempts: stats.library_load_attempts,
+        library_load_successes: stats.library_load_successes,
+        library_release_count: stats.library_release_count,
         unsupported_metrics_have_no_numeric_zero,
         one_metric_failure_did_not_disable_device,
         transient_failure_recovered,
+        sampling_stage_fatal_failure,
         other_probe_categories_unaffected,
         cleanup_completed: stop.status == crate::windows::ReadStatus::Value
             && stats.shutdown_successes == 1
@@ -602,15 +705,41 @@ fn metric_records() -> BTreeMap<String, MetricRecord> {
 }
 
 #[cfg(windows)]
-fn record_metric(metric: &mut MetricRecord, timed: crate::nvml::TimedRead<f64>, timestamp_ms: i64) {
+fn record_metric(
+    metric: &mut MetricRecord,
+    timed: crate::nvml::TimedRead<f64>,
+    timestamp_ms: i64,
+    failure_statuses: &mut BTreeMap<String, BTreeMap<String, usize>>,
+) {
     let latency = timed.latency_ms;
     match timed.result.value {
         Some(value) => metric.record_success(timestamp_ms, value, Some(100), 100, latency),
-        None => metric.record_failure_with_status(
-            map_read_status(timed.result.status),
-            timed.result.reason_code,
-            latency,
-        ),
+        None => {
+            let status = map_read_status(timed.result.status);
+            *failure_statuses
+                .entry(metric.metric_key.clone())
+                .or_default()
+                .entry(status_name(status).to_string())
+                .or_insert(0) += 1;
+            metric.record_failure_with_status(status, timed.result.reason_code, latency);
+        }
+    }
+}
+
+fn unsupported_metrics_result(metrics: &[ScenarioMetric]) -> EvidenceResult {
+    let unsupported_metrics = metrics
+        .iter()
+        .filter(|metric| metric.support_status == SupportStatus::Unsupported)
+        .collect::<Vec<_>>();
+    if unsupported_metrics.is_empty() {
+        EvidenceResult::NotApplicable
+    } else if unsupported_metrics
+        .iter()
+        .all(|metric| metric.latest_value.is_none())
+    {
+        EvidenceResult::Pass
+    } else {
+        EvidenceResult::Fail
     }
 }
 
@@ -661,6 +790,14 @@ fn summarize_resources(phases: &[LifecyclePhase]) -> ResourceSummary {
         .as_ref()
         .zip(final_snapshot.as_ref())
         .map(|(start, end)| end.working_set_bytes as i64 - start.working_set_bytes as i64);
+    let thread_values = snapshots
+        .iter()
+        .map(|snapshot| snapshot.threads)
+        .collect::<Vec<_>>();
+    let handle_values = snapshots
+        .iter()
+        .map(|snapshot| snapshot.handles)
+        .collect::<Vec<_>>();
     ResourceSummary {
         baseline,
         peak_threads,
@@ -670,13 +807,20 @@ fn summarize_resources(phases: &[LifecyclePhase]) -> ResourceSummary {
         thread_delta,
         handle_delta,
         working_set_delta_bytes,
-        monotonic_thread_growth_observed: snapshots
-            .windows(2)
-            .all(|values| values[1].threads >= values[0].threads),
-        monotonic_handle_growth_observed: snapshots
-            .windows(2)
-            .all(|values| values[1].handles >= values[0].handles),
+        monotonic_thread_growth_observed: monotonic_growth_observed(&thread_values),
+        monotonic_handle_growth_observed: monotonic_growth_observed(&handle_values),
     }
+}
+
+fn monotonic_growth_observed(values: &[u32]) -> bool {
+    let mut strict_growth = false;
+    for pair in values.windows(2) {
+        if pair[1] < pair[0] {
+            return false;
+        }
+        strict_growth |= pair[1] > pair[0];
+    }
+    strict_growth
 }
 
 fn write_reports<T: Serialize>(
@@ -706,10 +850,10 @@ fn render_lifecycle_markdown(report: &LifecycleReport) -> String {
         report.generated_at_utc,
         report.machine.elevated.unwrap_or(false)
     );
-    output.push_str("## Phases\n\n| Phase | Init | Shutdown | Samples | Failed samples | GPU calls | Failed calls | Library released | Session released |\n|---|---|---|---:|---:|---:|---:|---:|---:|\n");
+    output.push_str("## Phases\n\n| Phase | Init | Shutdown | Samples | Failed samples | GPU calls | GPU metric calls performed | Failed calls | Library released | Session released |\n|---|---|---|---:|---:|---:|---|---:|---:|---:|\n");
     for phase in &report.phases {
         output.push_str(&format!(
-            "| `{}` | `{}` ({}) | `{}` ({}) | {} | {} | {} | {} | {} | {} |\n",
+            "| `{}` | `{}` ({}) | `{}` ({}) | {} | {} | {} | {} | {} | {} | {} |\n",
             phase.phase,
             status_name(phase.initialization_status),
             phase.initialization_reason_code,
@@ -718,6 +862,7 @@ fn render_lifecycle_markdown(report: &LifecycleReport) -> String {
             phase.sample_count,
             phase.failed_sample_count,
             phase.gpu_metric_call_count,
+            phase.gpu_metric_calls_performed,
             phase.failed_gpu_metric_call_count,
             phase.library_released,
             phase.session_resources_released
@@ -732,30 +877,35 @@ fn render_lifecycle_markdown(report: &LifecycleReport) -> String {
 
 fn render_scenario_markdown(report: &ScenarioReport) -> String {
     let mut output = format!(
-        "# Spike-01B NVML Deterministic Scenario Evidence\n\n- Schema: `{}`\n- Generated: `{}`\n- Status catalog: `{}`\n\n",
+            "# Spike-01B NVML Deterministic Scenario Evidence\n\n- Schema: `{}`\n- Generated: `{}`\n- Status catalog: `{}`\n\n",
         report.schema_version,
         report.generated_at_utc,
         report.status_catalog.join(", ")
     );
     for scenario in &report.scenarios {
         output.push_str(&format!(
-            "## {}\n\n- Injection: `{}`\n- Capability: `{}` (`{}`)\n- Samples: {}\n- Failed samples: {}\n- GPU calls: {}\n- Failed GPU calls: {}\n- Unsupported values omitted: `{}`\n- One metric failure isolated: `{}`\n- Transient recovery: `{}`\n- Other categories unaffected: `{}`\n- Cleanup completed: `{}`\n- Library released: `{}`\n\n",
+            "## {}\n\n- Injection: `{}`\n- Capability: `{}` (`{}`)\n- Provider established: `{}`\n- Library load attempts/successes/releases: {}/{}/{}\n- Samples: {}\n- Failed samples: {}\n- GPU metric calls: {}\n- Failed GPU metric calls: {}\n- Unsupported values omitted: `{}`\n- One metric failure isolated: `{}`\n- Transient recovery: `{}`\n- Sampling-stage fatal failure: `{}`\n- Other categories unaffected: `{}`\n- Cleanup completed: `{}`\n- Library released: `{}`\n\n",
             scenario.scenario,
             scenario.injection,
             status_name(scenario.capability_status),
             scenario.capability_reason_code,
+            scenario.provider_established,
+            scenario.library_load_attempts,
+            scenario.library_load_successes,
+            scenario.library_release_count,
             scenario.sample_count,
             scenario.failed_sample_count,
             scenario.gpu_metric_call_count,
             scenario.failed_gpu_metric_call_count,
-            scenario.unsupported_metrics_have_no_numeric_zero,
-            scenario.one_metric_failure_did_not_disable_device,
-            scenario.transient_failure_recovered,
+            scenario.unsupported_metrics_have_no_numeric_zero.as_str(),
+            scenario.one_metric_failure_did_not_disable_device.as_str(),
+            scenario.transient_failure_recovered.as_str(),
+            scenario.sampling_stage_fatal_failure.as_str(),
             scenario.other_probe_categories_unaffected,
             scenario.cleanup_completed,
             scenario.library_released
         ));
-        output.push_str("| Metric | Status | Reason | Samples | Failed | Latest | Failure reasons |\n|---|---|---|---:|---:|---:|---|\n");
+        output.push_str("| Metric | Status | Reason | Samples | Failed | Latest | Failure reasons | Failure statuses |\n|---|---|---|---:|---:|---:|---|---|\n");
         for metric in &scenario.metrics {
             let reasons = metric
                 .failure_reasons
@@ -763,8 +913,14 @@ fn render_scenario_markdown(report: &ScenarioReport) -> String {
                 .map(|(reason, count)| format!("{reason}={count}"))
                 .collect::<Vec<_>>()
                 .join(", ");
+            let statuses = metric
+                .failure_statuses
+                .iter()
+                .map(|(status, count)| format!("{status}={count}"))
+                .collect::<Vec<_>>()
+                .join(", ");
             output.push_str(&format!(
-                "| `{}` | `{}` | `{}` | {} | {} | {} | {} |\n",
+                "| `{}` | `{}` | `{}` | {} | {} | {} | {} | {} |\n",
                 metric.metric_key,
                 status_name(metric.support_status),
                 metric.reason_code,
@@ -774,7 +930,12 @@ fn render_scenario_markdown(report: &ScenarioReport) -> String {
                     .latest_value
                     .map(|value| format!("{value:.3}"))
                     .unwrap_or_else(|| "absent".to_string()),
-                if reasons.is_empty() { "none" } else { &reasons }
+                if reasons.is_empty() { "none" } else { &reasons },
+                if statuses.is_empty() {
+                    "none"
+                } else {
+                    &statuses
+                }
             ));
         }
         output.push('\n');
@@ -791,5 +952,33 @@ fn status_name(status: SupportStatus) -> &'static str {
         SupportStatus::ProbeFailed => "probe_failed",
         SupportStatus::RuntimeFailed => "runtime_failed",
         SupportStatus::Disabled => "disabled",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{monotonic_growth_observed, unsupported_metrics_result, EvidenceResult};
+
+    #[test]
+    fn unsupported_metric_assertion_is_not_vacuously_passed() {
+        assert_eq!(
+            unsupported_metrics_result(&[]),
+            EvidenceResult::NotApplicable
+        );
+    }
+
+    #[test]
+    fn stable_resource_counts_are_not_reported_as_growth() {
+        assert!(!monotonic_growth_observed(&[124, 124, 124]));
+    }
+
+    #[test]
+    fn strict_non_decreasing_resource_counts_report_growth() {
+        assert!(monotonic_growth_observed(&[124, 125, 126]));
+    }
+
+    #[test]
+    fn decreasing_resource_counts_do_not_report_monotonic_growth() {
+        assert!(!monotonic_growth_observed(&[124, 126, 125]));
     }
 }

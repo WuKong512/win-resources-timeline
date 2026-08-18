@@ -109,7 +109,8 @@ pub enum NvmlInjection {
     MissingLibrary,
     PartialUnsupported,
     TransientMetricFailure,
-    ProviderRuntimeFailure,
+    ProviderInitializationRuntimeFailure,
+    GpuLostAfterFirstSample,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -157,6 +158,7 @@ impl NvmlDeviceEntry {
 struct NvmlLibrary {
     module: HMODULE,
     stats: Arc<Mutex<NvmlStats>>,
+    synthetic: bool,
 }
 
 impl NvmlLibrary {
@@ -194,7 +196,11 @@ impl NvmlLibrary {
             };
             if let Ok(module) = module {
                 with_stats(&stats, |stats| stats.library_load_successes += 1);
-                return Ok(Self { module, stats });
+                return Ok(Self {
+                    module,
+                    stats,
+                    synthetic: false,
+                });
             }
         }
 
@@ -207,11 +213,21 @@ impl NvmlLibrary {
     fn module(&self) -> HMODULE {
         self.module
     }
+
+    fn injected(stats: Arc<Mutex<NvmlStats>>) -> Self {
+        Self {
+            module: HMODULE::default(),
+            stats,
+            synthetic: true,
+        }
+    }
 }
 
 impl Drop for NvmlLibrary {
     fn drop(&mut self) {
-        if !self.module.is_invalid() {
+        if self.synthetic {
+            with_stats(&self.stats, |stats| stats.library_release_count += 1);
+        } else if !self.module.is_invalid() {
             unsafe {
                 let _ = FreeLibrary(self.module);
             }
@@ -283,11 +299,21 @@ impl FakeNvmlDispatch {
                     VecDeque::from([NVML_ERROR_TIMEOUT, NVML_SUCCESS]),
                 );
             }
-            NvmlInjection::MissingLibrary | NvmlInjection::ProviderRuntimeFailure => {}
+            NvmlInjection::GpuLostAfterFirstSample => {
+                metric_statuses.insert(
+                    FakeMetric::Utilization,
+                    VecDeque::from([NVML_SUCCESS, NVML_ERROR_GPU_IS_LOST]),
+                );
+            }
+            NvmlInjection::MissingLibrary | NvmlInjection::ProviderInitializationRuntimeFailure => {
+            }
         }
         Self {
             state: Arc::new(Mutex::new(FakeNvmlState {
-                init_status: if matches!(injection, NvmlInjection::ProviderRuntimeFailure) {
+                init_status: if matches!(
+                    injection,
+                    NvmlInjection::ProviderInitializationRuntimeFailure
+                ) {
                     NVML_ERROR_GPU_IS_LOST
                 } else {
                     NVML_SUCCESS
@@ -560,9 +586,53 @@ impl NvmlFunctions {
     }
 }
 
+struct LoadedNvml {
+    library: NvmlLibrary,
+    dispatch: NvmlDispatch,
+}
+
+trait NvmlLoader {
+    fn load(&self, stats: Arc<Mutex<NvmlStats>>) -> Result<LoadedNvml, (ReadStatus, String)>;
+}
+
+struct NativeNvmlLoader;
+
+impl NvmlLoader for NativeNvmlLoader {
+    fn load(&self, stats: Arc<Mutex<NvmlStats>>) -> Result<LoadedNvml, (ReadStatus, String)> {
+        let library = NvmlLibrary::load(stats)?;
+        let functions = NvmlFunctions::load(library.module())?;
+        Ok(LoadedNvml {
+            library,
+            dispatch: NvmlDispatch::Native(functions),
+        })
+    }
+}
+
+struct InjectedNvmlLoader {
+    injection: NvmlInjection,
+}
+
+impl NvmlLoader for InjectedNvmlLoader {
+    fn load(&self, stats: Arc<Mutex<NvmlStats>>) -> Result<LoadedNvml, (ReadStatus, String)> {
+        with_stats(&stats, |stats| stats.library_load_attempts += 1);
+        if matches!(self.injection, NvmlInjection::MissingLibrary) {
+            return Err((
+                ReadStatus::ProviderMissing,
+                "nvml_runtime_missing".to_string(),
+            ));
+        }
+        with_stats(&stats, |stats| stats.library_load_successes += 1);
+        Ok(LoadedNvml {
+            library: NvmlLibrary::injected(stats.clone()),
+            dispatch: NvmlDispatch::Fake(FakeNvmlDispatch::new(self.injection)),
+        })
+    }
+}
+
 #[derive(Debug)]
 pub struct NvmlProvider {
-    library: Option<NvmlLibrary>,
+    // Keep the loaded library alive for the complete provider/session lifetime.
+    _library: NvmlLibrary,
     dispatch: NvmlDispatch,
     stats: Arc<Mutex<NvmlStats>>,
     initialized: bool,
@@ -573,38 +643,26 @@ pub struct NvmlProvider {
 impl NvmlProvider {
     pub fn new() -> ReadResult<Self> {
         let stats = Arc::new(Mutex::new(NvmlStats::default()));
-        let library = match NvmlLibrary::load(stats.clone()) {
-            Ok(library) => library,
-            Err((status, reason_code)) => return read_status(status, reason_code),
-        };
-        let functions = match NvmlFunctions::load(library.module()) {
-            Ok(functions) => functions,
-            Err((status, reason_code)) => return read_status(status, reason_code),
-        };
-        Self::from_dispatch(Some(library), NvmlDispatch::Native(functions), stats)
+        Self::new_with_loader(NativeNvmlLoader, stats)
     }
 
-    pub fn new_injected(injection: NvmlInjection) -> ReadResult<Self> {
-        if matches!(injection, NvmlInjection::MissingLibrary) {
-            return read_status(
-                ReadStatus::ProviderMissing,
-                "nvml_runtime_missing".to_string(),
-            );
-        }
-        let stats = Arc::new(Mutex::new(NvmlStats {
-            library_load_attempts: 1,
-            library_load_successes: 1,
-            ..NvmlStats::default()
-        }));
-        Self::from_dispatch(
-            None,
-            NvmlDispatch::Fake(FakeNvmlDispatch::new(injection)),
-            stats,
-        )
+    pub fn new_injected_with_stats(injection: NvmlInjection) -> (ReadResult<Self>, NvmlStats) {
+        let stats = Arc::new(Mutex::new(NvmlStats::default()));
+        let result = Self::new_with_loader(InjectedNvmlLoader { injection }, stats.clone());
+        let snapshot = stats_snapshot(&stats);
+        (result, snapshot)
+    }
+
+    fn new_with_loader<L: NvmlLoader>(loader: L, stats: Arc<Mutex<NvmlStats>>) -> ReadResult<Self> {
+        let LoadedNvml { library, dispatch } = match loader.load(stats.clone()) {
+            Ok(loaded) => loaded,
+            Err((status, reason_code)) => return read_status(status, reason_code),
+        };
+        Self::from_dispatch(library, dispatch, stats)
     }
 
     fn from_dispatch(
-        library: Option<NvmlLibrary>,
+        library: NvmlLibrary,
         dispatch: NvmlDispatch,
         stats: Arc<Mutex<NvmlStats>>,
     ) -> ReadResult<Self> {
@@ -621,7 +679,7 @@ impl NvmlProvider {
         }
 
         let mut provider = Self {
-            library,
+            _library: library,
             dispatch,
             stats,
             initialized: true,
@@ -662,9 +720,6 @@ impl NvmlProvider {
             }
         });
         self.initialized = false;
-        if self.library.is_none() {
-            with_stats(&self.stats, |stats| stats.library_release_count += 1);
-        }
         if status == NVML_SUCCESS {
             (ReadStatus::Value, "ok".to_string())
         } else {
@@ -1166,6 +1221,10 @@ mod tests {
             (ReadStatus::RuntimeFailed, "nvml_driver_library_mismatch")
         );
         assert_eq!(
+            map_nvml_status(16),
+            (ReadStatus::RuntimeFailed, "nvml_reset_required")
+        );
+        assert_eq!(
             map_nvml_status(12),
             (ReadStatus::ProviderMissing, "nvml_runtime_missing")
         );
@@ -1173,6 +1232,7 @@ mod tests {
             map_nvml_status(0xdead),
             (ReadStatus::Failed, "nvml_call_failed")
         );
+        assert_eq!(map_nvml_status(10), (ReadStatus::Failed, "nvml_timeout"));
     }
 
     #[test]
@@ -1219,17 +1279,19 @@ mod tests {
 
     #[test]
     fn injected_missing_library_is_safe_and_has_no_provider() {
-        let result = NvmlProvider::new_injected(NvmlInjection::MissingLibrary);
+        let (result, stats) = NvmlProvider::new_injected_with_stats(NvmlInjection::MissingLibrary);
         assert_eq!(result.status, ReadStatus::ProviderMissing);
         assert_eq!(result.reason_code, "nvml_runtime_missing");
         assert!(result.value.is_none());
+        assert_eq!(stats.library_load_attempts, 1);
+        assert_eq!(stats.library_load_successes, 0);
+        assert_eq!(stats.library_release_count, 0);
     }
 
     #[test]
     fn injected_partial_unsupported_keeps_other_metrics_sampling() {
-        let provider = NvmlProvider::new_injected(NvmlInjection::PartialUnsupported)
-            .value
-            .expect("injected provider should initialize");
+        let (result, _) = NvmlProvider::new_injected_with_stats(NvmlInjection::PartialUnsupported);
+        let provider = result.value.expect("injected provider should initialize");
         let sample = provider.sample_all().pop().expect("one fake GPU");
         assert_eq!(sample.utilization_percent.result.value, Some(7.0));
         assert_eq!(sample.power_watts.result.status, ReadStatus::Unsupported);
@@ -1248,9 +1310,9 @@ mod tests {
 
     #[test]
     fn injected_transient_metric_failure_recovers_without_retry_loop() {
-        let provider = NvmlProvider::new_injected(NvmlInjection::TransientMetricFailure)
-            .value
-            .expect("injected provider should initialize");
+        let (result, _) =
+            NvmlProvider::new_injected_with_stats(NvmlInjection::TransientMetricFailure);
+        let provider = result.value.expect("injected provider should initialize");
         let first = provider.sample_all().pop().expect("one fake GPU");
         let second = provider.sample_all().pop().expect("one fake GPU");
         assert_eq!(first.power_watts.result.status, ReadStatus::Failed);
@@ -1265,10 +1327,41 @@ mod tests {
     }
 
     #[test]
-    fn injected_provider_runtime_failure_is_distinct_from_probe_failure() {
-        let result = NvmlProvider::new_injected(NvmlInjection::ProviderRuntimeFailure);
+    fn injected_provider_initialization_runtime_failure_is_distinct_from_probe_failure() {
+        let (result, _) = NvmlProvider::new_injected_with_stats(
+            NvmlInjection::ProviderInitializationRuntimeFailure,
+        );
         assert_eq!(result.status, ReadStatus::RuntimeFailed);
         assert_eq!(result.reason_code, "nvml_gpu_lost");
         assert!(result.value.is_none());
+    }
+
+    #[test]
+    fn injected_sampling_stage_gpu_loss_is_classified_without_retry_or_zero() {
+        let (result, _) =
+            NvmlProvider::new_injected_with_stats(NvmlInjection::GpuLostAfterFirstSample);
+        let provider = result.value.expect("injected provider should initialize");
+        let first = provider.sample_all().pop().expect("one fake GPU");
+        let second = provider.sample_all().pop().expect("one fake GPU");
+
+        assert_eq!(first.utilization_percent.result.status, ReadStatus::Value);
+        assert_eq!(
+            second.utilization_percent.result.status,
+            ReadStatus::RuntimeFailed
+        );
+        assert_eq!(
+            second.utilization_percent.result.reason_code,
+            "nvml_gpu_lost"
+        );
+        assert!(second.utilization_percent.result.value.is_none());
+        assert_eq!(second.temperature_celsius.result.value, Some(47.0));
+
+        let stop = provider.shutdown();
+        assert_eq!(stop.stats.sample_count, 2);
+        assert_eq!(stop.stats.failed_sample_count, 1);
+        assert_eq!(stop.stats.gpu_metric_call_count, 12);
+        assert_eq!(stop.stats.failed_gpu_metric_call_count, 1);
+        assert_eq!(stop.stats.shutdown_successes, 1);
+        assert_eq!(stop.stats.library_release_count, 1);
     }
 }

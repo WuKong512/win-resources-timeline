@@ -29,10 +29,11 @@ This report adds evidence alongside the existing 60-second development-machine r
 | 30 min representative load | PASS for the observed ordinary Chrome/desktop window; not a stress test |
 | Enable-disable-re-enable | PASS |
 | Shutdown / cleanup | PASS for exercised sessions |
-| Missing DLL handling | PASS through deterministic probe-only loader injection |
-| Partial unsupported metrics | PASS through deterministic probe-only NVML return injection |
-| Transient metric failure isolation | PASS through deterministic timeout injection and recovery |
-| Provider runtime failure isolation | PASS through deterministic GPU-lost initialization injection |
+| Missing DLL handling | PASS: deterministic probe-only loader failure injection |
+| Partial unsupported metrics | PASS: deterministic probe-only NVML return injection |
+| Transient metric failure isolation | PASS: deterministic timeout injection and recovery |
+| Init-time fatal runtime failure | PASS: deterministic GPU-lost initialization injection |
+| Sampling-stage fatal runtime failure | PASS: deterministic GPU-lost sampling injection |
 | Sleep / wake | PENDING: manual evidence required; not safely automated here |
 | Low-power state | Not applicable / not exercised on this desktop |
 | 24 h soak | DEFERRED to PR-07 release validation |
@@ -108,9 +109,9 @@ The short lifecycle resource delta is recorded rather than treated as a 24-hour 
 
 All scenarios are probe-only. They do not change the production loader search path and do not copy an implementation into Tauri.
 
-### Missing DLL
+### Missing DLL: deterministic loader failure
 
-The injected loader returned `provider_missing` with reason `nvml_runtime_missing`. It emitted zero GPU calls and zero GPU samples, did not retry indefinitely, did not crash, and completed cleanup safely. The scenario also checks that the CPU and memory probe statuses remain supported before and after the injection.
+The probe-only injected loader was exercised through the same loader result path used by native initialization. It returned `provider_missing` with reason `nvml_runtime_missing`; the provider was not established, one load attempt was recorded, no library was acquired, and it emitted zero GPU calls and zero GPU samples. It did not retry indefinitely, did not crash, and completed cleanup safely. The scenario also checks that the CPU and memory probe statuses remain supported before and after the injection.
 
 ### Partial Unsupported
 
@@ -120,9 +121,13 @@ The injected dispatch returned the official unsupported-equivalent result for po
 
 The injected power call returned `nvml_timeout` once, then succeeded. Other metrics continued sampling, one failed sample was counted, the failure reason was retained, a later successful sample recovered the metric, and cleanup completed without a retry loop.
 
-### Provider Runtime Failure
+### Provider Initialization Runtime Failure
 
-The injected initialization returned `runtime_failed` with reason `nvml_gpu_lost`. No GPU sample was emitted, no GPU metric call was made, the process remained alive, and cleanup was safe. This is distinct from unsupported and ordinary probe failure.
+The injected initialization returned `runtime_failed` with reason `nvml_gpu_lost`. No GPU sample was emitted, no GPU metric call was made, the process remained alive, and cleanup was safe. This is distinct from unsupported and ordinary probe failure. It is initialization-failure evidence, not sampling-stage failure evidence.
+
+### Sampling-Stage Fatal Runtime Failure
+
+The provider initialized successfully and completed one normal sample. The next injected utilization call returned `NVML_ERROR_GPU_IS_LOST`, which mapped to `runtime_failed` / `nvml_gpu_lost`; the failed sample had no numeric value, other metric calls continued for that bounded sample, the exact expected metric-call count showed no synchronous retry loop, and shutdown/library release completed. This is deterministic probe-only boundary evidence, not evidence that the physical GPU was actually lost.
 
 ## Sleep / Wake Manual Evidence
 
@@ -145,13 +150,9 @@ The manual result must record the last pre-sleep timestamp, first post-wake time
 
 **PR-04 NVIDIA implementation admission: PARTIAL**
 
-The current machine has enough evidence to proceed to a scoped production Provider implementation behind capability detection, with unsupported/failure semantics preserved. The admission remains `PARTIAL` because two genuinely manual evidence items remain: a valid administrator comparison and sleep/wake observation. No production NVML Provider was added in this Spike.
+Most short-term implementation-admission evidence is complete on this development machine, including the 30-minute idle/load windows, lifecycle release/re-enable behavior, loader failure handling, partial unsupported metrics, and transient/sampling-stage failure classification. The admission remains `PARTIAL` because two genuinely manual entry items remain: a valid administrator comparison and sleep/wake observation. Until both are completed, this report does not declare the PR-04 production NVIDIA Provider entry gate satisfied. No production NVML Provider was added in this Spike.
 
-Allowed conclusion:
-
-> The NVIDIA NVML path is sufficiently evidenced on this development machine to proceed to a scoped production Provider implementation behind capability detection.
-
-This report does not say that NVIDIA GPUs are supported, that all GeForce GPUs are production ready, or that NVML is proven low overhead on all machines. PR-04 must still perform runtime integration tests and preserve unsupported, permission, missing-provider, runtime-failure and zero-value semantics.
+The evidence remains limited to this development machine and does not say that NVIDIA GPUs are supported, that all GeForce GPUs are production ready, or that NVML is proven low overhead on all machines. Default-enable policy, support-matrix coverage, release hardware gates, and PR-04 runtime integration tests remain later work. PR-04 must preserve unsupported, permission, missing-provider, runtime-failure and legal-zero semantics.
 
 ## Deferred Scope
 
