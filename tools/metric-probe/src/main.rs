@@ -1,3 +1,4 @@
+mod admission;
 mod cli;
 mod model;
 mod report;
@@ -58,6 +59,18 @@ fn run_main() -> Result<(), String> {
     match parse_args(cli::args())? {
         Command::Inventory => run_inventory(),
         Command::Run(config) => run_probe(config),
+        Command::Lifecycle(config) => {
+            let (json_path, markdown_path) = admission::run_lifecycle(config)?;
+            println!("JSON: {}", json_path.display());
+            println!("Markdown: {}", markdown_path.display());
+            Ok(())
+        }
+        Command::Scenarios(config) => {
+            let (json_path, markdown_path) = admission::run_scenarios(config)?;
+            println!("JSON: {}", json_path.display());
+            println!("Markdown: {}", markdown_path.display());
+            Ok(())
+        }
     }
 }
 
@@ -1515,6 +1528,7 @@ fn map_status(status: windows::ReadStatus) -> SupportStatus {
         windows::ReadStatus::PermissionDenied => SupportStatus::PermissionDenied,
         windows::ReadStatus::ProviderMissing => SupportStatus::ProviderMissing,
         windows::ReadStatus::Failed => SupportStatus::ProbeFailed,
+        windows::ReadStatus::RuntimeFailed => SupportStatus::RuntimeFailed,
     }
 }
 
@@ -1547,14 +1561,14 @@ fn bool_value(value: bool) -> f64 {
     }
 }
 
-fn unix_now_ms() -> i64 {
+pub(crate) fn unix_now_ms() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|value| value.as_millis() as i64)
         .unwrap_or(0)
 }
 
-fn utc_now_string() -> String {
+pub(crate) fn utc_now_string() -> String {
     let seconds = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|value| value.as_secs())
@@ -1636,7 +1650,7 @@ fn deferred_items() -> Vec<DeferredItem> {
             "No GPU process attribution is implemented",
         ),
         (
-            "24-hour soak and 30-minute load runs",
+            "24-hour soak and storage-growth validation",
             "Deferred to release validation",
         ),
         (

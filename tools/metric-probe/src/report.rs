@@ -316,6 +316,8 @@ fn status_name(status: SupportStatus) -> &'static str {
         SupportStatus::PermissionDenied => "permission_denied",
         SupportStatus::ProviderMissing => "provider_missing",
         SupportStatus::ProbeFailed => "probe_failed",
+        SupportStatus::RuntimeFailed => "runtime_failed",
+        SupportStatus::Disabled => "disabled",
     }
 }
 

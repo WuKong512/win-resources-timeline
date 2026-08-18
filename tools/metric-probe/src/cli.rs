@@ -8,6 +8,8 @@ pub const DEFAULT_DURATION_SECONDS: u64 = 60;
 pub enum Command {
     Inventory,
     Run(RunConfig),
+    Lifecycle(LifecycleConfig),
+    Scenarios(ScenarioConfig),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -39,6 +41,38 @@ impl Default for RunConfig {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LifecycleConfig {
+    pub output_dir: PathBuf,
+    pub enabled_duration_ms: u64,
+    pub disabled_duration_ms: u64,
+}
+
+impl Default for LifecycleConfig {
+    fn default() -> Self {
+        Self {
+            output_dir: PathBuf::from("artifacts/metric-probe/spike-01b-lifecycle"),
+            enabled_duration_ms: 1_000,
+            disabled_duration_ms: 1_000,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScenarioConfig {
+    pub output_dir: PathBuf,
+    pub sample_count: u64,
+}
+
+impl Default for ScenarioConfig {
+    fn default() -> Self {
+        Self {
+            output_dir: PathBuf::from("artifacts/metric-probe/spike-01b-scenarios"),
+            sample_count: 2,
+        }
+    }
+}
+
 pub fn parse_args<I, S>(args: I) -> Result<Command, String>
 where
     I: IntoIterator<Item = S>,
@@ -63,12 +97,61 @@ where
             }
         }
         "run" => parse_run_args(args),
+        "lifecycle" => parse_lifecycle_args(args),
+        "scenarios" => parse_scenario_args(args),
         "--help" | "-h" => Err(usage().to_string()),
         "--version" | "-V" => Err("metric-probe 0.1.0".to_string()),
         other => Err(format!(
             "invalid command '{other}'; expected inventory or run"
         )),
     }
+}
+
+fn parse_lifecycle_args<I>(args: I) -> Result<Command, String>
+where
+    I: IntoIterator<Item = String>,
+{
+    let mut config = LifecycleConfig::default();
+    let mut args = args.into_iter();
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--output-dir" => config.output_dir = parse_path(&arg, args.next())?,
+            "--enabled-duration-ms" => {
+                config.enabled_duration_ms = parse_positive(&arg, args.next())?;
+            }
+            "--disabled-duration-ms" => {
+                config.disabled_duration_ms = parse_positive(&arg, args.next())?;
+            }
+            "--help" | "-h" => return Err(usage().to_string()),
+            other => return Err(format!("invalid lifecycle argument '{other}'")),
+        }
+    }
+    Ok(Command::Lifecycle(config))
+}
+
+fn parse_scenario_args<I>(args: I) -> Result<Command, String>
+where
+    I: IntoIterator<Item = String>,
+{
+    let mut config = ScenarioConfig::default();
+    let mut args = args.into_iter();
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--output-dir" => config.output_dir = parse_path(&arg, args.next())?,
+            "--sample-count" => config.sample_count = parse_positive(&arg, args.next())?,
+            "--help" | "-h" => return Err(usage().to_string()),
+            other => return Err(format!("invalid scenarios argument '{other}'")),
+        }
+    }
+    Ok(Command::Scenarios(config))
+}
+
+fn parse_path(flag: &str, value: Option<String>) -> Result<PathBuf, String> {
+    let value = value.ok_or_else(|| format!("missing value for {flag}"))?;
+    if value.trim().is_empty() {
+        return Err(format!("value for {flag} must not be empty"));
+    }
+    Ok(PathBuf::from(value))
 }
 
 fn parse_run_args<I>(args: I) -> Result<Command, String>
@@ -123,7 +206,7 @@ fn parse_positive(flag: &str, value: Option<String>) -> Result<u64, String> {
 }
 
 pub fn usage() -> &'static str {
-    "Usage:\n  metric-probe inventory\n  metric-probe run [options]\n\nOptions:\n  --duration-seconds <n>\n  --core-interval-ms <n>\n  --process-interval-ms <n>\n  --output-dir <path>\n  --no-process-probe\n  --no-disk-probe\n  --no-network-probe\n  --no-power-probe\n  --no-gpu-probe"
+    "Usage:\n  metric-probe inventory\n  metric-probe run [options]\n  metric-probe lifecycle [options]\n  metric-probe scenarios [options]\n\nRun options:\n  --duration-seconds <n>\n  --core-interval-ms <n>\n  --process-interval-ms <n>\n  --output-dir <path>\n  --no-process-probe\n  --no-disk-probe\n  --no-network-probe\n  --no-power-probe\n  --no-gpu-probe\n\nLifecycle options:\n  --enabled-duration-ms <n>\n  --disabled-duration-ms <n>\n  --output-dir <path>\n\nScenario options:\n  --sample-count <n>\n  --output-dir <path>"
 }
 
 pub fn args() -> Vec<String> {
@@ -132,7 +215,7 @@ pub fn args() -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_args, Command, RunConfig};
+    use super::{parse_args, Command, LifecycleConfig, RunConfig, ScenarioConfig};
     use std::path::PathBuf;
 
     #[test]
@@ -185,5 +268,42 @@ mod tests {
         assert!(parse_args(["metric-probe", "run", "--duration-seconds", "0"]).is_err());
         assert!(parse_args(["metric-probe", "run", "--core-interval-ms"]).is_err());
         assert!(parse_args(["metric-probe", "inventory", "--output-dir", "x"]).is_err());
+    }
+
+    #[test]
+    fn parses_lifecycle_and_scenario_commands() {
+        assert_eq!(
+            parse_args([
+                "metric-probe",
+                "lifecycle",
+                "--enabled-duration-ms",
+                "20",
+                "--disabled-duration-ms",
+                "30",
+                "--output-dir",
+                "tmp/lifecycle",
+            ])
+            .unwrap(),
+            Command::Lifecycle(LifecycleConfig {
+                output_dir: PathBuf::from("tmp/lifecycle"),
+                enabled_duration_ms: 20,
+                disabled_duration_ms: 30,
+            })
+        );
+        assert_eq!(
+            parse_args([
+                "metric-probe",
+                "scenarios",
+                "--sample-count",
+                "3",
+                "--output-dir",
+                "tmp/scenarios",
+            ])
+            .unwrap(),
+            Command::Scenarios(ScenarioConfig {
+                output_dir: PathBuf::from("tmp/scenarios"),
+                sample_count: 3,
+            })
+        );
     }
 }

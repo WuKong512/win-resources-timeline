@@ -5,11 +5,12 @@ use crate::{
     windows::{ReadResult, ReadStatus, SOURCE_NVML},
 };
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, VecDeque},
     ffi::{c_char, c_void},
     mem,
     path::PathBuf,
     ptr,
+    sync::{Arc, Mutex},
     time::Instant,
 };
 use windows::{
@@ -103,6 +104,37 @@ pub struct GpuDeviceSample {
     pub vram_total_bytes: TimedRead<f64>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NvmlInjection {
+    MissingLibrary,
+    PartialUnsupported,
+    TransientMetricFailure,
+    ProviderInitializationRuntimeFailure,
+    GpuLostAfterFirstSample,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct NvmlStats {
+    pub library_load_attempts: u64,
+    pub library_load_successes: u64,
+    pub library_release_count: u64,
+    pub init_calls: u64,
+    pub init_successes: u64,
+    pub shutdown_calls: u64,
+    pub shutdown_successes: u64,
+    pub sample_count: u64,
+    pub failed_sample_count: u64,
+    pub gpu_metric_call_count: u64,
+    pub failed_gpu_metric_call_count: u64,
+}
+
+#[derive(Debug, Clone)]
+pub struct NvmlStopResult {
+    pub status: ReadStatus,
+    pub reason_code: String,
+    pub stats: NvmlStats,
+}
+
 #[derive(Debug, Clone)]
 pub struct NvmlDeviceEntry {
     pub index: u32,
@@ -125,10 +157,12 @@ impl NvmlDeviceEntry {
 #[derive(Debug)]
 struct NvmlLibrary {
     module: HMODULE,
+    stats: Arc<Mutex<NvmlStats>>,
+    synthetic: bool,
 }
 
 impl NvmlLibrary {
-    fn load() -> Result<Self, (ReadStatus, String)> {
+    fn load(stats: Arc<Mutex<NvmlStats>>) -> Result<Self, (ReadStatus, String)> {
         let mut candidates = vec![LoadCandidate::System32];
         if let Some(program_w6432) = std::env::var_os("ProgramW6432") {
             candidates.push(LoadCandidate::KnownPath(
@@ -140,6 +174,7 @@ impl NvmlLibrary {
         }
 
         for candidate in candidates {
+            with_stats(&stats, |stats| stats.library_load_attempts += 1);
             let (path, flags) = match candidate {
                 LoadCandidate::System32 => {
                     (PathBuf::from("nvml.dll"), LOAD_LIBRARY_SEARCH_SYSTEM32)
@@ -160,7 +195,12 @@ impl NvmlLibrary {
                 )
             };
             if let Ok(module) = module {
-                return Ok(Self { module });
+                with_stats(&stats, |stats| stats.library_load_successes += 1);
+                return Ok(Self {
+                    module,
+                    stats,
+                    synthetic: false,
+                });
             }
         }
 
@@ -173,14 +213,25 @@ impl NvmlLibrary {
     fn module(&self) -> HMODULE {
         self.module
     }
+
+    fn injected(stats: Arc<Mutex<NvmlStats>>) -> Self {
+        Self {
+            module: HMODULE::default(),
+            stats,
+            synthetic: true,
+        }
+    }
 }
 
 impl Drop for NvmlLibrary {
     fn drop(&mut self) {
-        if !self.module.is_invalid() {
+        if self.synthetic {
+            with_stats(&self.stats, |stats| stats.library_release_count += 1);
+        } else if !self.module.is_invalid() {
             unsafe {
                 let _ = FreeLibrary(self.module);
             }
+            with_stats(&self.stats, |stats| stats.library_release_count += 1);
         }
     }
 }
@@ -203,6 +254,293 @@ struct NvmlFunctions {
     device_get_power_usage: NvmlDeviceGetPowerUsage,
     device_get_clock_info: NvmlDeviceGetClockInfo,
     device_get_memory_info: NvmlDeviceGetMemoryInfo,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum FakeMetric {
+    Utilization,
+    Temperature,
+    Power,
+    GraphicsClock,
+    MemoryClock,
+    Memory,
+}
+
+#[derive(Debug)]
+struct FakeNvmlState {
+    init_status: NvmlReturn,
+    shutdown_status: NvmlReturn,
+    driver_version: String,
+    metric_statuses: BTreeMap<FakeMetric, VecDeque<NvmlReturn>>,
+}
+
+#[derive(Debug, Clone)]
+struct FakeNvmlDispatch {
+    state: Arc<Mutex<FakeNvmlState>>,
+}
+
+impl FakeNvmlDispatch {
+    fn new(injection: NvmlInjection) -> Self {
+        let mut metric_statuses = BTreeMap::new();
+        match injection {
+            NvmlInjection::PartialUnsupported => {
+                metric_statuses.insert(
+                    FakeMetric::Power,
+                    VecDeque::from([NVML_ERROR_NOT_SUPPORTED]),
+                );
+                metric_statuses.insert(
+                    FakeMetric::MemoryClock,
+                    VecDeque::from([NVML_ERROR_FREQ_NOT_SUPPORTED]),
+                );
+            }
+            NvmlInjection::TransientMetricFailure => {
+                metric_statuses.insert(
+                    FakeMetric::Power,
+                    VecDeque::from([NVML_ERROR_TIMEOUT, NVML_SUCCESS]),
+                );
+            }
+            NvmlInjection::GpuLostAfterFirstSample => {
+                metric_statuses.insert(
+                    FakeMetric::Utilization,
+                    VecDeque::from([NVML_SUCCESS, NVML_ERROR_GPU_IS_LOST]),
+                );
+            }
+            NvmlInjection::MissingLibrary | NvmlInjection::ProviderInitializationRuntimeFailure => {
+            }
+        }
+        Self {
+            state: Arc::new(Mutex::new(FakeNvmlState {
+                init_status: if matches!(
+                    injection,
+                    NvmlInjection::ProviderInitializationRuntimeFailure
+                ) {
+                    NVML_ERROR_GPU_IS_LOST
+                } else {
+                    NVML_SUCCESS
+                },
+                shutdown_status: NVML_SUCCESS,
+                driver_version: "injected-driver".to_string(),
+                metric_statuses,
+            })),
+        }
+    }
+
+    fn next_status(&self, metric: FakeMetric) -> NvmlReturn {
+        let mut state = self.state.lock().expect("fake NVML state lock poisoned");
+        let Some(statuses) = state.metric_statuses.get_mut(&metric) else {
+            return NVML_SUCCESS;
+        };
+        if statuses.len() > 1 {
+            statuses.pop_front().unwrap_or(NVML_SUCCESS)
+        } else {
+            statuses.front().copied().unwrap_or(NVML_SUCCESS)
+        }
+    }
+
+    fn init(&self) -> NvmlReturn {
+        self.state
+            .lock()
+            .expect("fake NVML state lock poisoned")
+            .init_status
+    }
+
+    fn shutdown(&self) -> NvmlReturn {
+        self.state
+            .lock()
+            .expect("fake NVML state lock poisoned")
+            .shutdown_status
+    }
+
+    fn driver_version(&self, buffer: *mut c_char, length: u32) -> NvmlReturn {
+        let version = self
+            .state
+            .lock()
+            .expect("fake NVML state lock poisoned")
+            .driver_version
+            .clone();
+        write_c_buffer(buffer, length, &version)
+    }
+
+    fn device_count(&self, count: *mut u32) -> NvmlReturn {
+        unsafe {
+            *count = 1;
+        }
+        NVML_SUCCESS
+    }
+
+    fn device_handle(&self, _index: u32, handle: *mut NvmlDevice) -> NvmlReturn {
+        unsafe {
+            *handle = 1_usize as NvmlDevice;
+        }
+        NVML_SUCCESS
+    }
+
+    fn device_name(&self, buffer: *mut c_char, length: u32) -> NvmlReturn {
+        write_c_buffer(buffer, length, "Injected NVIDIA GPU")
+    }
+
+    fn utilization(&self, utilization: *mut NvmlUtilization) -> NvmlReturn {
+        let status = self.next_status(FakeMetric::Utilization);
+        if status == NVML_SUCCESS {
+            unsafe {
+                (*utilization).gpu = 7;
+                (*utilization).memory = 3;
+            }
+        }
+        status
+    }
+
+    fn temperature(&self, temperature: *mut u32) -> NvmlReturn {
+        let status = self.next_status(FakeMetric::Temperature);
+        if status == NVML_SUCCESS {
+            unsafe {
+                *temperature = 47;
+            }
+        }
+        status
+    }
+
+    fn power(&self, milliwatts: *mut u32) -> NvmlReturn {
+        let status = self.next_status(FakeMetric::Power);
+        if status == NVML_SUCCESS {
+            unsafe {
+                *milliwatts = 41_776;
+            }
+        }
+        status
+    }
+
+    fn clock(&self, clock_type: u32, mhz: *mut u32) -> NvmlReturn {
+        let metric = if clock_type == NVML_CLOCK_MEM {
+            FakeMetric::MemoryClock
+        } else {
+            FakeMetric::GraphicsClock
+        };
+        let status = self.next_status(metric);
+        if status == NVML_SUCCESS {
+            unsafe {
+                *mhz = if clock_type == NVML_CLOCK_MEM {
+                    16_001
+                } else {
+                    2_535
+                };
+            }
+        }
+        status
+    }
+
+    fn memory(&self, memory: *mut NvmlMemory) -> NvmlReturn {
+        let status = self.next_status(FakeMetric::Memory);
+        if status == NVML_SUCCESS {
+            unsafe {
+                (*memory).total = 17_094_934_528;
+                (*memory).free = 13_567_782_912;
+                (*memory).used = 3_527_151_616;
+            }
+        }
+        status
+    }
+}
+
+#[derive(Debug)]
+enum NvmlDispatch {
+    Native(NvmlFunctions),
+    Fake(FakeNvmlDispatch),
+}
+
+impl NvmlDispatch {
+    fn init(&self) -> NvmlReturn {
+        match self {
+            Self::Native(functions) => unsafe { (functions.init_v2)() },
+            Self::Fake(dispatch) => dispatch.init(),
+        }
+    }
+
+    fn shutdown(&self) -> NvmlReturn {
+        match self {
+            Self::Native(functions) => unsafe { (functions.shutdown)() },
+            Self::Fake(dispatch) => dispatch.shutdown(),
+        }
+    }
+
+    fn driver_version(&self, buffer: *mut c_char, length: u32) -> NvmlReturn {
+        match self {
+            Self::Native(functions) => unsafe {
+                (functions.system_get_driver_version)(buffer, length)
+            },
+            Self::Fake(dispatch) => dispatch.driver_version(buffer, length),
+        }
+    }
+
+    fn device_count(&self, count: *mut u32) -> NvmlReturn {
+        match self {
+            Self::Native(functions) => unsafe { (functions.device_get_count_v2)(count) },
+            Self::Fake(dispatch) => dispatch.device_count(count),
+        }
+    }
+
+    fn device_handle(&self, index: u32, handle: *mut NvmlDevice) -> NvmlReturn {
+        match self {
+            Self::Native(functions) => unsafe {
+                (functions.device_get_handle_by_index_v2)(index, handle)
+            },
+            Self::Fake(dispatch) => dispatch.device_handle(index, handle),
+        }
+    }
+
+    fn device_name(&self, device: NvmlDevice, buffer: *mut c_char, length: u32) -> NvmlReturn {
+        match self {
+            Self::Native(functions) => unsafe {
+                (functions.device_get_name)(device, buffer, length)
+            },
+            Self::Fake(dispatch) => dispatch.device_name(buffer, length),
+        }
+    }
+
+    fn utilization(&self, device: NvmlDevice, utilization: *mut NvmlUtilization) -> NvmlReturn {
+        match self {
+            Self::Native(functions) => unsafe {
+                (functions.device_get_utilization_rates)(device, utilization)
+            },
+            Self::Fake(dispatch) => dispatch.utilization(utilization),
+        }
+    }
+
+    fn temperature(&self, device: NvmlDevice, sensor: u32, temperature: *mut u32) -> NvmlReturn {
+        match self {
+            Self::Native(functions) => unsafe {
+                (functions.device_get_temperature)(device, sensor, temperature)
+            },
+            Self::Fake(dispatch) => dispatch.temperature(temperature),
+        }
+    }
+
+    fn power(&self, device: NvmlDevice, milliwatts: *mut u32) -> NvmlReturn {
+        match self {
+            Self::Native(functions) => unsafe {
+                (functions.device_get_power_usage)(device, milliwatts)
+            },
+            Self::Fake(dispatch) => dispatch.power(milliwatts),
+        }
+    }
+
+    fn clock(&self, device: NvmlDevice, clock_type: u32, mhz: *mut u32) -> NvmlReturn {
+        match self {
+            Self::Native(functions) => unsafe {
+                (functions.device_get_clock_info)(device, clock_type, mhz)
+            },
+            Self::Fake(dispatch) => dispatch.clock(clock_type, mhz),
+        }
+    }
+
+    fn memory(&self, device: NvmlDevice, memory: *mut NvmlMemory) -> NvmlReturn {
+        match self {
+            Self::Native(functions) => unsafe {
+                (functions.device_get_memory_info)(device, memory)
+            },
+            Self::Fake(dispatch) => dispatch.memory(memory),
+        }
+    }
 }
 
 impl NvmlFunctions {
@@ -248,10 +586,55 @@ impl NvmlFunctions {
     }
 }
 
+struct LoadedNvml {
+    library: NvmlLibrary,
+    dispatch: NvmlDispatch,
+}
+
+trait NvmlLoader {
+    fn load(&self, stats: Arc<Mutex<NvmlStats>>) -> Result<LoadedNvml, (ReadStatus, String)>;
+}
+
+struct NativeNvmlLoader;
+
+impl NvmlLoader for NativeNvmlLoader {
+    fn load(&self, stats: Arc<Mutex<NvmlStats>>) -> Result<LoadedNvml, (ReadStatus, String)> {
+        let library = NvmlLibrary::load(stats)?;
+        let functions = NvmlFunctions::load(library.module())?;
+        Ok(LoadedNvml {
+            library,
+            dispatch: NvmlDispatch::Native(functions),
+        })
+    }
+}
+
+struct InjectedNvmlLoader {
+    injection: NvmlInjection,
+}
+
+impl NvmlLoader for InjectedNvmlLoader {
+    fn load(&self, stats: Arc<Mutex<NvmlStats>>) -> Result<LoadedNvml, (ReadStatus, String)> {
+        with_stats(&stats, |stats| stats.library_load_attempts += 1);
+        if matches!(self.injection, NvmlInjection::MissingLibrary) {
+            return Err((
+                ReadStatus::ProviderMissing,
+                "nvml_runtime_missing".to_string(),
+            ));
+        }
+        with_stats(&stats, |stats| stats.library_load_successes += 1);
+        Ok(LoadedNvml {
+            library: NvmlLibrary::injected(stats.clone()),
+            dispatch: NvmlDispatch::Fake(FakeNvmlDispatch::new(self.injection)),
+        })
+    }
+}
+
 #[derive(Debug)]
 pub struct NvmlProvider {
+    // Keep the loaded library alive for the complete provider/session lifetime.
     _library: NvmlLibrary,
-    functions: NvmlFunctions,
+    dispatch: NvmlDispatch,
+    stats: Arc<Mutex<NvmlStats>>,
     initialized: bool,
     driver_version: Option<String>,
     devices: Vec<NvmlDeviceEntry>,
@@ -259,15 +642,37 @@ pub struct NvmlProvider {
 
 impl NvmlProvider {
     pub fn new() -> ReadResult<Self> {
-        let library = match NvmlLibrary::load() {
-            Ok(library) => library,
+        let stats = Arc::new(Mutex::new(NvmlStats::default()));
+        Self::new_with_loader(NativeNvmlLoader, stats)
+    }
+
+    pub fn new_injected_with_stats(injection: NvmlInjection) -> (ReadResult<Self>, NvmlStats) {
+        let stats = Arc::new(Mutex::new(NvmlStats::default()));
+        let result = Self::new_with_loader(InjectedNvmlLoader { injection }, stats.clone());
+        let snapshot = stats_snapshot(&stats);
+        (result, snapshot)
+    }
+
+    fn new_with_loader<L: NvmlLoader>(loader: L, stats: Arc<Mutex<NvmlStats>>) -> ReadResult<Self> {
+        let LoadedNvml { library, dispatch } = match loader.load(stats.clone()) {
+            Ok(loaded) => loaded,
             Err((status, reason_code)) => return read_status(status, reason_code),
         };
-        let functions = match NvmlFunctions::load(library.module()) {
-            Ok(functions) => functions,
-            Err((status, reason_code)) => return read_status(status, reason_code),
-        };
-        let init_status = unsafe { (functions.init_v2)() };
+        Self::from_dispatch(library, dispatch, stats)
+    }
+
+    fn from_dispatch(
+        library: NvmlLibrary,
+        dispatch: NvmlDispatch,
+        stats: Arc<Mutex<NvmlStats>>,
+    ) -> ReadResult<Self> {
+        let init_status = dispatch.init();
+        with_stats(&stats, |stats| {
+            stats.init_calls += 1;
+            if init_status == NVML_SUCCESS {
+                stats.init_successes += 1;
+            }
+        });
         if init_status != NVML_SUCCESS {
             let (status, reason_code) = map_nvml_status(init_status);
             return read_status(status, reason_code.to_string());
@@ -275,7 +680,8 @@ impl NvmlProvider {
 
         let mut provider = Self {
             _library: library,
-            functions,
+            dispatch,
+            stats,
             initialized: true,
             driver_version: None,
             devices: Vec::new(),
@@ -291,14 +697,42 @@ impl NvmlProvider {
         }
     }
 
+    pub fn shutdown(mut self) -> NvmlStopResult {
+        let (status, reason_code) = self.shutdown_internal();
+        let stats = self.stats.clone();
+        drop(self);
+        NvmlStopResult {
+            status,
+            reason_code,
+            stats: stats_snapshot(&stats),
+        }
+    }
+
+    fn shutdown_internal(&mut self) -> (ReadStatus, String) {
+        if !self.initialized {
+            return (ReadStatus::Value, "already_shutdown".to_string());
+        }
+        let status = self.dispatch.shutdown();
+        with_stats(&self.stats, |stats| {
+            stats.shutdown_calls += 1;
+            if status == NVML_SUCCESS {
+                stats.shutdown_successes += 1;
+            }
+        });
+        self.initialized = false;
+        if status == NVML_SUCCESS {
+            (ReadStatus::Value, "ok".to_string())
+        } else {
+            let (status, reason_code) = map_nvml_status(status);
+            (status, reason_code.to_string())
+        }
+    }
+
     fn enumerate(&mut self) -> Result<(), (ReadStatus, String)> {
         let mut driver_version = [0_i8; 256];
-        let driver_status = unsafe {
-            (self.functions.system_get_driver_version)(
-                driver_version.as_mut_ptr(),
-                driver_version.len() as u32,
-            )
-        };
+        let driver_status = self
+            .dispatch
+            .driver_version(driver_version.as_mut_ptr(), driver_version.len() as u32);
         if driver_status != NVML_SUCCESS {
             let (status, reason_code) = map_nvml_status(driver_status);
             return Err((status, reason_code.to_string()));
@@ -306,7 +740,7 @@ impl NvmlProvider {
         self.driver_version = c_string(&driver_version);
 
         let mut count = 0_u32;
-        let count_status = unsafe { (self.functions.device_get_count_v2)(&mut count) };
+        let count_status = self.dispatch.device_count(&mut count);
         if count_status != NVML_SUCCESS {
             let (status, reason_code) = map_nvml_status(count_status);
             return Err((status, reason_code.to_string()));
@@ -314,8 +748,7 @@ impl NvmlProvider {
 
         for index in 0..count {
             let mut handle = ptr::null_mut();
-            let handle_status =
-                unsafe { (self.functions.device_get_handle_by_index_v2)(index, &mut handle) };
+            let handle_status = self.dispatch.device_handle(index, &mut handle);
             if handle_status != NVML_SUCCESS {
                 let (status, reason_code) = map_nvml_status(handle_status);
                 self.devices.push(NvmlDeviceEntry {
@@ -344,9 +777,9 @@ impl NvmlProvider {
 
     fn device_name(&self, device: NvmlDevice) -> Option<String> {
         let mut buffer = [0_i8; 256];
-        let status = unsafe {
-            (self.functions.device_get_name)(device, buffer.as_mut_ptr(), buffer.len() as u32)
-        };
+        let status = self
+            .dispatch
+            .device_name(device, buffer.as_mut_ptr(), buffer.len() as u32);
         (status == NVML_SUCCESS).then(|| c_string(&buffer).unwrap_or_else(|| "unknown".to_string()))
     }
 
@@ -465,31 +898,48 @@ impl NvmlProvider {
     }
 
     pub fn sample_all(&self) -> Vec<GpuDeviceSample> {
-        self.devices
-            .iter()
-            .filter_map(|device| {
-                let handle = device.handle?;
-                let utilization = timed(|| self.read_utilization(handle));
-                let memory = timed(|| self.read_memory(handle));
-                Some(GpuDeviceSample {
-                    device_key: device.device_key(),
-                    utilization_percent: split_pair(utilization.clone(), true),
-                    memory_controller_utilization_percent: split_pair(utilization, false),
-                    temperature_celsius: timed(|| self.read_temperature(handle)),
-                    power_watts: timed(|| self.read_power_watts(handle)),
-                    graphics_clock_mhz: timed(|| self.read_clock(handle, NVML_CLOCK_GRAPHICS)),
-                    memory_clock_mhz: timed(|| self.read_clock(handle, NVML_CLOCK_MEM)),
-                    vram_used_bytes: split_pair(memory.clone(), true),
-                    vram_total_bytes: split_pair(memory, false),
-                })
-            })
-            .collect()
+        let mut samples = Vec::new();
+        for device in &self.devices {
+            let Some(handle) = device.handle else {
+                continue;
+            };
+            let utilization = timed(|| self.read_utilization(handle));
+            let memory = timed(|| self.read_memory(handle));
+            let temperature = timed(|| self.read_temperature(handle));
+            let power = timed(|| self.read_power_watts(handle));
+            let graphics_clock = timed(|| self.read_clock(handle, NVML_CLOCK_GRAPHICS));
+            let memory_clock = timed(|| self.read_clock(handle, NVML_CLOCK_MEM));
+            let failed = utilization.result.value.is_none()
+                || memory.result.value.is_none()
+                || temperature.result.value.is_none()
+                || power.result.value.is_none()
+                || graphics_clock.result.value.is_none()
+                || memory_clock.result.value.is_none();
+            with_stats(&self.stats, |stats| {
+                stats.sample_count += 1;
+                if failed {
+                    stats.failed_sample_count += 1;
+                }
+            });
+            samples.push(GpuDeviceSample {
+                device_key: device.device_key(),
+                utilization_percent: split_pair(utilization.clone(), true),
+                memory_controller_utilization_percent: split_pair(utilization, false),
+                temperature_celsius: temperature,
+                power_watts: power,
+                graphics_clock_mhz: graphics_clock,
+                memory_clock_mhz: memory_clock,
+                vram_used_bytes: split_pair(memory.clone(), true),
+                vram_total_bytes: split_pair(memory, false),
+            });
+        }
+        samples
     }
 
     fn read_utilization(&self, device: NvmlDevice) -> ReadResult<(f64, f64)> {
         let mut utilization = NvmlUtilization::default();
-        let status =
-            unsafe { (self.functions.device_get_utilization_rates)(device, &mut utilization) };
+        let status = self.dispatch.utilization(device, &mut utilization);
+        self.record_metric_call(status);
         if status != NVML_SUCCESS {
             return mapped_result(status);
         }
@@ -502,9 +952,10 @@ impl NvmlProvider {
 
     fn read_temperature(&self, device: NvmlDevice) -> ReadResult<f64> {
         let mut temperature = 0_u32;
-        let status = unsafe {
-            (self.functions.device_get_temperature)(device, NVML_TEMPERATURE_GPU, &mut temperature)
-        };
+        let status = self
+            .dispatch
+            .temperature(device, NVML_TEMPERATURE_GPU, &mut temperature);
+        self.record_metric_call(status);
         if status != NVML_SUCCESS {
             return mapped_result(status);
         }
@@ -517,7 +968,8 @@ impl NvmlProvider {
 
     fn read_power_watts(&self, device: NvmlDevice) -> ReadResult<f64> {
         let mut milliwatts = 0_u32;
-        let status = unsafe { (self.functions.device_get_power_usage)(device, &mut milliwatts) };
+        let status = self.dispatch.power(device, &mut milliwatts);
+        self.record_metric_call(status);
         if status != NVML_SUCCESS {
             return mapped_result(status);
         }
@@ -530,8 +982,8 @@ impl NvmlProvider {
 
     fn read_clock(&self, device: NvmlDevice, clock_type: u32) -> ReadResult<f64> {
         let mut mhz = 0_u32;
-        let status =
-            unsafe { (self.functions.device_get_clock_info)(device, clock_type, &mut mhz) };
+        let status = self.dispatch.clock(device, clock_type, &mut mhz);
+        self.record_metric_call(status);
         if status != NVML_SUCCESS {
             return mapped_result(status);
         }
@@ -544,7 +996,8 @@ impl NvmlProvider {
 
     fn read_memory(&self, device: NvmlDevice) -> ReadResult<(f64, f64)> {
         let mut memory = NvmlMemory::default();
-        let status = unsafe { (self.functions.device_get_memory_info)(device, &mut memory) };
+        let status = self.dispatch.memory(device, &mut memory);
+        self.record_metric_call(status);
         if status != NVML_SUCCESS {
             return mapped_result(status);
         }
@@ -554,15 +1007,21 @@ impl NvmlProvider {
             value: Some((memory.used as f64, memory.total as f64)),
         }
     }
+
+    fn record_metric_call(&self, status: NvmlReturn) {
+        with_stats(&self.stats, |stats| {
+            stats.gpu_metric_call_count += 1;
+            if status != NVML_SUCCESS {
+                stats.failed_gpu_metric_call_count += 1;
+            }
+        });
+    }
 }
 
 impl Drop for NvmlProvider {
     fn drop(&mut self) {
         if self.initialized {
-            unsafe {
-                let _ = (self.functions.shutdown)();
-            }
-            self.initialized = false;
+            let _ = self.shutdown_internal();
         }
     }
 }
@@ -615,8 +1074,10 @@ pub fn map_nvml_status(status: NvmlReturn) -> (ReadStatus, &'static str) {
         NVML_ERROR_DRIVER_NOT_LOADED => (ReadStatus::ProviderMissing, "nvml_driver_missing"),
         NVML_ERROR_LIBRARY_NOT_FOUND => (ReadStatus::ProviderMissing, "nvml_runtime_missing"),
         NVML_ERROR_FUNCTION_NOT_FOUND => (ReadStatus::ProviderMissing, "nvml_symbol_missing"),
-        NVML_ERROR_GPU_IS_LOST => (ReadStatus::Failed, "nvml_gpu_lost"),
-        NVML_ERROR_LIB_RM_VERSION_MISMATCH => (ReadStatus::Failed, "nvml_driver_library_mismatch"),
+        NVML_ERROR_GPU_IS_LOST => (ReadStatus::RuntimeFailed, "nvml_gpu_lost"),
+        NVML_ERROR_LIB_RM_VERSION_MISMATCH => {
+            (ReadStatus::RuntimeFailed, "nvml_driver_library_mismatch")
+        }
         NVML_ERROR_UNINITIALIZED => (ReadStatus::Failed, "nvml_uninitialized"),
         NVML_ERROR_INVALID_ARGUMENT => (ReadStatus::Failed, "nvml_invalid_argument"),
         NVML_ERROR_ALREADY_INITIALIZED => (ReadStatus::Failed, "nvml_already_initialized"),
@@ -626,7 +1087,7 @@ pub fn map_nvml_status(status: NvmlReturn) -> (ReadStatus, &'static str) {
         NVML_ERROR_TIMEOUT => (ReadStatus::Failed, "nvml_timeout"),
         NVML_ERROR_IRQ_ISSUE => (ReadStatus::Failed, "nvml_irq_issue"),
         NVML_ERROR_CORRUPTED_IN_USE => (ReadStatus::Failed, "nvml_corrupted_in_use"),
-        NVML_ERROR_RESET_REQUIRED => (ReadStatus::Failed, "nvml_reset_required"),
+        NVML_ERROR_RESET_REQUIRED => (ReadStatus::RuntimeFailed, "nvml_reset_required"),
         NVML_ERROR_OPERATING_SYSTEM => (ReadStatus::Failed, "nvml_operating_system"),
         NVML_ERROR_IN_USE => (ReadStatus::Failed, "nvml_in_use"),
         NVML_ERROR_MEMORY => (ReadStatus::Failed, "nvml_memory_error"),
@@ -703,8 +1164,30 @@ impl From<ReadStatus> for SupportStatus {
             ReadStatus::PermissionDenied => SupportStatus::PermissionDenied,
             ReadStatus::ProviderMissing => SupportStatus::ProviderMissing,
             ReadStatus::Failed => SupportStatus::ProbeFailed,
+            ReadStatus::RuntimeFailed => SupportStatus::RuntimeFailed,
         }
     }
+}
+
+fn with_stats(stats: &Arc<Mutex<NvmlStats>>, update: impl FnOnce(&mut NvmlStats)) {
+    update(&mut stats.lock().expect("NVML stats lock poisoned"));
+}
+
+fn stats_snapshot(stats: &Arc<Mutex<NvmlStats>>) -> NvmlStats {
+    stats.lock().expect("NVML stats lock poisoned").clone()
+}
+
+fn write_c_buffer(buffer: *mut c_char, length: u32, value: &str) -> NvmlReturn {
+    if buffer.is_null() || length == 0 {
+        return NVML_ERROR_INVALID_ARGUMENT;
+    }
+    let bytes = value.as_bytes();
+    let copy_length = bytes.len().min(length.saturating_sub(1) as usize);
+    unsafe {
+        ptr::copy_nonoverlapping(bytes.as_ptr() as *const c_char, buffer, copy_length);
+        *buffer.add(copy_length) = 0;
+    }
+    NVML_SUCCESS
 }
 
 fn milliwatts_to_watts(milliwatts: u32) -> f64 {
@@ -714,8 +1197,8 @@ fn milliwatts_to_watts(milliwatts: u32) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::{
-        map_nvml_status, milliwatts_to_watts, split_pair, NvmlDeviceEntry, TimedRead,
-        NO_COMPATIBLE_GPU_REASON,
+        map_nvml_status, milliwatts_to_watts, split_pair, NvmlDeviceEntry, NvmlInjection,
+        NvmlProvider, TimedRead, NO_COMPATIBLE_GPU_REASON,
     };
     use crate::windows::{ReadResult, ReadStatus};
 
@@ -729,10 +1212,17 @@ mod tests {
             map_nvml_status(4),
             (ReadStatus::PermissionDenied, "nvml_no_permission")
         );
-        assert_eq!(map_nvml_status(15), (ReadStatus::Failed, "nvml_gpu_lost"));
+        assert_eq!(
+            map_nvml_status(15),
+            (ReadStatus::RuntimeFailed, "nvml_gpu_lost")
+        );
         assert_eq!(
             map_nvml_status(18),
-            (ReadStatus::Failed, "nvml_driver_library_mismatch")
+            (ReadStatus::RuntimeFailed, "nvml_driver_library_mismatch")
+        );
+        assert_eq!(
+            map_nvml_status(16),
+            (ReadStatus::RuntimeFailed, "nvml_reset_required")
         );
         assert_eq!(
             map_nvml_status(12),
@@ -742,6 +1232,7 @@ mod tests {
             map_nvml_status(0xdead),
             (ReadStatus::Failed, "nvml_call_failed")
         );
+        assert_eq!(map_nvml_status(10), (ReadStatus::Failed, "nvml_timeout"));
     }
 
     #[test]
@@ -784,5 +1275,93 @@ mod tests {
         };
         assert_eq!(split_pair(timed.clone(), true).result.value, Some(3.0));
         assert_eq!(split_pair(timed, false).result.value, Some(16.0));
+    }
+
+    #[test]
+    fn injected_missing_library_is_safe_and_has_no_provider() {
+        let (result, stats) = NvmlProvider::new_injected_with_stats(NvmlInjection::MissingLibrary);
+        assert_eq!(result.status, ReadStatus::ProviderMissing);
+        assert_eq!(result.reason_code, "nvml_runtime_missing");
+        assert!(result.value.is_none());
+        assert_eq!(stats.library_load_attempts, 1);
+        assert_eq!(stats.library_load_successes, 0);
+        assert_eq!(stats.library_release_count, 0);
+    }
+
+    #[test]
+    fn injected_partial_unsupported_keeps_other_metrics_sampling() {
+        let (result, _) = NvmlProvider::new_injected_with_stats(NvmlInjection::PartialUnsupported);
+        let provider = result.value.expect("injected provider should initialize");
+        let sample = provider.sample_all().pop().expect("one fake GPU");
+        assert_eq!(sample.utilization_percent.result.value, Some(7.0));
+        assert_eq!(sample.power_watts.result.status, ReadStatus::Unsupported);
+        assert!(sample.power_watts.result.value.is_none());
+        assert_eq!(
+            sample.memory_clock_mhz.result.status,
+            ReadStatus::Unsupported
+        );
+        assert!(sample.memory_clock_mhz.result.value.is_none());
+        let stop = provider.shutdown();
+        assert_eq!(stop.status, ReadStatus::Value);
+        assert_eq!(stop.stats.gpu_metric_call_count, 6);
+        assert_eq!(stop.stats.failed_gpu_metric_call_count, 2);
+        assert_eq!(stop.stats.library_release_count, 1);
+    }
+
+    #[test]
+    fn injected_transient_metric_failure_recovers_without_retry_loop() {
+        let (result, _) =
+            NvmlProvider::new_injected_with_stats(NvmlInjection::TransientMetricFailure);
+        let provider = result.value.expect("injected provider should initialize");
+        let first = provider.sample_all().pop().expect("one fake GPU");
+        let second = provider.sample_all().pop().expect("one fake GPU");
+        assert_eq!(first.power_watts.result.status, ReadStatus::Failed);
+        assert_eq!(first.power_watts.result.reason_code, "nvml_timeout");
+        assert_eq!(second.power_watts.result.value, Some(41.776));
+        let stop = provider.shutdown();
+        assert_eq!(stop.stats.sample_count, 2);
+        assert_eq!(stop.stats.failed_sample_count, 1);
+        assert_eq!(stop.stats.failed_gpu_metric_call_count, 1);
+        assert_eq!(stop.stats.shutdown_calls, 1);
+        assert_eq!(stop.stats.library_release_count, 1);
+    }
+
+    #[test]
+    fn injected_provider_initialization_runtime_failure_is_distinct_from_probe_failure() {
+        let (result, _) = NvmlProvider::new_injected_with_stats(
+            NvmlInjection::ProviderInitializationRuntimeFailure,
+        );
+        assert_eq!(result.status, ReadStatus::RuntimeFailed);
+        assert_eq!(result.reason_code, "nvml_gpu_lost");
+        assert!(result.value.is_none());
+    }
+
+    #[test]
+    fn injected_sampling_stage_gpu_loss_is_classified_without_retry_or_zero() {
+        let (result, _) =
+            NvmlProvider::new_injected_with_stats(NvmlInjection::GpuLostAfterFirstSample);
+        let provider = result.value.expect("injected provider should initialize");
+        let first = provider.sample_all().pop().expect("one fake GPU");
+        let second = provider.sample_all().pop().expect("one fake GPU");
+
+        assert_eq!(first.utilization_percent.result.status, ReadStatus::Value);
+        assert_eq!(
+            second.utilization_percent.result.status,
+            ReadStatus::RuntimeFailed
+        );
+        assert_eq!(
+            second.utilization_percent.result.reason_code,
+            "nvml_gpu_lost"
+        );
+        assert!(second.utilization_percent.result.value.is_none());
+        assert_eq!(second.temperature_celsius.result.value, Some(47.0));
+
+        let stop = provider.shutdown();
+        assert_eq!(stop.stats.sample_count, 2);
+        assert_eq!(stop.stats.failed_sample_count, 1);
+        assert_eq!(stop.stats.gpu_metric_call_count, 12);
+        assert_eq!(stop.stats.failed_gpu_metric_call_count, 1);
+        assert_eq!(stop.stats.shutdown_successes, 1);
+        assert_eq!(stop.stats.library_release_count, 1);
     }
 }
