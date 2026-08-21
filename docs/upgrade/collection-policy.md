@@ -102,7 +102,7 @@ PR-04A 只建立通用 GPU storage contract，不宣布任何厂商 Provider 已
 3. **PR-04 production Provider admission**：每个正式 Provider 仍必须引用对应 Spike 报告，并补齐该来源尚缺的短期证据。
 4. **Default-enable / support-matrix / release-stability gate**：24 小时 soak、数据库增长 soak、代表硬件矩阵、AMD/Intel 覆盖和完整 release hardware matrix 在这里评估；它们不是 PR-04A 的实现入口条件。
 
-当前 Spike-01B 仍只支持在 RTX 5070 Ti 开发机上继续 NVML feasibility work。Administrator comparison、30-minute idle、30-minute representative-load、cleanup/re-enable、failure/partial-support 和可行时的 sleep/wake evidence 完成前，NVIDIA production Provider 保持 pending。
+Spike-01B 已在 RTX 5070 Ti 当前开发机上以 short-term implementation admission PASS 完成 administrator comparison、30-minute idle、30-minute representative-load、cleanup/re-enable、failure/partial-support 和真实 sleep/wake evidence。NVIDIA production Provider 可以在既有 capability 与生命周期契约后接入；结论仍是 machine-scoped，GPU 默认关闭，24-hour soak、database-growth 和 support matrix 继续 deferred。
 - 超时调用会保留隔离 worker 中的 pending completion。Host 按 operation 和 generation reconcile late lifecycle result；新 settings、disable、pause 或 shutdown 产生的新 intent 会拒绝旧 result 恢复 Running。过期 sample payload 丢弃，不写当前 frame；旧 probe result 不覆盖更新后的 capability generation。
 - current-generation 的 late Probe success/failure 若改变 capability truth，会同步更新 canonical descriptor 和 effective CollectionPlan；Unsupported -> Supported 可以恢复用户仍启用的 active category，Supported -> Unsupported 会移除它。若用户已经 disable、pause 或 shutdown，只更新 capability/status，不自动启动 provider。
 - late Stop failure 若当前 intent 仍 inactive，则保持 Failed/StopFailed 并清除 retry；若用户已重新 enable，则为当前 generation 安排 bounded cleanup-before-start recovery，不会留下 enabled + failed + no retry 的永久状态。pause/shutdown 不会因旧 stop completion 安排新的 start。

@@ -74,6 +74,7 @@ pub enum ProviderErrorCode {
     StartupFailed,
     ReconfigureFailed,
     SampleFailed,
+    RuntimeFailed,
     StopFailed,
     Timeout,
     Unsupported,
@@ -113,6 +114,65 @@ pub struct ProviderStatus {
     pub last_success_at_ms: Option<i64>,
     pub failure_count: u64,
     pub last_error: Option<ProviderErrorSummary>,
+}
+
+/// Runtime truth for a metric within the current collection session.
+///
+/// This deliberately uses the same vocabulary as `collection_session_metric`, while keeping
+/// value presence independent from capability state: a legal numeric zero is still a value.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MetricRuntimeSupportStatus {
+    Supported,
+    Unsupported,
+    PermissionDenied,
+    ProviderMissing,
+    ProbeFailed,
+    Failed,
+}
+
+impl MetricRuntimeSupportStatus {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Supported => "supported",
+            Self::Unsupported => "unsupported",
+            Self::PermissionDenied => "permission_denied",
+            Self::ProviderMissing => "provider_missing",
+            Self::ProbeFailed => "probe_failed",
+            Self::Failed => "failed",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RuntimeDeviceMetadata {
+    pub stable_key: String,
+    pub category: MetricCategory,
+    pub vendor: Option<String>,
+    pub model: Option<String>,
+    pub capacity_bytes: Option<i64>,
+}
+
+/// Per-metric runtime capability reported by a production provider. Providers only return this
+/// data; the collector owns persistence through the existing writer boundary.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProviderMetricMetadata {
+    pub category: MetricCategory,
+    pub metric_key: String,
+    pub device: Option<RuntimeDeviceMetadata>,
+    pub support_status: MetricRuntimeSupportStatus,
+}
+
+/// Metadata ready for `collection_session_metric` persistence after ProviderHost has reconciled
+/// provider state with the desired CollectionPlan.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CollectionSessionMetricMetadata {
+    pub provider_id: String,
+    pub category: MetricCategory,
+    pub metric_key: String,
+    pub device: Option<RuntimeDeviceMetadata>,
+    pub enabled: bool,
+    pub support_status: MetricRuntimeSupportStatus,
+    pub interval_ms: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

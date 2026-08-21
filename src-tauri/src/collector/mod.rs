@@ -1,4 +1,5 @@
 pub mod interval_engine;
 pub mod manager;
+pub mod nvidia_nvml;
 pub mod provider;
 pub mod system_metrics;

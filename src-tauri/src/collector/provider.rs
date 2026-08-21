@@ -1,8 +1,9 @@
 use super::system_metrics::{DiskCapabilityProbe, PdhDiskCapabilityProbe, SystemSampler};
 use crate::models::{
-    CapabilityState, CapabilitySupportStatus, CollectionSettings, MetricCapabilityStatus,
-    MetricCategory, ProviderErrorCode, ProviderErrorSummary, ProviderLifecycleState,
-    ProviderStatus, ResourceSnapshot,
+    CapabilityState, CapabilitySupportStatus, CollectionSessionMetricMetadata, CollectionSettings,
+    MetricCapabilityStatus, MetricCategory, MetricRuntimeSupportStatus, ProviderErrorCode,
+    ProviderErrorSummary, ProviderLifecycleState, ProviderMetricMetadata, ProviderStatus,
+    ResourceSnapshot,
 };
 use crossbeam_channel::{bounded, Receiver, SendTimeoutError, Sender};
 use std::{
@@ -237,6 +238,7 @@ pub struct ProviderLifecycleOutcome {
 #[derive(Debug, Clone)]
 pub enum ProviderSample {
     ResourceSnapshot(ResourceSnapshot),
+    GpuSamples(Vec<crate::models::GpuSample>),
 }
 
 pub trait MetricProvider: Send {
@@ -279,6 +281,9 @@ pub trait MetricProvider: Send {
     ) -> Result<Option<ProviderSample>, ProviderError>;
     fn stop(&mut self, context: &ProviderCallContext) -> Result<(), ProviderError>;
     fn health(&self) -> ProviderHealthObservation;
+    fn metric_metadata(&self) -> Vec<ProviderMetricMetadata> {
+        Vec::new()
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -322,14 +327,17 @@ enum ProviderReply {
     Probe {
         result: Result<Vec<ProviderCapabilitySpec>, ProviderError>,
         health: ProviderHealthObservation,
+        metric_metadata: Vec<ProviderMetricMetadata>,
     },
     Lifecycle {
         result: Result<ProviderLifecycleOutcome, ProviderError>,
         health: ProviderHealthObservation,
+        metric_metadata: Vec<ProviderMetricMetadata>,
     },
     Sample {
         result: Result<Option<ProviderSample>, ProviderError>,
         health: ProviderHealthObservation,
+        metric_metadata: Vec<ProviderMetricMetadata>,
     },
 }
 
@@ -349,6 +357,7 @@ struct ProviderCompletion {
 struct ProviderExecutor {
     command_tx: Sender<ProviderCommand>,
     pending: Option<PendingProviderCall>,
+    metric_metadata: Vec<ProviderMetricMetadata>,
 }
 
 impl ProviderExecutor {
@@ -361,7 +370,26 @@ impl ProviderExecutor {
         Self {
             command_tx,
             pending: None,
+            metric_metadata: Vec::new(),
         }
+    }
+
+    fn metric_metadata(&self) -> &[ProviderMetricMetadata] {
+        &self.metric_metadata
+    }
+
+    fn capture_metric_metadata(&mut self, reply: &ProviderReply) {
+        self.metric_metadata = match reply {
+            ProviderReply::Probe {
+                metric_metadata, ..
+            }
+            | ProviderReply::Lifecycle {
+                metric_metadata, ..
+            }
+            | ProviderReply::Sample {
+                metric_metadata, ..
+            } => metric_metadata.clone(),
+        };
     }
 
     fn probe(
@@ -380,8 +408,9 @@ impl ProviderExecutor {
                 reply,
             },
         )?;
+        self.capture_metric_metadata(&reply);
         match reply {
-            ProviderReply::Probe { result, health } => {
+            ProviderReply::Probe { result, health, .. } => {
                 result.map(|capabilities| (capabilities, health))
             }
             ProviderReply::Lifecycle { .. } | ProviderReply::Sample { .. } => {
@@ -409,6 +438,7 @@ impl ProviderExecutor {
                 reply,
             },
         )?;
+        self.capture_metric_metadata(&reply);
         lifecycle_reply(reply)
     }
 
@@ -428,6 +458,7 @@ impl ProviderExecutor {
                 reply,
             },
         )?;
+        self.capture_metric_metadata(&reply);
         lifecycle_reply(reply)
     }
 
@@ -449,8 +480,9 @@ impl ProviderExecutor {
                 reply,
             },
         )?;
+        self.capture_metric_metadata(&reply);
         match reply {
-            ProviderReply::Sample { result, health } => result.map(|sample| (sample, health)),
+            ProviderReply::Sample { result, health, .. } => result.map(|sample| (sample, health)),
             ProviderReply::Probe { .. } | ProviderReply::Lifecycle { .. } => {
                 Err(ProviderError::new(
                     ProviderErrorCode::ProviderMissing,
@@ -471,6 +503,7 @@ impl ProviderExecutor {
             deadline,
             |context, reply| ProviderCommand::Stop { context, reply },
         )?;
+        self.capture_metric_metadata(&reply);
         lifecycle_reply(reply).map(|(_, health)| health)
     }
 
@@ -549,11 +582,14 @@ impl ProviderExecutor {
             .reply
             .recv_timeout(deadline.saturating_duration_since(Instant::now()))
         {
-            Ok(reply) => Ok(Some(ProviderCompletion {
-                operation: pending.operation,
-                generation: pending.generation,
-                reply,
-            })),
+            Ok(reply) => {
+                self.capture_metric_metadata(&reply);
+                Ok(Some(ProviderCompletion {
+                    operation: pending.operation,
+                    generation: pending.generation,
+                    reply,
+                }))
+            }
             Err(crossbeam_channel::RecvTimeoutError::Disconnected) => Err(
                 ProviderError::without_message(ProviderErrorCode::ProviderMissing),
             ),
@@ -569,7 +605,7 @@ fn lifecycle_reply(
     reply: ProviderReply,
 ) -> Result<(ProviderLifecycleOutcome, ProviderHealthObservation), ProviderError> {
     match reply {
-        ProviderReply::Lifecycle { result, health } => result.map(|outcome| (outcome, health)),
+        ProviderReply::Lifecycle { result, health, .. } => result.map(|outcome| (outcome, health)),
         ProviderReply::Probe { .. } | ProviderReply::Sample { .. } => Err(ProviderError::new(
             ProviderErrorCode::ProviderMissing,
             "invalid provider lifecycle reply",
@@ -592,6 +628,7 @@ fn provider_worker(provider: &mut Box<dyn MetricProvider>, command_rx: Receiver<
                     ProviderReply::Probe {
                         result,
                         health: provider.health(),
+                        metric_metadata: provider.metric_metadata(),
                     },
                     reply,
                 )
@@ -606,6 +643,7 @@ fn provider_worker(provider: &mut Box<dyn MetricProvider>, command_rx: Receiver<
                     ProviderReply::Lifecycle {
                         result,
                         health: provider.health(),
+                        metric_metadata: provider.metric_metadata(),
                     },
                     reply,
                 )
@@ -620,6 +658,7 @@ fn provider_worker(provider: &mut Box<dyn MetricProvider>, command_rx: Receiver<
                     ProviderReply::Lifecycle {
                         result,
                         health: provider.health(),
+                        metric_metadata: provider.metric_metadata(),
                     },
                     reply,
                 )
@@ -637,6 +676,7 @@ fn provider_worker(provider: &mut Box<dyn MetricProvider>, command_rx: Receiver<
                     ProviderReply::Sample {
                         result,
                         health: provider.health(),
+                        metric_metadata: provider.metric_metadata(),
                     },
                     reply,
                 )
@@ -651,6 +691,7 @@ fn provider_worker(provider: &mut Box<dyn MetricProvider>, command_rx: Receiver<
                     ProviderReply::Lifecycle {
                         result,
                         health: provider.health(),
+                        metric_metadata: provider.metric_metadata(),
                     },
                     reply,
                 )
@@ -887,7 +928,7 @@ impl ProviderHost {
                         return;
                     }
                     match completion.reply {
-                        ProviderReply::Probe { result, health } => match result {
+                        ProviderReply::Probe { result, health, .. } => match result {
                             Ok(capabilities) => {
                                 capability_changed =
                                     runtime.descriptor.capabilities != capabilities;
@@ -932,7 +973,7 @@ impl ProviderHost {
                     };
                     let current = completion.generation == runtime.generation;
                     let (result, health) = match completion.reply {
-                        ProviderReply::Lifecycle { result, health } => (result, health),
+                        ProviderReply::Lifecycle { result, health, .. } => (result, health),
                         _ => (
                             Err(ProviderError::new(
                                 ProviderErrorCode::ProviderMissing,
@@ -951,9 +992,8 @@ impl ProviderHost {
                             if current && desired_active {
                                 update_health(runtime, health);
                                 runtime.lifecycle = ProviderLifecycleState::Running;
-                                runtime.last_error = None;
+                                runtime.last_error = runtime.provider_health.last_error.clone();
                                 runtime.stop_failure = None;
-                                runtime.provider_health.last_error = None;
                                 runtime.consecutive_failures = 0;
                                 runtime.next_sample_at = Some(now);
                                 clear_retry(runtime);
@@ -1009,7 +1049,9 @@ impl ProviderHost {
                 ProviderOperation::Stop => {
                     let current = completion.generation == runtime.generation;
                     let (result, health) = match completion.reply {
-                        ProviderReply::Lifecycle { result, health } => (result.map(|_| ()), health),
+                        ProviderReply::Lifecycle { result, health, .. } => {
+                            (result.map(|_| ()), health)
+                        }
                         _ => (
                             Err(ProviderError::new(
                                 ProviderErrorCode::ProviderMissing,
@@ -1363,8 +1405,7 @@ impl ProviderHost {
                     update_health(runtime, health);
                     runtime.lifecycle = ProviderLifecycleState::Running;
                     runtime.consecutive_failures = 0;
-                    runtime.last_error = None;
-                    runtime.provider_health.last_error = None;
+                    runtime.last_error = runtime.provider_health.last_error.clone();
                     if sample.is_some() {
                         runtime.last_success_at_ms = Some(timestamp_ms);
                     }
@@ -1373,9 +1414,18 @@ impl ProviderHost {
                     }
                 }
                 Err(error) => {
+                    let runtime_failure = error.code == ProviderErrorCode::RuntimeFailed;
                     record_failure(runtime, error);
                     let backoff = failure_backoff(plan.interval_ms, runtime.consecutive_failures);
                     runtime.next_sample_at = Some(now + backoff);
+                    if runtime_failure {
+                        // A provider that explicitly lost its native runtime must re-enter via
+                        // the existing lifecycle reconciliation path instead of attempting to
+                        // revive its session from inside `sample`.
+                        runtime.started = false;
+                        runtime.retry_action = Some(ProviderRetryAction::Reconfigure);
+                        runtime.retry_at = Some(now + backoff);
+                    }
                 }
             }
         }
@@ -1549,6 +1599,69 @@ impl ProviderHost {
             })
             .collect()
     }
+
+    /// Returns provider-reported per-metric runtime truth after it has been reconciled with the
+    /// desired plan. Persistence remains a collector/writer responsibility.
+    pub fn collection_session_metric_metadata(&self) -> Vec<CollectionSessionMetricMetadata> {
+        let mut metadata = Vec::new();
+        for (provider_id, runtime) in &self.providers {
+            let desired_plan = self.desired_plan.provider(provider_id);
+            for metric in runtime.executor.metric_metadata() {
+                let enabled = desired_plan.is_some_and(|plan| {
+                    plan.enabled && plan.enabled_categories.contains(&metric.category)
+                });
+                let support_status = if metric.support_status
+                    == MetricRuntimeSupportStatus::Supported
+                    && enabled
+                    && runtime.probe_failed
+                {
+                    MetricRuntimeSupportStatus::ProbeFailed
+                } else if metric.support_status == MetricRuntimeSupportStatus::Supported
+                    && enabled
+                    && runtime.lifecycle == ProviderLifecycleState::Failed
+                {
+                    metric_failure_status(runtime.last_error.as_ref())
+                } else {
+                    metric.support_status
+                };
+                metadata.push(CollectionSessionMetricMetadata {
+                    provider_id: provider_id.clone(),
+                    category: metric.category,
+                    metric_key: metric.metric_key.clone(),
+                    device: metric.device.clone(),
+                    enabled,
+                    support_status,
+                    interval_ms: desired_plan.map(|plan| plan.interval_ms),
+                });
+            }
+        }
+        metadata.sort_by(|left, right| {
+            left.provider_id
+                .cmp(&right.provider_id)
+                .then_with(|| left.metric_key.cmp(&right.metric_key))
+                .then_with(|| {
+                    left.device
+                        .as_ref()
+                        .map(|device| device.stable_key.as_str())
+                        .cmp(
+                            &right
+                                .device
+                                .as_ref()
+                                .map(|device| device.stable_key.as_str()),
+                        )
+                })
+        });
+        metadata
+    }
+}
+
+fn metric_failure_status(error: Option<&ProviderErrorSummary>) -> MetricRuntimeSupportStatus {
+    match error.map(|error| error.code) {
+        Some(ProviderErrorCode::PermissionDenied) => MetricRuntimeSupportStatus::PermissionDenied,
+        Some(ProviderErrorCode::ProviderMissing) => MetricRuntimeSupportStatus::ProviderMissing,
+        Some(ProviderErrorCode::Unsupported) => MetricRuntimeSupportStatus::Unsupported,
+        Some(_) | None => MetricRuntimeSupportStatus::Failed,
+    }
 }
 
 fn update_health(runtime: &mut ProviderRuntime, health: ProviderHealthObservation) {
@@ -1642,9 +1755,8 @@ fn attempt_start(
             update_health(runtime, health);
             runtime.started = true;
             runtime.lifecycle = ProviderLifecycleState::Running;
-            runtime.last_error = None;
+            runtime.last_error = runtime.provider_health.last_error.clone();
             runtime.stop_failure = None;
-            runtime.provider_health.last_error = None;
             runtime.consecutive_failures = 0;
             runtime.next_sample_at = Some(now);
             clear_retry(runtime);
@@ -2339,7 +2451,9 @@ mod tests {
             .unwrap();
         assert_eq!(cpu.state, CapabilityState::SupportedEnabled);
         let samples = sample_at(&mut host, now, 100);
-        let ProviderSample::ResourceSnapshot(snapshot) = &samples[0];
+        let ProviderSample::ResourceSnapshot(snapshot) = &samples[0] else {
+            panic!("windows baseline provider returned a non-baseline sample")
+        };
         assert_eq!(snapshot.system.cpu_percent, Some(0.0));
         assert_eq!(snapshot.system.disk_read_bytes_per_sec, Some(0));
         assert_eq!(snapshot.system.disk_write_bytes_per_sec, Some(0));

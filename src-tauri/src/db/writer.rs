@@ -1,13 +1,14 @@
 use crate::{
     db::usage::{intersect_foreground, StateRange, TimeRange},
     models::{
-        ActivityState, BootIdentity, CollectionSettings, ComputerState, ForegroundApp, GpuSample,
-        MetricCategory, ResourceSnapshot, SystemSample, GPU_BOARD_POWER_SCOPE,
+        ActivityState, BootIdentity, CollectionSessionMetricMetadata, CollectionSettings,
+        ComputerState, ForegroundApp, GpuSample, MetricCategory, MetricRuntimeSupportStatus,
+        ResourceSnapshot, RuntimeDeviceMetadata, SystemSample, GPU_BOARD_POWER_SCOPE,
     },
 };
 use rusqlite::{params, Connection, OptionalExtension, Transaction};
 use std::{
-    collections::{HashMap, HashSet, VecDeque},
+    collections::{BTreeMap, HashMap, HashSet, VecDeque},
     io,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
@@ -1057,6 +1058,70 @@ pub fn insert_resource_snapshot(
     )
 }
 
+/// Persists provider/session/device capability truth without giving providers direct database
+/// access. Values continue to flow through `FrameWriter`; this only records the current session's
+/// explanatory metadata.
+pub fn sync_collection_session_metrics(
+    conn: &Connection,
+    metadata: &[CollectionSessionMetricMetadata],
+    at_ms: i64,
+) -> rusqlite::Result<()> {
+    if metadata.is_empty() {
+        return Ok(());
+    }
+    ensure_runtime_session(conn, at_ms)?;
+    let tx = conn.unchecked_transaction()?;
+    let session_id: i64 = tx.query_row(
+        "SELECT CAST(value AS INTEGER) FROM settings WHERE key = 'runtime_collection_session_id'",
+        [],
+        |row| row.get(0),
+    )?;
+
+    let mut provider_statuses = BTreeMap::<(String, String), MetricRuntimeSupportStatus>::new();
+    for item in metadata {
+        if item.provider_id.trim().is_empty() || item.metric_key.trim().is_empty() {
+            return Err(rusqlite::Error::InvalidParameterName(
+                "provider metadata requires provider_id and metric_key".into(),
+            ));
+        }
+        let key = (
+            item.category.as_str().to_string(),
+            item.provider_id.trim().to_string(),
+        );
+        provider_statuses
+            .entry(key)
+            .and_modify(|status| {
+                if metric_support_priority(item.support_status) > metric_support_priority(*status) {
+                    *status = item.support_status;
+                }
+            })
+            .or_insert(item.support_status);
+    }
+
+    let mut provider_ids = BTreeMap::new();
+    for ((kind, name), status) in provider_statuses {
+        let provider_id = upsert_runtime_provider_tx(&tx, &kind, &name, status)?;
+        provider_ids.insert((kind, name), provider_id);
+    }
+
+    for item in metadata {
+        let provider_key = (
+            item.category.as_str().to_string(),
+            item.provider_id.trim().to_string(),
+        );
+        let provider_id = *provider_ids.get(&provider_key).ok_or_else(|| {
+            rusqlite::Error::InvalidParameterName("provider metadata provider lookup failed".into())
+        })?;
+        let device_id = item
+            .device
+            .as_ref()
+            .map(|device| ensure_runtime_device_metadata_tx(&tx, device, at_ms))
+            .transpose()?;
+        upsert_collection_session_metric_tx(&tx, session_id, item, device_id, provider_id)?;
+    }
+    tx.commit()
+}
+
 fn insert_snapshot(
     conn: &Connection,
     system: &SystemSample,
@@ -1489,6 +1554,93 @@ fn shutdown_timeout_error() -> rusqlite::Error {
     )))
 }
 
+fn metric_support_priority(status: MetricRuntimeSupportStatus) -> u8 {
+    match status {
+        // A provider that can collect at least one requested metric remains supported even if
+        // another optional metric is unavailable.
+        MetricRuntimeSupportStatus::Supported => 6,
+        MetricRuntimeSupportStatus::PermissionDenied => 5,
+        MetricRuntimeSupportStatus::ProviderMissing => 4,
+        MetricRuntimeSupportStatus::ProbeFailed => 3,
+        MetricRuntimeSupportStatus::Failed => 2,
+        MetricRuntimeSupportStatus::Unsupported => 1,
+    }
+}
+
+fn upsert_runtime_provider_tx(
+    tx: &rusqlite::Transaction<'_>,
+    kind: &str,
+    name: &str,
+    status: MetricRuntimeSupportStatus,
+) -> rusqlite::Result<i64> {
+    let existing = tx
+        .query_row(
+            "SELECT id FROM provider WHERE kind = ?1 AND name = ?2 AND version IS NULL",
+            params![kind, name],
+            |row| row.get::<_, i64>(0),
+        )
+        .optional()?;
+    if let Some(provider_id) = existing {
+        tx.execute(
+            "UPDATE provider SET last_status = ?1 WHERE id = ?2",
+            params![status.as_str(), provider_id],
+        )?;
+        Ok(provider_id)
+    } else {
+        tx.execute(
+            "INSERT INTO provider(kind, name, version, last_status) VALUES (?1, ?2, NULL, ?3)",
+            params![kind, name, status.as_str()],
+        )?;
+        Ok(tx.last_insert_rowid())
+    }
+}
+
+fn upsert_collection_session_metric_tx(
+    tx: &rusqlite::Transaction<'_>,
+    session_id: i64,
+    item: &CollectionSessionMetricMetadata,
+    device_id: Option<i64>,
+    provider_id: i64,
+) -> rusqlite::Result<()> {
+    let interval_ms = item
+        .interval_ms
+        .filter(|interval_ms| *interval_ms > 0)
+        .map(|interval_ms| i64::try_from(interval_ms).unwrap_or(i64::MAX));
+    let enabled = if item.enabled { 1_i64 } else { 0_i64 };
+    let updated = tx.execute(
+        "UPDATE collection_session_metric
+         SET enabled = ?4, support_status = ?5, provider_id = ?6, interval_ms = ?7
+         WHERE session_id = ?1 AND metric_key = ?2
+           AND ((device_id IS NULL AND ?3 IS NULL) OR device_id = ?3)",
+        params![
+            session_id,
+            item.metric_key,
+            device_id,
+            enabled,
+            item.support_status.as_str(),
+            provider_id,
+            interval_ms,
+        ],
+    )?;
+    if updated == 0 {
+        tx.execute(
+            "INSERT INTO collection_session_metric(
+                 session_id, metric_key, device_id, enabled, support_status, provider_id, interval_ms
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![
+                session_id,
+                item.metric_key,
+                device_id,
+                enabled,
+                item.support_status.as_str(),
+                provider_id,
+                interval_ms,
+            ],
+        )?;
+    }
+    Ok(())
+}
+
 fn ensure_device_tx(
     tx: &rusqlite::Transaction<'_>,
     stable_key: &str,
@@ -1506,52 +1658,72 @@ fn ensure_device_tx(
     )
 }
 
-fn ensure_gpu_device_tx(
+fn ensure_runtime_device_metadata_tx(
     tx: &rusqlite::Transaction<'_>,
-    gpu: &GpuSample,
+    device: &RuntimeDeviceMetadata,
     now: i64,
 ) -> rusqlite::Result<i64> {
-    if gpu.device_key.trim().is_empty() {
+    if device.stable_key.trim().is_empty() {
         return Err(rusqlite::Error::InvalidParameterName(
-            "GPU device_key must be non-empty".into(),
+            "hardware device stable_key must be non-empty".into(),
         ));
     }
-    if let Some(category) = tx
+    let category = device.category.as_str();
+    if let Some(existing_category) = tx
         .query_row(
             "SELECT category FROM hardware_device WHERE stable_key = ?1",
-            [&gpu.device_key],
+            [&device.stable_key],
             |row| row.get::<_, String>(0),
         )
         .optional()?
     {
-        if category != "gpu" {
+        if existing_category != category {
             return Err(rusqlite::Error::InvalidParameterName(
-                "GPU device_key conflicts with a non-GPU device".into(),
+                "hardware device stable_key conflicts with a different category".into(),
             ));
         }
     }
     tx.execute(
         "INSERT INTO hardware_device(
              stable_key, category, vendor, model, capacity_bytes, first_seen_at_ms, last_seen_at_ms
-         ) VALUES (?1, 'gpu', ?2, ?3, ?4, ?5, ?5)
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6)
          ON CONFLICT(stable_key) DO UPDATE SET
-             category = 'gpu',
+             category = excluded.category,
              vendor = COALESCE(excluded.vendor, hardware_device.vendor),
              model = COALESCE(excluded.model, hardware_device.model),
              capacity_bytes = COALESCE(excluded.capacity_bytes, hardware_device.capacity_bytes),
              last_seen_at_ms = excluded.last_seen_at_ms",
         params![
-            gpu.device_key,
-            gpu.vendor,
-            gpu.model,
-            gpu.capacity_bytes,
-            now
+            device.stable_key,
+            category,
+            device.vendor,
+            device.model,
+            device.capacity_bytes,
+            now,
         ],
     )?;
     tx.query_row(
-        "SELECT id FROM hardware_device WHERE stable_key = ?1 AND category = 'gpu'",
-        [&gpu.device_key],
+        "SELECT id FROM hardware_device WHERE stable_key = ?1 AND category = ?2",
+        params![device.stable_key, category],
         |row| row.get(0),
+    )
+}
+
+fn ensure_gpu_device_tx(
+    tx: &rusqlite::Transaction<'_>,
+    gpu: &GpuSample,
+    now: i64,
+) -> rusqlite::Result<i64> {
+    ensure_runtime_device_metadata_tx(
+        tx,
+        &RuntimeDeviceMetadata {
+            stable_key: gpu.device_key.clone(),
+            category: MetricCategory::Gpu,
+            vendor: gpu.vendor.clone(),
+            model: gpu.model.clone(),
+            capacity_bytes: gpu.capacity_bytes,
+        },
+        now,
     )
 }
 

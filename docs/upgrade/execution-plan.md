@@ -72,7 +72,7 @@ PR-03 已在 schema v7 runtime settings storage 上落地 Provider framework；P
 - fake provider tests 覆盖 capability state、plan determinism、disable/re-enable、unsupported、startup/reconfigure retry、late lifecycle reconciliation、stale generation、sample timeout isolation、per-provider control deadline、Disk probe/start-time degradation、pause、shutdown 和 DTO 区分。
 - PR-04A 没有 NVML production integration、`nvidia-smi`、AMD/Intel Provider、CPU sensor、UI redesign 或 PR-05 内容；`tools/metric-probe` 保持独立且未修改。
 
-PR-04A 的完成不代表 NVML production admission。当前 Spike-01B 的单台 RTX 5070 Ti 60 秒 non-admin 结果只支持继续 feasibility work；administrator comparison、30-minute idle/representative-load、enable/disable/re-enable、cleanup/failure isolation 和可行时的 sleep/wake evidence 仍属于 PR-04 Provider 的短期 entry work。PR-04A 的 provider/session/device metadata 只证明 storage contract 具备 historical traceability capability，不证明生产 Provider 已自动维护完整 runtime truth。24-hour soak、数据库增长、跨硬件验证和完整 release matrix 属于后续 release/stability 或 support declaration gate。
+Spike-01B 已在当前 RTX 5070 Ti 开发机完成 short-term implementation admission（PASS）：有效 administrator comparison、30-minute idle/representative load、enable/disable/re-enable、cleanup、failure isolation 和真实 sleep/wake evidence 均已完成，因此 PR-04 NVIDIA Provider entry gate 已满足。该结论仅限当前开发机，不改变 GPU 默认关闭策略，也不声明 NVIDIA 产品线支持、production-ready 或完整 support matrix。PR-04A 的 provider/session/device metadata 只证明 storage contract 具备 historical traceability capability；PR-04 负责让 production Provider 维护 runtime truth。24-hour soak、数据库增长、跨硬件验证和完整 release matrix 仍属于后续 release/stability 或 support declaration gate。
 
 ## 架构基线完成定义
 
