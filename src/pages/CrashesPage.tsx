@@ -1,12 +1,12 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { AlertCircle, CheckCircle2, CircleHelp, Clock3, FileSearch, ShieldCheck } from "lucide-react";
-import { getCrashCaseDetail, getCrashDetectorStatus, getSystemSamples, listCrashCases } from "../api/tauriApi";
+import { getCrashCaseDetail, getCrashDetectorStatus, getSystemTimeline, listCrashCases } from "../api/tauriApi";
 import { ResourceTimelineChart } from "../components/ResourceTimelineChart";
 import { Badge } from "../components/ui/Badge";
 import { Button } from "../components/ui/Button";
 import { Card, CardContent, CardHeader, CardTitle } from "../components/ui/Card";
 import { useI18n } from "../i18n";
-import type { CrashCaseSummary, CrashDetectorStatus, CrashEvidenceDetail, CrashEvidenceMetric, CrashEvidenceProcessEntry, CrashEvidenceWindow, CrashSystemEvent, SystemSample } from "../types/resource";
+import type { CrashCaseSummary, CrashDetectorStatus, CrashEvidenceDetail, CrashEvidenceMetric, CrashEvidenceProcessEntry, CrashEvidenceWindow, CrashSystemEvent, SystemSample, TimelineSample } from "../types/resource";
 import { formatBytes, formatClock } from "../utils/time";
 import { evidenceStatusTone } from "../utils/uiSemantics";
 
@@ -18,7 +18,7 @@ export function CrashesPage() {
   const [detector, setDetector] = useState<CrashDetectorStatus | null>(null);
   const [selectedId, setSelectedId] = useState<number | null>(null);
   const [detail, setDetail] = useState<CrashEvidenceDetail | null>(null);
-  const [curveSamples, setCurveSamples] = useState<SystemSample[]>([]);
+  const [curveSamples, setCurveSamples] = useState<TimelineSample[]>([]);
   const [selectedWindow, setSelectedWindow] = useState<CrashEvidenceWindow>("pre_30m");
   const [loading, setLoading] = useState(true);
   const [detailLoading, setDetailLoading] = useState(false);
@@ -60,12 +60,12 @@ export function CrashesPage() {
     setDetailError("");
     Promise.all([
       getCrashCaseDetail(selectedId),
-      selectedCase ? getSystemSamples(selectedCase.windowStartMs, selectedCase.windowEndMs, 1_000) : Promise.resolve([] as SystemSample[])
+      selectedCase ? getSystemTimeline(selectedCase.windowStartMs, selectedCase.windowEndMs, 1_000) : Promise.resolve(null)
     ])
       .then(([nextDetail, nextCurves]) => {
         if (cancelled) return;
         setDetail(nextDetail);
-        setCurveSamples(nextCurves);
+        setCurveSamples(nextCurves?.samples ?? []);
       })
       .catch(() => {
         if (!cancelled) setDetailError(t("crashDetailErrorMessage"));
@@ -98,7 +98,7 @@ function CaseListItem({ item, selected, onClick }: { item: CrashCaseSummary; sel
   return <button type="button" onClick={onClick} className={`w-full rounded-lg border px-3 py-3 text-left transition-[background-color,border-color,transform] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/35 ${selected ? "border-primary/45 bg-accent" : "border-transparent hover:border-border hover:bg-muted/55"}`} aria-pressed={selected}><div className="flex items-start justify-between gap-3"><div className="min-w-0"><div className="truncate text-sm font-semibold">{classificationLabel(item.classification, t)}</div><div className="mt-1 font-mono text-[11px] text-muted-foreground">{new Date(item.anchorTimeMs).toLocaleString(language)}</div></div><EvidenceBadge status={item.evidenceStatus} /></div><div className="mt-2 flex items-center gap-2 text-[10px] text-muted-foreground">{item.hasActiveHold && <><ShieldCheck size={12} />{t("activeHold")}</>}<span className="ml-auto">{t("sampleCount")}: {item.summaryCount}</span></div></button>;
 }
 
-function CrashDetail({ detail, selectedCase, detailLoading, detailError, onRetry, selectedWindow, setSelectedWindow, curveSamples, curveLoading, onCurveSelect, visibleMetrics, language }: { detail: CrashEvidenceDetail | null; selectedCase: CrashCaseSummary | null; detailLoading: boolean; detailError: string; onRetry: () => void; selectedWindow: CrashEvidenceWindow; setSelectedWindow: (window: CrashEvidenceWindow) => void; curveSamples: SystemSample[]; curveLoading: boolean; onCurveSelect: (sample: SystemSample) => void; visibleMetrics: CrashEvidenceMetric[]; language: "en" | "zh-CN" }) {
+function CrashDetail({ detail, selectedCase, detailLoading, detailError, onRetry, selectedWindow, setSelectedWindow, curveSamples, curveLoading, onCurveSelect, visibleMetrics, language }: { detail: CrashEvidenceDetail | null; selectedCase: CrashCaseSummary | null; detailLoading: boolean; detailError: string; onRetry: () => void; selectedWindow: CrashEvidenceWindow; setSelectedWindow: (window: CrashEvidenceWindow) => void; curveSamples: TimelineSample[]; curveLoading: boolean; onCurveSelect: (sample: SystemSample) => void; visibleMetrics: CrashEvidenceMetric[]; language: "en" | "zh-CN" }) {
   const { t } = useI18n();
   if (!selectedCase) return <Card className="empty-state min-h-[360px]"><FileSearch size={24} className="text-muted-foreground" /><div className="font-semibold text-foreground">{t("selectCrashCase")}</div></Card>;
   return <div className="space-y-3">{detailError && <InlineError title={t("crashDetailError")} message={detailError} onRetry={onRetry} />}{detailLoading || !detail ? <Card className="min-h-[360px]"><div className="flex h-full min-h-[360px] items-center justify-center text-sm text-muted-foreground">{t("crashDetailLoading")}</div></Card> : <>

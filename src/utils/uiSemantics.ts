@@ -4,6 +4,8 @@ import type {
   ComputerStateInterval,
   GpuSample,
   MetricCategory,
+  ProviderStatus,
+  TimelineSample,
   SystemSample
 } from "../types/resource";
 
@@ -34,6 +36,39 @@ export function gpuDevices(samples: SystemSample[]): GpuSample[] {
     }
   }
   return [...devices.values()];
+}
+
+export function timelineChartSamples(samples: TimelineSample[]): TimelineSample[] {
+  return samples.flatMap((sample) => {
+    if (sample.sourceGapBeforeMs <= 0) return [sample];
+    return [{
+      ...sample,
+      timestampMs: sample.timestampMs - sample.sourceGapBeforeMs,
+      sourceGapBeforeMs: 0,
+      cpuPercent: null,
+      memoryPercent: null,
+      memoryUsedBytes: null,
+      memoryTotalBytes: null,
+      diskReadBytesPerSec: null,
+      diskWriteBytesPerSec: null,
+      gpus: [],
+      hasAppSnapshot: false
+    }, sample];
+  });
+}
+
+export function aggregateCategoryCapability(
+  providers: ProviderStatus[],
+  settings: CollectionSettings | null | undefined,
+  category: MetricCategory
+): CapabilityState | undefined {
+  if (settings && !settings.enabledCategories.includes(category)) return "supportedDisabled";
+  const capabilities = providers.flatMap((provider) => provider.capabilities.filter((item) => item.category === category));
+  if (!capabilities.length) return undefined;
+  if (capabilities.some((item) => item.state === "supportedEnabled")) return "supportedEnabled";
+  if (capabilities.some((item) => item.state === "supportedDisabled")) return "supportedDisabled";
+  if (capabilities.some((item) => item.state === "failed")) return "failed";
+  return "unsupported";
 }
 
 export function stateDurations(intervals: ComputerStateInterval[]) {

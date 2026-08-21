@@ -3150,4 +3150,75 @@ mod tests {
         drop(db);
         cleanup_test_files(&path);
     }
+
+    #[test]
+    fn timeline_query_keeps_source_gaps_and_coverage_with_bounded_downsampling() {
+        fn insert_frames(conn: &Connection, timestamps: &[i64]) -> rusqlite::Result<()> {
+            let collection_id: i64 = conn.query_row(
+                "SELECT CAST(value AS INTEGER) FROM settings WHERE key = 'runtime_collection_session_id'",
+                [],
+                |row| row.get(0),
+            )?;
+            let tx = conn.unchecked_transaction()?;
+            for (sequence, timestamp_ms) in timestamps.iter().enumerate() {
+                tx.execute(
+                    "INSERT INTO sample_frame(collection_session_id, ts, sequence, duration_ms, writer_delay_ms, process_snapshot_present) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                    params![collection_id, timestamp_ms, sequence as i64 + 1, 5_000_i64, 0_i64, 0_i64],
+                )?;
+            }
+            tx.commit()
+        }
+
+        let continuous_path = test_path("timeline-continuous-downsample");
+        cleanup_test_files(&continuous_path);
+        let continuous_db = Database::open(continuous_path.clone()).unwrap();
+        let start_ms = 1_000_i64;
+        let end_ms = start_ms + 86_400_000;
+        let continuous_timestamps: Vec<i64> = (start_ms..end_ms).step_by(5_000).collect();
+        continuous_db
+            .with_writer(|conn| insert_frames(conn, &continuous_timestamps))
+            .unwrap();
+        let continuous = continuous_db
+            .read(|conn| query::system_timeline(conn, start_ms, end_ms, 2_500))
+            .unwrap();
+        assert!(continuous.samples.len() <= 2_500);
+        assert_eq!(continuous.observed_ms, end_ms - start_ms);
+        assert_eq!(continuous.coverage, 1.0);
+        assert!(continuous
+            .samples
+            .iter()
+            .all(|sample| sample.source_gap_before_ms == 0));
+        drop(continuous_db);
+        cleanup_test_files(&continuous_path);
+
+        let gap_path = test_path("timeline-real-gap-coverage");
+        cleanup_test_files(&gap_path);
+        let gap_db = Database::open(gap_path.clone()).unwrap();
+        let gap_timestamps: Vec<i64> = (start_ms..(start_ms + 50_000))
+            .step_by(5_000)
+            .chain(std::iter::once(start_ms + 95_000))
+            .collect();
+        gap_db
+            .with_writer(|conn| insert_frames(conn, &gap_timestamps))
+            .unwrap();
+        let gap_timeline = gap_db
+            .read(|conn| query::system_timeline(conn, start_ms, start_ms + 100_000, 500))
+            .unwrap();
+        assert!(gap_timeline.samples.len() <= 500);
+        assert!(gap_timeline.coverage > 0.0 && gap_timeline.coverage < 1.0);
+        assert_eq!(gap_timeline.observed_ms, 55_000);
+        assert!(gap_timeline
+            .samples
+            .iter()
+            .any(|sample| sample.source_gap_before_ms >= 40_000));
+
+        let empty = gap_db
+            .read(|conn| query::system_timeline(conn, 200_000, 300_000, 500))
+            .unwrap();
+        assert!(empty.samples.is_empty());
+        assert_eq!(empty.observed_ms, 0);
+        assert_eq!(empty.coverage, 0.0);
+        drop(gap_db);
+        cleanup_test_files(&gap_path);
+    }
 }

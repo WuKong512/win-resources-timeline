@@ -5,7 +5,7 @@ import {
   getCollectionSettings,
   getCollectorStatus,
   getResourceAvailableDates,
-  getSystemSamples
+  getSystemTimeline
 } from "../api/tauriApi";
 import { DateRangePicker } from "../components/DateRangePicker";
 import { ResourceTimelineChart } from "../components/ResourceTimelineChart";
@@ -14,9 +14,9 @@ import { Button } from "../components/ui/Button";
 import { Card, CardContent, CardHeader, CardTitle } from "../components/ui/Card";
 import { useI18n } from "../i18n";
 import { useUiStore } from "../stores/uiStore";
-import type { AppResourceSample, CapabilityState, CollectionSettings, CollectorStatus, GpuSample, MetricCategory, ProviderStatus, SystemSample } from "../types/resource";
+import type { AppResourceSample, CapabilityState, CollectionSettings, CollectorStatus, GpuSample, ProviderStatus, SystemSample, TimelineQueryResult } from "../types/resource";
 import { formatBytes, formatClock, localDateString, localDayRange, shiftLocalDate } from "../utils/time";
-import { gpuDevices, metricDataState } from "../utils/uiSemantics";
+import { aggregateCategoryCapability, gpuDevices, metricDataState } from "../utils/uiSemantics";
 
 type WindowPreset = 1 | 7 | 30;
 
@@ -27,7 +27,7 @@ export function TimelinePage() {
   const [preset, setPreset] = useState<WindowPreset>(1);
   const [availableDates, setAvailableDates] = useState<string[]>([]);
   const [datesLoading, setDatesLoading] = useState(true);
-  const [samples, setSamples] = useState<SystemSample[]>([]);
+  const [timeline, setTimeline] = useState<TimelineQueryResult | null>(null);
   const [status, setStatus] = useState<CollectorStatus | null>(null);
   const [settings, setSettings] = useState<CollectionSettings | null>(null);
   const [selected, setSelected] = useState<SystemSample | null>(null);
@@ -42,16 +42,16 @@ export function TimelinePage() {
     setLoading(true);
     setError("");
     Promise.all([
-      getSystemSamples(range.startMs, range.endMs, 2_500),
+      getSystemTimeline(range.startMs, range.endMs, 2_500),
       getCollectorStatus(),
       getCollectionSettings()
     ])
-      .then(([nextSamples, nextStatus, nextSettings]) => {
+      .then(([nextTimeline, nextStatus, nextSettings]) => {
         if (cancelled) return;
-        setSamples(nextSamples);
+        setTimeline(nextTimeline);
         setStatus(nextStatus);
         setSettings(nextSettings);
-        setSelected((current) => current && nextSamples.some((sample) => sample.timestampMs === current.timestampMs) ? current : null);
+        setSelected((current) => current && nextTimeline.samples.some((sample) => sample.timestampMs === current.timestampMs) ? current : null);
       })
       .catch(() => {
         if (!cancelled) setError(t("timelineErrorMessage"));
@@ -102,9 +102,10 @@ export function TimelinePage() {
     return () => { cancelled = true; };
   }, [selected]);
 
+  const samples = timeline?.samples ?? [];
   const latest = selected ?? samples[samples.length - 1] ?? null;
   const devices = useMemo(() => gpuDevices(samples), [samples]);
-  const coverage = sampleCoverage(samples, range.startMs, range.endMs);
+  const coverage = timeline?.coverage ?? 0;
   const selectedTime = selected ? formatClock(selected.timestampMs, language) : null;
 
   return <div className="space-y-5">
@@ -124,10 +125,10 @@ export function TimelinePage() {
 
     {error ? <InlineError message={error} onRetry={loadTimeline} title={t("timelineErrorTitle")} /> : loading ? <TimelineLoading /> : <>
       <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
-        <SignalCard icon={<Cpu size={16} />} label={t("metricCpu")} value={latest?.cpuPercent} capability={categoryCapability(status, settings, "cpu")} unit="percent" />
-        <SignalCard icon={<MemoryStick size={16} />} label={t("metricMemory")} value={latest?.memoryPercent} capability={categoryCapability(status, settings, "memory")} unit="percent" />
-        <SignalCard icon={<HardDrive size={16} />} label={t("metricDiskRead")} value={latest?.diskReadBytesPerSec} capability={categoryCapability(status, settings, "disk")} unit="rate" />
-        <SignalCard icon={<Database size={16} />} label={t("timelineCoverage")} value={coverage} capability={coverage < 0.99 ? "degraded" : "supportedEnabled"} unit="coverage" />
+        <SignalCard icon={<Cpu size={16} />} label={t("metricCpu")} value={latest?.cpuPercent} capability={aggregateCategoryCapability(status?.providerStatus ?? [], settings, "cpu")} unit="percent" />
+        <SignalCard icon={<MemoryStick size={16} />} label={t("metricMemory")} value={latest?.memoryPercent} capability={aggregateCategoryCapability(status?.providerStatus ?? [], settings, "memory")} unit="percent" />
+        <SignalCard icon={<HardDrive size={16} />} label={t("metricDiskRead")} value={latest?.diskReadBytesPerSec} capability={aggregateCategoryCapability(status?.providerStatus ?? [], settings, "disk")} unit="rate" />
+        <SignalCard icon={<Database size={16} />} label={t("timelineCoverage")} value={coverage} capability={coverage < 0.999 ? "incomplete" : "supportedEnabled"} unit="coverage" />
       </div>
 
       <Card className="overflow-hidden">
@@ -164,57 +165,24 @@ function windowRange(date: string, preset: WindowPreset) {
   return { startMs: start, endMs: end };
 }
 
-function sampleCoverage(samples: SystemSample[], rangeStartMs: number, rangeEndMs: number) {
-  if (!samples.length || rangeEndMs <= rangeStartMs) return 0;
-  let coveredMs = 0;
-  let currentStart = 0;
-  let currentEnd = 0;
-  for (const sample of samples) {
-    const start = Math.max(rangeStartMs, sample.timestampMs);
-    const end = Math.min(rangeEndMs, sample.timestampMs + Math.max(0, sample.sampleDurationMs));
-    if (end <= start) continue;
-    if (currentEnd <= currentStart) {
-      currentStart = start;
-      currentEnd = end;
-    } else if (start <= currentEnd) {
-      currentEnd = Math.max(currentEnd, end);
-    } else {
-      coveredMs += currentEnd - currentStart;
-      currentStart = start;
-      currentEnd = end;
-    }
-  }
-  if (currentEnd > currentStart) coveredMs += currentEnd - currentStart;
-  return Math.min(1, coveredMs / (rangeEndMs - rangeStartMs));
-}
-
-function categoryCapability(status: CollectorStatus | null, settings: CollectionSettings | null, category: MetricCategory): CapabilityState | undefined {
-  const capabilities = status?.providerStatus.flatMap((provider) => provider.capabilities.filter((item) => item.category === category)) ?? [];
-  if (capabilities.some((item) => item.state === "failed")) return "failed";
-  if (capabilities.some((item) => item.state === "unsupported")) return "unsupported";
-  if (capabilities.some((item) => item.state === "supportedDisabled")) return "supportedDisabled";
-  if (capabilities.some((item) => item.state === "supportedEnabled")) return "supportedEnabled";
-  if (settings && !settings.enabledCategories.includes(category)) return "supportedDisabled";
-  return undefined;
-}
-
-function SignalCard({ icon, label, value, capability, unit }: { icon: React.ReactNode; label: string; value: number | null | undefined; capability: CapabilityState | "degraded" | undefined; unit: "percent" | "rate" | "coverage" }) {
+function SignalCard({ icon, label, value, capability, unit }: { icon: React.ReactNode; label: string; value: number | null | undefined; capability: CapabilityState | "incomplete" | undefined; unit: "percent" | "rate" | "coverage" }) {
   const { language, t } = useI18n();
-  const state = unit === "coverage" ? capability === "degraded" ? "failed" : "value" : metricDataState(value, capability as CapabilityState | undefined);
+  const state = unit === "coverage" ? capability === "incomplete" ? "incomplete" : "value" : metricDataState(value, capability as CapabilityState | undefined);
   const formatted = state === "disabled" ? t("disabledByUser")
     : state === "unsupported" ? t("stateUnsupported")
       : state === "failed" ? t("stateFailed")
+        : state === "incomplete" ? t("observedCoverage", { percent: Math.round((value ?? 0) * 100) })
         : state === "missing" ? t("missingData")
           : value == null ? t("missingData")
             : unit === "coverage" ? `${Math.round(value * 100)}%`
               : unit === "percent" ? `${value.toFixed(1)}%${state === "zero" ? ` · ${t("realZero")}` : ""}`
                 : `${formatBytes(value, language)}${state === "zero" ? ` · ${t("measuredZero")}` : ""}/s`;
-  return <Card className="relative overflow-hidden"><div className={`absolute inset-x-0 top-0 h-0.5 ${state === "failed" ? "bg-[hsl(var(--danger))]" : state === "disabled" || state === "unsupported" ? "bg-[hsl(var(--muted-foreground)/0.35)]" : "bg-[hsl(var(--signal-cyan))]"}`} /><CardContent className="pt-4"><div className="flex items-center justify-between gap-3"><span className="text-xs font-medium text-muted-foreground">{label}</span><span className="flex h-7 w-7 items-center justify-center rounded-lg bg-muted text-[hsl(var(--signal-cyan))]">{icon}</span></div><div className="metric-value mt-3 truncate text-[21px] font-semibold">{formatted}</div></CardContent></Card>;
+  return <Card className="relative overflow-hidden"><div className={`absolute inset-x-0 top-0 h-0.5 ${state === "failed" ? "bg-[hsl(var(--danger))]" : state === "incomplete" ? "bg-[hsl(var(--warning))]" : state === "disabled" || state === "unsupported" ? "bg-[hsl(var(--muted-foreground)/0.35)]" : "bg-[hsl(var(--signal-cyan))]"}`} /><CardContent className="pt-4"><div className="flex items-center justify-between gap-3"><span className="text-xs font-medium text-muted-foreground">{label}</span><span className="flex h-7 w-7 items-center justify-center rounded-lg bg-muted text-[hsl(var(--signal-cyan))]">{icon}</span></div><div className="metric-value mt-3 truncate text-[21px] font-semibold">{formatted}</div></CardContent></Card>;
 }
 
 function GpuPanel({ devices, samples, sample, status, settings, language }: { devices: GpuSample[]; samples: SystemSample[]; sample: SystemSample | null; status: CollectorStatus | null; settings: CollectionSettings | null; language: "en" | "zh-CN" }) {
   const { t } = useI18n();
-  const capability = categoryCapability(status, settings, "gpu");
+  const capability = aggregateCategoryCapability(status?.providerStatus ?? [], settings, "gpu");
   return <Card className="overflow-hidden"><CardHeader className="border-b border-border/70"><div className="flex items-center justify-between gap-3"><CardTitle>{t("gpuDevices")}</CardTitle><CapabilityBadge state={capability} /></div></CardHeader><CardContent className="pt-4">{!devices.length ? <div className="flex items-start gap-3 rounded-lg border border-dashed border-border px-4 py-5 text-sm text-muted-foreground"><CircleHelp size={17} className="mt-0.5 shrink-0" /><span>{capability === "supportedDisabled" ? t("disabledByUser") : capability === "unsupported" ? t("stateUnsupported") : capability === "failed" ? t("stateFailed") : t("noGpuDevices")}</span></div> : <div className="grid gap-3 md:grid-cols-2">{devices.map((device) => {
     const current = sample?.gpus.find((item) => item.deviceKey === device.deviceKey);
     const deviceSamples = samples.flatMap((item) => item.gpus.filter((gpu) => gpu.deviceKey === device.deviceKey));

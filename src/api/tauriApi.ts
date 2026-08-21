@@ -1,5 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
-import type { AppIdentity, AppResourceHistoryPoint, AppResourceSample, CollectionSettings, CollectorStatus, CrashCaseSummary, CrashDetectorStatus, CrashEvidenceDetail, DailyUsageSummary, ForegroundInterval, ResourceApp, StorageUsage, SystemSample, TodayOverview, UsageSummary } from "../types/resource";
+import type { AppIdentity, AppResourceHistoryPoint, AppResourceSample, CollectionSettings, CollectorStatus, CrashCaseSummary, CrashDetectorStatus, CrashEvidenceDetail, DailyUsageSummary, ForegroundInterval, ResourceApp, StorageUsage, SystemSample, TimelineQueryResult, TodayOverview, UsageSummary } from "../types/resource";
 
 export const getTodayOverview = (startMs: number, endMs: number) =>
   invoke<TodayOverview>("get_today_overview", { startMs, endMs });
@@ -19,6 +19,9 @@ export const getTimelineAvailableDates = () => invoke<string[]>("get_timeline_av
 
 export const getSystemSamples = (startMs: number, endMs: number, maxPoints = 2500) =>
   invoke<SystemSample[]>("get_system_samples", { startMs, endMs, maxPoints });
+
+export const getSystemTimeline = (startMs: number, endMs: number, maxPoints = 2500) =>
+  invoke<TimelineQueryResult>("get_system_timeline", { startMs, endMs, maxPoints });
 
 export const getResourceAvailableDates = () => invoke<string[]>("get_resource_available_dates");
 

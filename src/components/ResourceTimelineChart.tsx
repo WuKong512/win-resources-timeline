@@ -1,12 +1,13 @@
 import { useEffect, useRef } from "react";
 import * as echarts from "echarts";
 import { useI18n } from "../i18n";
-import type { GpuSample, SystemSample } from "../types/resource";
+import type { GpuSample, SystemSample, TimelineSample } from "../types/resource";
 import { formatBytes, formatClock } from "../utils/time";
+import { timelineChartSamples } from "../utils/uiSemantics";
 import { useUiStore } from "../stores/uiStore";
 
 type ResourceTimelineChartProps = {
-  samples: SystemSample[];
+  samples: TimelineSample[];
   selectedTimestampMs: number | null;
   onSampleSelect: (sample: SystemSample) => void;
   ariaLabel: string;
@@ -14,26 +15,6 @@ type ResourceTimelineChartProps = {
 
 function cssColor(name: string) {
   return `hsl(${getComputedStyle(document.documentElement).getPropertyValue(name).trim()})`;
-}
-
-function gapSamples(samples: SystemSample[]) {
-  return samples.flatMap((sample, index) => {
-    if (index === 0) return [sample];
-    const previous = samples[index - 1];
-    const gapThreshold = Math.max(15_000, previous.sampleDurationMs * 3);
-    if (sample.timestampMs - previous.timestampMs <= gapThreshold) return [sample];
-    return [{
-      ...sample,
-      timestampMs: previous.timestampMs + previous.sampleDurationMs,
-      cpuPercent: null,
-      memoryPercent: null,
-      memoryUsedBytes: null,
-      memoryTotalBytes: null,
-      diskReadBytesPerSec: null,
-      diskWriteBytesPerSec: null,
-      gpus: []
-    }, sample];
-  });
 }
 
 function gpuLabel(gpu: GpuSample) {
@@ -61,7 +42,7 @@ export function ResourceTimelineChart({
     const muted = cssColor("--muted");
     const card = cssColor("--card");
     const colors = ["--signal-cyan", "--signal-blue", "--signal-violet", "--signal-amber", "--signal-coral"].map(cssColor);
-    const chartSamples = gapSamples(samples);
+    const chartSamples = timelineChartSamples(samples);
     const devices = [...new Map(samples.flatMap((sample) => sample.gpus).map((gpu) => [gpu.deviceKey, gpu])).values()];
     const gpuSeries = devices.map((gpu, index) => ({
       name: `${t("metricGpuUsage")} · ${gpuLabel(gpu)}`,

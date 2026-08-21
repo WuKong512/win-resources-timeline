@@ -96,6 +96,18 @@ export interface SystemSample {
   hasAppSnapshot: boolean;
 }
 
+export interface TimelineSample extends SystemSample {
+  sourceGapBeforeMs: number;
+}
+
+export interface TimelineQueryResult {
+  startMs: number;
+  endMs: number;
+  observedMs: number;
+  coverage: number;
+  samples: TimelineSample[];
+}
+
 export interface AppResourceSample {
   appKey: string;
   processName: string;

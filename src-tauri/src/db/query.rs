@@ -6,7 +6,7 @@ use crate::{
     models::{
         AppIdentity, AppResourceHistoryPoint, AppResourceSample, AppUsageSummary,
         ComputerStateInterval, DailyUsageSummary, ForegroundInterval, GpuSample, GpuSamplePoint,
-        ResourceApp, SystemSample, TodayOverview, UsageSummary,
+        ResourceApp, SystemSample, SystemTimeline, TimelineSample, TodayOverview, UsageSummary,
     },
 };
 use rusqlite::{params, Connection, OptionalExtension};
@@ -411,6 +411,42 @@ pub fn system_samples(
     end_ms: i64,
     max_points: usize,
 ) -> rusqlite::Result<Vec<SystemSample>> {
+    Ok(system_sample_rows(conn, start_ms, end_ms, max_points)?
+        .into_iter()
+        .map(|(_, sample, _)| sample)
+        .collect())
+}
+
+pub fn system_timeline(
+    conn: &Connection,
+    start_ms: i64,
+    end_ms: i64,
+    max_points: usize,
+) -> rusqlite::Result<SystemTimeline> {
+    valid_range(start_ms, end_ms)?;
+    let rows = system_sample_rows(conn, start_ms, end_ms, max_points)?;
+    let (observed_ms, coverage) = timeline_coverage(conn, start_ms, end_ms)?;
+    Ok(SystemTimeline {
+        start_ms,
+        end_ms,
+        observed_ms,
+        coverage,
+        samples: rows
+            .into_iter()
+            .map(|(_, sample, source_gap_before_ms)| TimelineSample {
+                sample,
+                source_gap_before_ms,
+            })
+            .collect(),
+    })
+}
+
+fn system_sample_rows(
+    conn: &Connection,
+    start_ms: i64,
+    end_ms: i64,
+    max_points: usize,
+) -> rusqlite::Result<Vec<(i64, SystemSample, i64)>> {
     valid_range(start_ms, end_ms)?;
     let max_points = max_points.max(1) as i64;
     let mut stmt = conn.prepare(
@@ -430,15 +466,28 @@ pub fn system_samples(
                FROM disk_sample GROUP BY frame_id
              ) disk ON disk.frame_id = f.id
              WHERE f.ts >= ?1 AND f.ts < ?2
+             ),
+             ranked_frames_with_gaps AS (
+               SELECT ranked_frames.*,
+                      COALESCE((
+                        SELECT prior.ts + prior.duration_ms
+                        FROM sample_frame prior
+                        WHERE prior.ts < ranked_frames.ts
+                           OR (prior.ts = ranked_frames.ts AND prior.id < ranked_frames.id)
+                        ORDER BY prior.ts DESC, prior.id DESC
+                        LIMIT 1
+                      ), ranked_frames.ts) AS previous_end_ms
+               FROM ranked_frames
            )
            SELECT id, ts, duration_ms, usage_pct, memory_percent, used_bytes,
-                  memory_total_bytes, read_bps, write_bps, process_snapshot_present
-           FROM ranked_frames
+                  memory_total_bytes, read_bps, write_bps, process_snapshot_present,
+                  CASE WHEN ts > previous_end_ms THEN ts - previous_end_ms ELSE 0 END
+           FROM ranked_frames_with_gaps
            WHERE total_points <= ?3
               OR ((point_number - 1) % ((total_points + ?3 - 1) / ?3)) = 0
            ORDER BY ts, id"#,
     )?;
-    let frame_rows: Vec<(i64, SystemSample)> = stmt
+    let frame_rows: Vec<(i64, SystemSample, i64)> = stmt
         .query_map(params![start_ms, end_ms, max_points], |r| {
             Ok((
                 r.get(0)?,
@@ -454,17 +503,62 @@ pub fn system_samples(
                     gpus: Vec::new(),
                     has_app_snapshot: r.get::<_, i64>(9)? != 0,
                 },
+                r.get(10)?,
             ))
         })?
         .collect::<rusqlite::Result<_>>()?;
     let gpus_by_frame = gpu_samples_by_selected_frames(conn, start_ms, end_ms, max_points)?;
     Ok(frame_rows
         .into_iter()
-        .map(|(frame_id, mut sample)| {
+        .map(|(frame_id, mut sample, source_gap_before_ms)| {
             sample.gpus = gpus_by_frame.get(&frame_id).cloned().unwrap_or_default();
-            sample
+            (frame_id, sample, source_gap_before_ms)
         })
         .collect())
+}
+
+fn timeline_coverage(
+    conn: &Connection,
+    start_ms: i64,
+    end_ms: i64,
+) -> rusqlite::Result<(i64, f64)> {
+    valid_range(start_ms, end_ms)?;
+    let observed_ms: i64 = conn.query_row(
+        r#"WITH clipped AS (
+             SELECT
+               CASE WHEN f.ts < ?1 THEN ?1 ELSE f.ts END AS start_ms,
+               CASE WHEN f.ts + f.duration_ms > ?2 THEN ?2 ELSE f.ts + f.duration_ms END AS end_ms
+             FROM sample_frame f
+             WHERE f.ts < ?2 AND f.ts + f.duration_ms > ?1
+           ),
+           ordered AS (
+             SELECT start_ms, end_ms,
+                    MAX(end_ms) OVER (
+                      ORDER BY start_ms, end_ms
+                      ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING
+                    ) AS previous_max_end
+             FROM clipped
+           ),
+           segments AS (
+             SELECT CASE
+               WHEN previous_max_end IS NULL THEN end_ms - start_ms
+               WHEN start_ms > previous_max_end THEN end_ms - start_ms
+               WHEN end_ms > previous_max_end THEN end_ms - previous_max_end
+               ELSE 0
+             END AS observed_ms
+             FROM ordered
+           )
+           SELECT COALESCE(SUM(observed_ms), 0) FROM segments"#,
+        params![start_ms, end_ms],
+        |row| row.get(0),
+    )?;
+    let total_ms = end_ms.saturating_sub(start_ms);
+    let coverage = if total_ms > 0 {
+        (observed_ms as f64 / total_ms as f64).clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    Ok((observed_ms, coverage))
 }
 
 fn gpu_samples_by_selected_frames(

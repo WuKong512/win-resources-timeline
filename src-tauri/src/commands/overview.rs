@@ -3,7 +3,7 @@ use crate::{
     error::CommandError,
     models::{
         AppResourceHistoryPoint, AppResourceSample, DailyUsageSummary, GpuSamplePoint, ResourceApp,
-        SystemSample, TodayOverview, UsageSummary,
+        SystemSample, SystemTimeline, TodayOverview, UsageSummary,
     },
     AppState,
 };
@@ -151,6 +151,25 @@ pub fn get_system_samples(
     state
         .db
         .read(|conn| query::system_samples(conn, start_ms, end_ms, max_points))
+        .map_err(Into::into)
+}
+
+#[tauri::command]
+pub fn get_system_timeline(
+    state: State<'_, AppState>,
+    start_ms: i64,
+    end_ms: i64,
+    max_points: usize,
+) -> Result<SystemTimeline, CommandError> {
+    if !(500..=10_000).contains(&max_points) {
+        return Err(crate::error::AppError::InvalidRequest(
+            "maxPoints must be between 500 and 10000".into(),
+        )
+        .into());
+    }
+    state
+        .db
+        .read(|conn| query::system_timeline(conn, start_ms, end_ms, max_points))
         .map_err(Into::into)
 }
 
