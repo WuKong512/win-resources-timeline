@@ -18,8 +18,8 @@ const EVENT_CURSOR_KEY: &str = "crash_event_cursor_v1";
 const EVENT_CURSOR_LOOKBACK_MS: i64 = 5 * 60 * 1_000;
 const CRASH_REBOOT_MATCH_MS: i64 = 30 * 60 * 1_000;
 const CRASH_INCIDENT_CORRELATION_MS: i64 = 30 * 60 * 1_000;
-// A following/past EventLog boot marker is an episode identity only when it is close to the
-// boundary. The larger reboot/context window remains available for evidence search and cleanup.
+// Short high-confidence proximity for boot markers/session matching. Delayed WER records may use
+// the broader correlation window only after the persisted episode timeline disambiguates them.
 const CRASH_BOOT_EPISODE_MATCH_MS: i64 = 5 * 60 * 1_000;
 // 6008 positional timestamps are second-granular on some Windows builds; this is physical-time
 // precision tolerance, deliberately far smaller than the broad context search window above.
@@ -28,10 +28,6 @@ const CRASH_PHYSICAL_ANCHOR_TOLERANCE_MS: i64 = 5_000;
 // cases retryable for three such cadences so a frame that races the first finalization is still
 // observed, while old historical partial cases settle permanently.
 const CRASH_POST_FINALIZATION_STABILIZATION_MS: i64 = 3 * CRASH_DETECTOR_POLL_MS as i64;
-// Native Event Log startup scans cover the previous seven days. A physical shutdown timestamp
-// from a retrieved crash record remains valid throughout that supported history, even when the
-// machine stayed powered off for more than one day.
-const CRASH_PHYSICAL_ANCHOR_HORIZON_MS: i64 = 7 * 86_400_000;
 const CRASH_DETECTOR_POLL_MS: u64 = 5_000;
 const CRASH_SCAN_YIELD_PAGES: usize = 64;
 
@@ -458,6 +454,7 @@ struct CrashClassificationContext {
 #[derive(Debug, Clone)]
 struct BootSessionContext {
     id: i64,
+    boot_id: String,
     boot_time_ms: Option<i64>,
     observed_start_ms: Option<i64>,
 }
@@ -569,11 +566,23 @@ fn resolve_reboot_episode(
     context: &CrashClassificationContext,
 ) -> RebootEpisode {
     let boot = episode_boot_for_boundary(ordered, boundary);
-    let boot_time_ms = boot.map(|event| event.event_time_ms);
-    let boot_session = match boot_time_ms {
-        Some(time_ms) => context.boot_session_near(time_ms),
-        None => context.boot_session_near(boundary.event_time_ms),
+    // Prefer the persisted boot-session timeline when it can objectively identify the episode.
+    // This matters for delayed WER records: a NormalBoot event may be outside the short fast path,
+    // and a newer persisted session must win over an older episode still inside the broad window.
+    let boot_session = context
+        .boot_session_for_boundary(boundary)
+        .or_else(|| boot.and_then(|event| context.boot_session_near(event.event_time_ms)));
+    let boot = if let Some(session) = boot_session {
+        // Once a persisted session wins, never fall back to an unrelated NormalBoot marker. If
+        // its event is outside the loaded context, the session's own boot time remains the
+        // objective episode boundary.
+        boot_event_for_session(ordered, session)
+    } else {
+        boot
     };
+    let boot_time_ms = boot
+        .map(|event| event.event_time_ms)
+        .or_else(|| boot_session.and_then(boot_session_time));
     let boot_session_id = boot_session.map(|session| session.id);
     let key = boot_session_id
         .map(|id| format!("boot-session:{id}"))
@@ -604,6 +613,82 @@ impl CrashClassificationContext {
             .min_by_key(|(distance, session)| (*distance, session.id))
             .map(|(_, session)| session)
     }
+
+    fn boot_session_for_boundary(
+        &self,
+        boundary: &NormalizedSystemEvent,
+    ) -> Option<&BootSessionContext> {
+        if let Some(boot_id) = boundary
+            .payload
+            .boot_id
+            .as_deref()
+            .filter(|value| !value.trim().is_empty())
+        {
+            if let Some(session) = self.boot_sessions.iter().find(|session| {
+                session.boot_id == boot_id
+                    && boot_session_time(session).is_some_and(|time_ms| {
+                        within_time(
+                            time_ms,
+                            boundary.event_time_ms,
+                            CRASH_INCIDENT_CORRELATION_MS,
+                        )
+                    })
+            }) {
+                return Some(session);
+            }
+        }
+
+        let past = self
+            .boot_sessions
+            .iter()
+            .filter_map(|session| {
+                let time_ms = boot_session_time(session)?;
+                (time_ms <= boundary.event_time_ms
+                    && within_time(
+                        time_ms,
+                        boundary.event_time_ms,
+                        CRASH_INCIDENT_CORRELATION_MS,
+                    ))
+                .then_some((time_ms, session))
+            })
+            .max_by_key(|(time_ms, session)| (*time_ms, session.id));
+        let future = self
+            .boot_sessions
+            .iter()
+            .filter_map(|session| {
+                let time_ms = boot_session_time(session)?;
+                (time_ms > boundary.event_time_ms
+                    && within_time(
+                        time_ms,
+                        boundary.event_time_ms,
+                        CRASH_INCIDENT_CORRELATION_MS,
+                    ))
+                .then_some((time_ms, session))
+            })
+            .min_by_key(|(time_ms, session)| {
+                (
+                    time_distance(*time_ms, boundary.event_time_ms),
+                    *time_ms,
+                    session.id,
+                )
+            });
+
+        if is_wer_boundary(boundary) {
+            past.or(future).map(|(_, session)| session)
+        } else {
+            [past, future]
+                .into_iter()
+                .flatten()
+                .min_by_key(|(time_ms, session)| {
+                    (
+                        time_distance(*time_ms, boundary.event_time_ms),
+                        *time_ms,
+                        session.id,
+                    )
+                })
+                .map(|(_, session)| session)
+        }
+    }
 }
 
 fn boot_session_time_distance(session: &BootSessionContext, target_time_ms: i64) -> Option<u64> {
@@ -616,6 +701,50 @@ fn boot_session_time_distance(session: &BootSessionContext, target_time_ms: i64)
 
 fn boot_session_time(session: &BootSessionContext) -> Option<i64> {
     session.boot_time_ms.or(session.observed_start_ms)
+}
+
+fn boot_event_for_session<'a>(
+    ordered: &'a [NormalizedSystemEvent],
+    session: &BootSessionContext,
+) -> Option<&'a NormalizedSystemEvent> {
+    let by_id = ordered.iter().filter(|event| {
+        event.kind == SystemEventKind::NormalBoot
+            && event
+                .payload
+                .boot_id
+                .as_deref()
+                .is_some_and(|boot_id| boot_id == session.boot_id)
+    });
+    let by_id = by_id.max_by_key(|event| (event.event_time_ms, event.record_id.as_str()));
+    by_id.or_else(|| {
+        let session_time_ms = boot_session_time(session)?;
+        ordered
+            .iter()
+            .filter(|event| {
+                event.kind == SystemEventKind::NormalBoot
+                    && within_time(
+                        event.event_time_ms,
+                        session_time_ms,
+                        CRASH_BOOT_EPISODE_MATCH_MS,
+                    )
+            })
+            .min_by_key(|event| {
+                (
+                    time_distance(event.event_time_ms, session_time_ms),
+                    event.record_id.as_str(),
+                )
+            })
+    })
+}
+
+fn is_wer_boundary(event: &NormalizedSystemEvent) -> bool {
+    event.kind == SystemEventKind::BugCheck
+        && event.event_id.trim() == "1001"
+        && event.provider.as_deref().is_some_and(|provider| {
+            provider
+                .to_ascii_lowercase()
+                .contains("systemerrorreporting")
+        })
 }
 
 fn incident_anchor_for_boundary(
@@ -673,7 +802,6 @@ fn incident_anchor_for_boundary(
 
 fn valid_physical_anchor(anchor_time_ms: i64, event_time_ms: i64) -> bool {
     anchor_time_ms <= event_time_ms
-        && event_time_ms.saturating_sub(anchor_time_ms) <= CRASH_PHYSICAL_ANCHOR_HORIZON_MS
 }
 
 fn collection_boundary_anchor_for_episode(
@@ -722,7 +850,7 @@ fn episode_boot_for_boundary<'a>(
     ordered: &'a [NormalizedSystemEvent],
     boundary: &NormalizedSystemEvent,
 ) -> Option<&'a NormalizedSystemEvent> {
-    let past = ordered
+    let nearby_past = ordered
         .iter()
         .filter(|event| {
             event.kind == SystemEventKind::NormalBoot
@@ -734,7 +862,7 @@ fn episode_boot_for_boundary<'a>(
                 )
         })
         .max_by_key(|event| (event.event_time_ms, event.record_id.as_str()));
-    let future = ordered
+    let nearby_future = ordered
         .iter()
         .filter(|event| {
             event.kind == SystemEventKind::NormalBoot
@@ -746,6 +874,51 @@ fn episode_boot_for_boundary<'a>(
                 )
         })
         .min_by_key(|event| (event.event_time_ms, event.record_id.as_str()));
+    if let Some(nearby) = [nearby_past, nearby_future]
+        .into_iter()
+        .flatten()
+        .min_by_key(|event| {
+            (
+                time_distance(event.event_time_ms, boundary.event_time_ms),
+                event.record_id.as_str(),
+            )
+        })
+    {
+        return Some(nearby);
+    }
+
+    let past = ordered
+        .iter()
+        .filter(|event| {
+            event.kind == SystemEventKind::NormalBoot
+                && event.event_time_ms <= boundary.event_time_ms
+                && within_time(
+                    event.event_time_ms,
+                    boundary.event_time_ms,
+                    CRASH_INCIDENT_CORRELATION_MS,
+                )
+        })
+        .max_by_key(|event| (event.event_time_ms, event.record_id.as_str()));
+    let future = ordered
+        .iter()
+        .filter(|event| {
+            event.kind == SystemEventKind::NormalBoot
+                && event.event_time_ms > boundary.event_time_ms
+                && within_time(
+                    event.event_time_ms,
+                    boundary.event_time_ms,
+                    CRASH_INCIDENT_CORRELATION_MS,
+                )
+        })
+        .min_by_key(|event| {
+            (
+                time_distance(event.event_time_ms, boundary.event_time_ms),
+                event.record_id.as_str(),
+            )
+        });
+    if is_wer_boundary(boundary) {
+        return past.or(future);
+    }
     [past, future].into_iter().flatten().min_by_key(|event| {
         (
             time_distance(event.event_time_ms, boundary.event_time_ms),
@@ -1033,15 +1206,16 @@ fn load_crash_classification_context(
 ) -> rusqlite::Result<CrashClassificationContext> {
     let boot_sessions = conn
         .prepare(
-            "SELECT id, boot_time_ms, observed_start_ms
+            "SELECT id, boot_id, boot_time_ms, observed_start_ms
              FROM boot_session
              ORDER BY COALESCE(boot_time_ms, observed_start_ms), id",
         )?
         .query_map([], |row| {
             Ok(BootSessionContext {
                 id: row.get(0)?,
-                boot_time_ms: row.get(1)?,
-                observed_start_ms: row.get(2)?,
+                boot_id: row.get(1)?,
+                boot_time_ms: row.get(2)?,
+                observed_start_ms: row.get(3)?,
             })
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -4208,7 +4382,7 @@ mod tests {
             Some("Microsoft-Windows-WER-SystemErrorReporting".into()),
             "1001",
             "refinement-wer",
-            physical_anchor + 40_000,
+            boot_time + 20 * 60 * 1_000,
             EventPayloadFacts {
                 bugcheck_code: Some("0x00000116".into()),
                 ..EventPayloadFacts::default()
@@ -4219,15 +4393,17 @@ mod tests {
             next_cursors: BTreeMap::from([("System".into(), cursor_for(&wer))]),
         };
         assert_eq!(
-            db.with_writer(|conn| persist_event_batch(conn, &batch_c, physical_anchor + 41_000,))
-                .unwrap(),
+            db.with_writer(|conn| {
+                persist_event_batch(conn, &batch_c, boot_time + 20 * 60 * 1_000 + 1_000)
+            })
+            .unwrap(),
             vec![case_id]
         );
 
         for (batch, now_ms) in [
             (&batch_a, boot_time + 2_000),
             (&batch_b, physical_anchor + 32_000),
-            (&batch_c, physical_anchor + 42_000),
+            (&batch_c, boot_time + 20 * 60 * 1_000 + 2_000),
         ] {
             assert_eq!(
                 db.with_writer(|conn| persist_event_batch(conn, batch, now_ms))
@@ -4259,11 +4435,211 @@ mod tests {
     }
 
     #[test]
+    fn delayed_wer_reuses_persisted_episode_across_correlation_window() {
+        for delay_minutes in [4_i64, 6, 20] {
+            let db = db();
+            let physical_anchor = 10_000_000_i64;
+            let boot_time = physical_anchor + 60_000;
+            let _session = insert_boot_session_fixture(
+                &db,
+                &format!("delayed-wer-{delay_minutes}"),
+                boot_time,
+            );
+            let event_41 = NormalizedSystemEvent::from_fields(
+                "System",
+                Some("Microsoft-Windows-Kernel-Power".into()),
+                "41",
+                format!("delayed-wer-{delay_minutes}-41"),
+                physical_anchor + 10_000,
+                EventPayloadFacts::default(),
+            );
+            let boot = NormalizedSystemEvent::fixture(
+                SystemEventKind::NormalBoot,
+                format!("delayed-wer-{delay_minutes}-boot"),
+                boot_time,
+            );
+            let first_batch = EventReadBatch {
+                events: vec![event_41.clone(), boot.clone()],
+                next_cursors: BTreeMap::from([("System".into(), cursor_for(&boot))]),
+            };
+            let case_id = db
+                .with_writer(|conn| persist_event_batch(conn, &first_batch, boot_time + 1_000))
+                .unwrap()[0];
+            let stable_key: String = db
+                .read(|conn| {
+                    conn.query_row(
+                        "SELECT stable_key FROM crash_case WHERE id = ?1",
+                        [case_id],
+                        |row| row.get(0),
+                    )
+                })
+                .unwrap();
+
+            let wer = NormalizedSystemEvent::from_fields(
+                "System",
+                Some("Microsoft-Windows-WER-SystemErrorReporting".into()),
+                "1001",
+                format!("delayed-wer-{delay_minutes}-1001"),
+                boot_time + delay_minutes * 60 * 1_000,
+                EventPayloadFacts {
+                    bugcheck_code: Some("0x00000116".into()),
+                    ..EventPayloadFacts::default()
+                },
+            );
+            let second_batch = EventReadBatch {
+                events: vec![wer.clone()],
+                next_cursors: BTreeMap::from([("System".into(), cursor_for(&wer))]),
+            };
+            let second_case_ids = db
+                .with_writer(|conn| {
+                    persist_event_batch(
+                        conn,
+                        &second_batch,
+                        boot_time + delay_minutes * 60 * 1_000 + 1_000,
+                    )
+                })
+                .unwrap();
+            assert_eq!(second_case_ids, vec![case_id], "WER delay={delay_minutes}m");
+
+            db.read(|conn| {
+                let row: (i64, String, String, i64) = conn.query_row(
+                    "SELECT id, stable_key, classification,
+                            (SELECT COUNT(*) FROM retention_hold
+                             WHERE crash_case_id = crash_case.id AND released_at_ms IS NULL)
+                     FROM crash_case",
+                    [],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+                )?;
+                assert_eq!(row.0, case_id);
+                assert_eq!(row.1, stable_key);
+                assert_eq!(row.2, "bsod");
+                assert_eq!(row.3, 1);
+                assert_eq!(
+                    conn.query_row("SELECT COUNT(*) FROM crash_case", [], |value| value
+                        .get::<_, i64>(0))?,
+                    1
+                );
+                Ok(())
+            })
+            .unwrap();
+        }
+    }
+
+    #[test]
+    fn delayed_wer_does_not_cross_an_intervening_reboot_episode() {
+        let db = db();
+        let crash_a = 20_000_000_i64;
+        let boot_a = crash_a + 60_000;
+        let crash_b = crash_a + 10 * 60 * 1_000;
+        let boot_b = crash_b + 60_000;
+        let _session_a = insert_boot_session_fixture(&db, "delayed-isolation-a", boot_a);
+        let _session_b = insert_boot_session_fixture(&db, "delayed-isolation-b", boot_b);
+        let events = vec![
+            NormalizedSystemEvent::from_fields(
+                "System",
+                Some("Microsoft-Windows-Kernel-Power".into()),
+                "41",
+                "delayed-isolation-a-41",
+                crash_a,
+                EventPayloadFacts::default(),
+            ),
+            NormalizedSystemEvent::fixture(
+                SystemEventKind::NormalBoot,
+                "delayed-isolation-a-boot",
+                boot_a,
+            ),
+            NormalizedSystemEvent::from_fields(
+                "System",
+                Some("Microsoft-Windows-Kernel-Power".into()),
+                "41",
+                "delayed-isolation-b-41",
+                crash_b,
+                EventPayloadFacts::default(),
+            ),
+            NormalizedSystemEvent::fixture(
+                SystemEventKind::NormalBoot,
+                "delayed-isolation-b-boot",
+                boot_b,
+            ),
+        ];
+        let first_batch = EventReadBatch {
+            next_cursors: BTreeMap::from([("System".into(), cursor_for(&events[3]))]),
+            events,
+        };
+        db.with_writer(|conn| persist_event_batch(conn, &first_batch, boot_b + 1_000))
+            .unwrap();
+        let initial_rows: Vec<(i64, String)> = db
+            .read(|conn| {
+                conn.prepare("SELECT id, stable_key FROM crash_case ORDER BY anchor_time_ms")?
+                    .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
+                    .collect::<rusqlite::Result<Vec<_>>>()
+            })
+            .unwrap();
+        assert_eq!(initial_rows.len(), 2);
+        assert_ne!(initial_rows[0].1, initial_rows[1].1);
+        let case_a = initial_rows[0].0;
+        let case_b = initial_rows[1].0;
+
+        let wer = NormalizedSystemEvent::from_fields(
+            "System",
+            Some("Microsoft-Windows-WER-SystemErrorReporting".into()),
+            "1001",
+            "delayed-isolation-1001",
+            boot_b + 6 * 60 * 1_000,
+            EventPayloadFacts {
+                bugcheck_code: Some("0x00000116".into()),
+                ..EventPayloadFacts::default()
+            },
+        );
+        let second_batch = EventReadBatch {
+            events: vec![wer.clone()],
+            next_cursors: BTreeMap::from([("System".into(), cursor_for(&wer))]),
+        };
+        let second_case_ids = db
+            .with_writer(|conn| {
+                persist_event_batch(conn, &second_batch, boot_b + 6 * 60 * 1_000 + 1_000)
+            })
+            .unwrap();
+        assert!(second_case_ids.contains(&case_b));
+
+        db.read(|conn| {
+            assert_eq!(
+                conn.query_row(
+                    "SELECT classification FROM crash_case WHERE id = ?1",
+                    [case_a],
+                    |row| row.get::<_, String>(0),
+                )?,
+                "unexpected_shutdown"
+            );
+            assert_eq!(
+                conn.query_row(
+                    "SELECT classification FROM crash_case WHERE id = ?1",
+                    [case_b],
+                    |row| row.get::<_, String>(0),
+                )?,
+                "bsod"
+            );
+            assert_eq!(
+                conn.query_row(
+                    "SELECT COUNT(*) FROM retention_hold WHERE released_at_ms IS NULL",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )?,
+                2
+            );
+            Ok(())
+        })
+        .unwrap();
+    }
+
+    #[test]
     fn long_offline_physical_shutdown_anchor_remains_authoritative() {
         let physical_anchor = 5_000_000_i64;
         for (record_id, delay_ms) in [
             ("long-offline-48h", 48 * 60 * 60 * 1_000_i64),
             ("long-offline-72h", 72 * 60 * 60 * 1_000_i64),
+            ("long-offline-8d", 8 * 24 * 60 * 60 * 1_000_i64),
+            ("long-offline-30d", 30 * 24 * 60 * 60 * 1_000_i64),
         ] {
             let db = db();
             let event = NormalizedSystemEvent::from_fields(
@@ -4297,6 +4673,36 @@ mod tests {
             })
             .unwrap();
         }
+    }
+
+    #[test]
+    fn malformed_6008_payload_does_not_fabricate_physical_anchor() {
+        let db = db();
+        let event = NormalizedSystemEvent::from_fields(
+            "System",
+            Some("EventLog".into()),
+            "6008",
+            "malformed-6008",
+            5_000_000,
+            EventPayloadFacts::default(),
+        );
+        let batch = EventReadBatch {
+            events: vec![event.clone()],
+            next_cursors: BTreeMap::from([("System".into(), cursor_for(&event))]),
+        };
+        assert!(db
+            .with_writer(|conn| persist_event_batch(conn, &batch, 5_001_000))
+            .unwrap()
+            .is_empty());
+        db.read(|conn| {
+            assert_eq!(
+                conn.query_row("SELECT COUNT(*) FROM crash_case", [], |row| row
+                    .get::<_, i64>(0))?,
+                0
+            );
+            Ok(())
+        })
+        .unwrap();
     }
 
     #[test]
