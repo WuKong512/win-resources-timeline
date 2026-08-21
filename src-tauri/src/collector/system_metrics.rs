@@ -1,12 +1,16 @@
+use crate::collector::process_selector::{
+    ProcessCandidate, ProcessIdentity, ProcessSelector, DEFAULT_PROCESS_TOP_N,
+};
 use crate::models::MetricCategory;
 use crate::models::{AppResourceSample, ProviderErrorCode, ResourceSnapshot, SystemSample};
 use std::{
-    collections::{BTreeSet, HashMap, HashSet},
+    collections::{BTreeSet, HashSet},
     time::Instant,
 };
 use sysinfo::System;
 
-const TOP_APPS_PER_RESOURCE: usize = 5;
+const TOP_APPS_PER_RESOURCE: usize = DEFAULT_PROCESS_TOP_N;
+const PROCESS_QUALITY_IDENTITY_INCOMPLETE: i64 = 1 << 0;
 
 pub struct SystemSampler {
     system: System,
@@ -99,16 +103,21 @@ impl SystemSampler {
 fn collect_app_samples(
     system: &System,
     sample_duration_ms: i64,
-    tracked_app_keys: &HashSet<String>,
+    foreground_keys: &HashSet<String>,
 ) -> Vec<AppResourceSample> {
     let cpu_count = system.cpus().len().max(1) as f64;
     let duration_ms = sample_duration_ms.max(1) as u64;
-    let mut grouped = HashMap::<String, AppResourceSample>::new();
+    let mut candidates = Vec::new();
     for process in system.processes().values() {
         let process_name = process.name().trim();
         if process_name.is_empty() {
             continue;
         }
+        let pid = Some(process.pid().as_u32());
+        let process_creation_time_ms = process
+            .start_time()
+            .checked_mul(1_000)
+            .and_then(|value| i64::try_from(value).ok());
         let exe_path = process
             .exe()
             .filter(|path| !path.as_os_str().is_empty())
@@ -126,35 +135,74 @@ fn collect_app_samples(
             })
             .unwrap_or_else(|| format!("name:{}", process_name.to_lowercase()));
         let disk = process.disk_usage();
-        let entry = grouped
-            .entry(app_key.clone())
-            .or_insert_with(|| AppResourceSample {
-                app_key,
-                process_name: process_name.to_string(),
-                exe_path: exe_path.clone(),
-                process_count: 0,
-                cpu_percent: 0.0,
-                memory_used_bytes: 0,
-                io_read_bytes_per_sec: 0,
-                io_write_bytes_per_sec: 0,
-            });
-        entry.process_count += 1;
-        entry.cpu_percent += process.cpu_usage() as f64 / cpu_count;
-        entry.memory_used_bytes = entry
-            .memory_used_bytes
-            .saturating_add(process.memory().min(i64::MAX as u64) as i64);
-        entry.io_read_bytes_per_sec = entry
-            .io_read_bytes_per_sec
-            .saturating_add(rate_per_second(disk.read_bytes, duration_ms));
-        entry.io_write_bytes_per_sec = entry
-            .io_write_bytes_per_sec
-            .saturating_add(rate_per_second(disk.written_bytes, duration_ms));
+        let raw_cpu_percent = process.cpu_usage() as f64;
+        let cpu_percent = Some(raw_cpu_percent / cpu_count);
+        let working_set_bytes = Some(process.memory().min(i64::MAX as u64) as i64);
+        let read_bytes_per_sec = Some(rate_per_second(disk.read_bytes, duration_ms));
+        let write_bytes_per_sec = Some(rate_per_second(disk.written_bytes, duration_ms));
+        let quality_mask = if exe_path.is_none() || process_creation_time_ms.is_none() {
+            PROCESS_QUALITY_IDENTITY_INCOMPLETE
+        } else {
+            0
+        };
+        candidates.push(ProcessCandidate {
+            identity: ProcessIdentity {
+                pid,
+                creation_time_ms: process_creation_time_ms,
+                executable_key: app_key.clone(),
+            },
+            app_key,
+            process_name: process_name.to_string(),
+            exe_path,
+            cpu_percent,
+            private_bytes: None,
+            working_set_bytes,
+            read_bytes_per_sec,
+            write_bytes_per_sec,
+            network_bytes_per_sec: None,
+            gpu_percent: None,
+            vram_bytes: None,
+            cpu_time_delta_us: Some(
+                (raw_cpu_percent * sample_duration_ms.max(1) as f64 * 10.0)
+                    .round()
+                    .clamp(0.0, i64::MAX as f64) as i64,
+            ),
+            quality_mask,
+        });
     }
-    select_top_apps(
-        grouped.into_values().collect(),
-        TOP_APPS_PER_RESOURCE,
-        tracked_app_keys,
-    )
+
+    ProcessSelector::new(TOP_APPS_PER_RESOURCE)
+        .select_with_foreground_keys(&candidates, foreground_keys)
+        .into_iter()
+        .map(|selected| {
+            let candidate = selected.candidate;
+            let process_identity_key = candidate.stable_key();
+            AppResourceSample {
+                app_key: candidate.app_key,
+                process_name: candidate.process_name,
+                exe_path: candidate.exe_path,
+                process_count: 1,
+                cpu_percent: candidate.cpu_percent.unwrap_or(0.0),
+                memory_used_bytes: candidate.working_set_bytes.unwrap_or(0),
+                io_read_bytes_per_sec: candidate.read_bytes_per_sec.unwrap_or(0),
+                io_write_bytes_per_sec: candidate.write_bytes_per_sec.unwrap_or(0),
+                process_identity_key: Some(process_identity_key),
+                pid: candidate.identity.pid,
+                process_creation_time_ms: candidate.identity.creation_time_ms,
+                private_bytes: candidate.private_bytes,
+                cpu_time_delta_us: candidate.cpu_time_delta_us,
+                gpu_percent: candidate.gpu_percent,
+                vram_bytes: candidate.vram_bytes,
+                network_bytes_per_sec: candidate.network_bytes_per_sec,
+                selection_reason: i64::from(selected.selection_reason_mask),
+                quality_mask: candidate.quality_mask,
+                measured_cpu_percent: candidate.cpu_percent,
+                measured_working_set_bytes: candidate.working_set_bytes,
+                measured_read_bytes_per_sec: candidate.read_bytes_per_sec,
+                measured_write_bytes_per_sec: candidate.write_bytes_per_sec,
+            }
+        })
+        .collect()
 }
 
 fn rate_per_second(bytes: u64, duration_ms: u64) -> i64 {
@@ -163,35 +211,6 @@ fn rate_per_second(bytes: u64, duration_ms: u64) -> i64 {
         .checked_div(duration_ms.max(1))
         .unwrap_or(0)
         .min(i64::MAX as u64) as i64
-}
-
-fn select_top_apps(
-    mut apps: Vec<AppResourceSample>,
-    limit: usize,
-    tracked_app_keys: &HashSet<String>,
-) -> Vec<AppResourceSample> {
-    let mut selected = HashSet::new();
-    let mut add_top = |value: &dyn Fn(&AppResourceSample) -> f64| {
-        let mut ranked: Vec<_> = apps.iter().collect();
-        ranked.sort_by(|a, b| value(b).total_cmp(&value(a)));
-        selected.extend(
-            ranked
-                .into_iter()
-                .take(limit)
-                .map(|app| app.app_key.clone()),
-        );
-    };
-    add_top(&|app| app.cpu_percent);
-    add_top(&|app| app.memory_used_bytes as f64);
-    add_top(&|app| (app.io_read_bytes_per_sec + app.io_write_bytes_per_sec) as f64);
-    selected.extend(tracked_app_keys.iter().cloned());
-    apps.retain(|app| selected.contains(&app.app_key));
-    apps.sort_by(|a, b| {
-        b.cpu_percent
-            .total_cmp(&a.cpu_percent)
-            .then_with(|| b.memory_used_bytes.cmp(&a.memory_used_bytes))
-    });
-    apps
 }
 
 #[cfg(windows)]
@@ -382,39 +401,11 @@ pub fn now_ms() -> i64 {
 
 #[cfg(test)]
 mod app_sample_tests {
-    use super::{select_top_apps, AppResourceSample};
-    use std::collections::HashSet;
-
-    fn app(name: &str, cpu: f64, memory: i64, disk: i64) -> AppResourceSample {
-        AppResourceSample {
-            app_key: format!("name:{name}"),
-            process_name: name.into(),
-            exe_path: None,
-            process_count: 1,
-            cpu_percent: cpu,
-            memory_used_bytes: memory,
-            io_read_bytes_per_sec: disk,
-            io_write_bytes_per_sec: 0,
-        }
-    }
+    use super::rate_per_second;
 
     #[test]
-    fn retains_the_union_of_resource_leaders() {
-        let selected = select_top_apps(
-            vec![
-                app("cpu", 80.0, 1, 0),
-                app("memory", 0.0, 100, 0),
-                app("disk", 0.0, 1, 1_000),
-                app("small", 0.0, 0, 0),
-            ],
-            1,
-            &HashSet::from(["name:small".to_string()]),
-        );
-        let keys: HashSet<_> = selected.into_iter().map(|item| item.app_key).collect();
-        assert_eq!(keys.len(), 4);
-        assert!(keys.contains("name:cpu"));
-        assert!(keys.contains("name:memory"));
-        assert!(keys.contains("name:disk"));
-        assert!(keys.contains("name:small"));
+    fn byte_rates_use_the_actual_observation_duration() {
+        assert_eq!(rate_per_second(2_000, 500), 4_000);
+        assert_eq!(rate_per_second(0, 500), 0);
     }
 }

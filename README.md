@@ -11,12 +11,13 @@ CPU, memory, and disk curves are system totals. A chart point can be selected to
 - Uses executable path plus process name as the persistent app identity; PID is never a persistent identity.
 - Splits intervals on app and active/idle transitions, allows a short no-foreground grace period, and leaves gaps across delayed scheduler ticks.
 - Stores UTC Unix epoch milliseconds and queries half-open local-day ranges supplied by the frontend.
-- Uses SQLite WAL, schema migrations through `PRAGMA user_version` (currently v6), one open interval with checkpoints, and recovery to `last_seen_time_ms` after an unclean exit. The v5 migration repairs the regular false gaps created by older builds when foreground polling was slower than one second; v6 persists the default-on Windows startup preference.
+- Uses SQLite WAL, schema migrations through `PRAGMA user_version` (currently v8), one open interval with checkpoints, and recovery to `last_seen_time_ms` after an unclean exit. The v5 migration repairs the regular false gaps created by older builds when foreground polling was slower than one second; v6 persists the default-on Windows startup preference; v7/v8 provide the frame, process, provider, and per-device GPU storage contracts.
 - Samples CPU and memory every 5 seconds after a warm-up refresh and reads system-wide disk throughput from Windows PDH `_Total` counters. Missing metrics remain `NULL` and chart as gaps.
-- At each retained system sample, aggregates processes by executable and stores foreground-tracked apps plus the union of the top five apps by CPU, memory, and process I/O. Clicking the resource chart selects the nearest real sample and displays that snapshot.
+- At each retained system sample, selects raw process instances before logical-app aggregation: the union of the top five by CPU, working-set memory, and I/O plus the resolvable foreground process. PID, creation time, executable identity, selection reasons, NULLs, and quality masks are retained in `process_sample`; bounded 1-minute, 1-hour, and daily app-resource rollups provide selected-observation totals and statistics, with coverage showing how incomplete the observed day is.
 - Provides a per-app resource-history selector for sampled CPU, resident memory, and process I/O. Disk tooltips and axes use human-readable byte units.
 - Receives lock/unlock, suspend/resume, and shutdown notifications through a hidden native Win32 window without creating a WebView.
 - Runs collection through a bounded control channel and exposes health, pause/resume, clear-data, app filtering, and autostart commands.
+- Asynchronously reads normalized Windows System Event Log facts, classifies supported crash/restart boundaries, creates idempotent cases and retention holds, and exposes objective evidence summaries/status DTOs. Crash evidence does not infer cause, severity, blame, probability, or remediation.
 - Supports a tray menu, `--background` startup, on-demand WebView creation, and single-instance focus behavior.
 - Provides Today, Timeline, Resources, and Settings views with loading, error, and empty states.
 - Timeline uses a data-aware calendar: dates without foreground samples are dimmed and cannot be selected. Idle visibility remains available at zero and shows the recorded duration; Today and the current-day timeline refresh automatically.
@@ -81,7 +82,7 @@ No analytics, telemetry, crash upload, account, or network sync is included. The
 - Sleep, lock, process failure, and delayed scheduling appear as gaps; the collector never fills missing time from the previous app. Scheduler-gap detection remains a fallback if native notifications are missed.
 - CPU and memory peaks are peaks among 5-second samples, not continuous maxima.
 - App resource details exist only for samples captured by schema-v3-or-newer builds. Older system samples remain visible but have no app snapshot.
-- Processes sharing an executable path are combined. Foreground-tracked apps are retained whenever running, alongside the top five independently by CPU, memory, and I/O.
+- Raw process instances are selected independently by CPU, memory, and I/O with a fixed Top-N of five per dimension; repeated selection is one row with an OR-ed reason mask. Logical-app aggregation happens only in rollups/queries. Daily resource rows are selected-observation totals, not a full all-process account; `coverage < 1` means incomplete observation. Missing process metrics stay NULL and are not converted to measured zero.
 - On Windows, per-process I/O includes all read/write I/O reported for that process, not only physical-disk traffic. The system disk curve remains the PDH physical-disk total.
 - The collector's own small resource cost is included in system totals.
 - Disk throughput uses `\\PhysicalDisk(_Total)\\Disk Read Bytes/sec` and `Disk Write Bytes/sec`. If PDH is unavailable or not yet warmed up, values are stored as `NULL` instead of using process totals or fabricating throughput.
@@ -105,7 +106,7 @@ No analytics, telemetry, crash upload, account, or network sync is included. The
 ## Roadmap
 
 - Optional ETW enhancement mode for higher-resolution resource diagnostics
-- One-minute aggregates for long-term resource history
+- PR-05 backend process rollups and crash evidence are implemented; the later PR-06 UI presentation and user-facing retention settings remain deferred.
 - Longer multi-hour performance soak tests and installer upgrade coverage
 - Optional higher-resolution attribution, temperature, and anomaly events as separate future modes
 

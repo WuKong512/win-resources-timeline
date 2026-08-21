@@ -1199,10 +1199,37 @@ fn insert_snapshot(
     }
     for app in apps {
         let executable_id = upsert_resource_app_tx(&tx, app, system.timestamp_ms)?;
-        let instance_key = format!("runtime:{}", app.app_key);
+        let instance_key = app
+            .process_identity_key
+            .clone()
+            .unwrap_or_else(|| format!("runtime:{}", app.app_key));
+        if let (Some(pid), Some(create_time_ms)) = (app.pid, app.process_creation_time_ms) {
+            tx.execute(
+                "UPDATE process_instance
+                 SET exit_time_ms = COALESCE(exit_time_ms, ?1)
+                 WHERE pid = ?2 AND exit_time_ms IS NULL AND create_time_ms IS NOT ?3
+                   AND stable_key <> ?4",
+                params![
+                    system.timestamp_ms,
+                    i64::from(pid),
+                    create_time_ms,
+                    instance_key
+                ],
+            )?;
+        }
         tx.execute(
-            "INSERT INTO process_instance(app_executable_id, stable_key, source) VALUES (?1, ?2, 'runtime') ON CONFLICT(stable_key) DO UPDATE SET app_executable_id = excluded.app_executable_id",
-            params![executable_id, instance_key],
+            "INSERT INTO process_instance(app_executable_id, stable_key, pid, create_time_ms, source)
+             VALUES (?1, ?2, ?3, ?4, 'runtime')
+             ON CONFLICT(stable_key) DO UPDATE SET
+                app_executable_id = excluded.app_executable_id,
+                pid = COALESCE(excluded.pid, process_instance.pid),
+                create_time_ms = COALESCE(excluded.create_time_ms, process_instance.create_time_ms)",
+            params![
+                executable_id,
+                instance_key,
+                app.pid.map(i64::from),
+                app.process_creation_time_ms,
+            ],
         )?;
         let process_id: i64 = tx.query_row(
             "SELECT id FROM process_instance WHERE stable_key = ?1",
@@ -1210,8 +1237,27 @@ fn insert_snapshot(
             |row| row.get(0),
         )?;
         tx.execute(
-            "INSERT INTO process_sample(frame_id, process_instance_id, cpu_pct, working_set_bytes, process_count, read_bps, write_bps) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-            params![frame_id, process_id, app.cpu_percent, app.memory_used_bytes, app.process_count, app.io_read_bytes_per_sec, app.io_write_bytes_per_sec],
+            "INSERT INTO process_sample(
+                 frame_id, process_instance_id, cpu_pct, cpu_time_delta_us, working_set_bytes,
+                 private_bytes, gpu_pct, vram_bytes, process_count, read_bps, write_bps,
+                 network_bps, selection_reason, quality_mask
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
+            params![
+                frame_id,
+                process_id,
+                app.measured_cpu_percent,
+                app.cpu_time_delta_us,
+                app.measured_working_set_bytes,
+                app.private_bytes,
+                app.gpu_percent,
+                app.vram_bytes,
+                app.process_count,
+                app.measured_read_bytes_per_sec,
+                app.measured_write_bytes_per_sec,
+                app.network_bytes_per_sec,
+                app.selection_reason,
+                app.quality_mask,
+            ],
         )?;
     }
     tx.commit()
@@ -1854,10 +1900,57 @@ pub fn save_start_with_windows(
 }
 
 pub fn prune_system_samples(conn: &Connection, cutoff_ms: i64) -> rusqlite::Result<usize> {
-    conn.execute("DELETE FROM sample_frame WHERE ts < ?1", [cutoff_ms])
+    let ids = select_prunable_frame_ids(conn, cutoff_ms, 500)?;
+    if ids.is_empty() {
+        return Ok(0);
+    }
+    let tx = conn.unchecked_transaction()?;
+    for frame_id in &ids {
+        tx.execute("DELETE FROM sample_frame WHERE id = ?1", [frame_id])?;
+    }
+    tx.commit()?;
+    Ok(ids.len())
+}
+
+/// Returns only frames that are outside the ordinary retention cutoff and do not overlap an
+/// active crash hold. Released holds intentionally stop protecting data under normal policy.
+pub fn select_prunable_frame_ids(
+    conn: &Connection,
+    cutoff_ms: i64,
+    limit: usize,
+) -> rusqlite::Result<Vec<i64>> {
+    let mut statement = conn.prepare(
+        "SELECT f.id
+         FROM sample_frame f
+         WHERE f.ts < ?1
+           AND NOT EXISTS (
+               SELECT 1 FROM retention_hold h
+               WHERE h.released_at_ms IS NULL
+                 AND f.ts < h.end_ms
+                 AND f.ts + f.duration_ms > h.start_ms
+           )
+         ORDER BY f.ts, f.id
+         LIMIT ?2",
+    )?;
+    let result = statement
+        .query_map(params![cutoff_ms, limit.max(1) as i64], |row| row.get(0))?
+        .collect();
+    result
 }
 
 pub fn clear_collected_data(conn: &Connection) -> rusqlite::Result<()> {
+    let active_holds: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM retention_hold WHERE released_at_ms IS NULL",
+        [],
+        |row| row.get(0),
+    )?;
+    if active_holds > 0 {
+        return Err(rusqlite::Error::ToSqlConversionFailure(Box::new(
+            io::Error::other(format!(
+                "clear collected data refused: {active_holds} active crash retention hold(s) protect evidence; release holds first"
+            )),
+        )));
+    }
     let tx = conn.unchecked_transaction()?;
     tx.execute("DELETE FROM foreground_interval", [])?;
     tx.execute("DELETE FROM sample_frame", [])?;
