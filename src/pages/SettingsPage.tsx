@@ -19,6 +19,14 @@ import { Card, CardContent, CardHeader, CardTitle } from "../components/ui/Card"
 import { Switch } from "../components/ui/Switch";
 import { useI18n, type TranslationKey } from "../i18n";
 import type { AppIdentity, CapabilityState, CollectionSettings, CollectorStatus, MetricCategory, ProviderStatus, StorageUsage } from "../types/resource";
+import {
+  beginSettingsFullRefresh,
+  beginSettingsStatusPoll,
+  canCommitSettingsFullOnly,
+  canCommitSettingsStatusStorage,
+  invalidateSettingsRefreshes,
+  type SettingsFreshnessState
+} from "../utils/settingsFreshness";
 import { formatBytes } from "../utils/time";
 import { aggregateCategoryCapability, toggleCategory } from "../utils/uiSemantics";
 
@@ -49,12 +57,14 @@ export function SettingsPage() {
   const [saved, setSaved] = useState(false);
   const [error, setError] = useState("");
   const mountedRef = useRef(false);
-  const refreshRequestRef = useRef(0);
+  // Full-only fields and status/storage have separate freshness domains.
+  const freshnessRef = useRef<SettingsFreshnessState>({ fullGeneration: 0, statusStorageGeneration: 0 });
   const savedTimerRef = useRef<number | null>(null);
 
   const refresh = useCallback(async () => {
-    const requestId = refreshRequestRef.current + 1;
-    refreshRequestRef.current = requestId;
+    const begun = beginSettingsFullRefresh(freshnessRef.current);
+    freshnessRef.current = begun.state;
+    const request = begun.request;
     let result: [CollectionSettings, CollectorStatus, StorageUsage, boolean, AppIdentity[], Awaited<ReturnType<typeof listCrashCases>>];
     try {
       result = await Promise.all([
@@ -66,30 +76,39 @@ export function SettingsPage() {
         listCrashCases()
       ]);
     } catch (error) {
-      if (!mountedRef.current || requestId !== refreshRequestRef.current) return;
+      if (!canCommitSettingsFullOnly(freshnessRef.current, request, mountedRef.current)) return false;
+      setLoading(false);
       throw error;
     }
-    if (!mountedRef.current || requestId !== refreshRequestRef.current) return;
+    const commitFullOnly = canCommitSettingsFullOnly(freshnessRef.current, request, mountedRef.current);
+    const commitStatusStorage = canCommitSettingsStatusStorage(freshnessRef.current, request, mountedRef.current);
+    if (!commitFullOnly && !commitStatusStorage) return false;
     const [nextSettings, nextStatus, nextStorage, nextAutostart, nextApps, nextCases] = result;
-    setSettings(nextSettings);
-    setStatus(nextStatus);
-    setProviders(nextStatus.providerStatus);
-    setStorage(nextStorage);
-    setAutostart(nextAutostart);
-    setApps(nextApps);
-    setActiveHolds(nextCases.filter((item) => item.hasActiveHold).length);
+    if (commitStatusStorage) {
+      setStatus(nextStatus);
+      setProviders(nextStatus.providerStatus);
+      setStorage(nextStorage);
+    }
+    if (commitFullOnly) {
+      setSettings(nextSettings);
+      setAutostart(nextAutostart);
+      setApps(nextApps);
+      setActiveHolds(nextCases.filter((item) => item.hasActiveHold).length);
+      setLoading(false);
+    }
+    return commitFullOnly;
   }, []);
 
   useEffect(() => {
     let cancelled = false;
     mountedRef.current = true;
     setLoading(true);
-    refresh().catch(() => { if (!cancelled) setError(t("settingsErrorMessage")); }).finally(() => { if (!cancelled) setLoading(false); });
+    refresh().catch(() => { if (!cancelled && mountedRef.current) setError(t("settingsErrorMessage")); });
     const interval = window.setInterval(() => {
-      const requestId = refreshRequestRef.current + 1;
-      refreshRequestRef.current = requestId;
+      const begun = beginSettingsStatusPoll(freshnessRef.current);
+      freshnessRef.current = begun.state;
       Promise.all([getCollectorStatus(), getStorageUsage()]).then(([nextStatus, nextStorage]) => {
-        if (!cancelled && mountedRef.current && requestId === refreshRequestRef.current) {
+        if (!cancelled && canCommitSettingsStatusStorage(freshnessRef.current, begun.request, mountedRef.current)) {
           setStatus(nextStatus);
           setProviders(nextStatus.providerStatus);
           setStorage(nextStorage);
@@ -99,7 +118,7 @@ export function SettingsPage() {
     return () => {
       cancelled = true;
       mountedRef.current = false;
-      refreshRequestRef.current += 1;
+      freshnessRef.current = invalidateSettingsRefreshes(freshnessRef.current);
       window.clearInterval(interval);
       if (savedTimerRef.current != null) {
         window.clearTimeout(savedTimerRef.current);
@@ -118,36 +137,37 @@ export function SettingsPage() {
     try {
       await setCollectionSettings(settings);
       await refresh();
+      if (!mountedRef.current) return;
       setSaved(true);
       if (savedTimerRef.current != null) window.clearTimeout(savedTimerRef.current);
       savedTimerRef.current = window.setTimeout(() => {
         savedTimerRef.current = null;
-        setSaved(false);
+        if (mountedRef.current) setSaved(false);
       }, 2_500);
     } catch {
-      setError(t("settingsActionError"));
+      if (mountedRef.current) setError(t("settingsActionError"));
     } finally {
-      setSaving(false);
+      if (mountedRef.current) setSaving(false);
     }
   }
 
   async function togglePause() {
     if (!status) return;
-    try { await setCollectionPaused(!status.paused); await refresh(); } catch { setError(t("settingsActionError")); }
+    try { await setCollectionPaused(!status.paused); await refresh(); } catch { if (mountedRef.current) setError(t("settingsActionError")); }
   }
 
   async function toggleAutostart(value: boolean) {
-    try { await setAutostartEnabled(value); setAutostart(value); } catch { setError(t("settingsActionError")); }
+    try { await setAutostartEnabled(value); if (mountedRef.current) setAutostart(value); } catch { if (mountedRef.current) setError(t("settingsActionError")); }
   }
 
   async function toggleHidden(appId: number, hidden: boolean) {
-    try { await setAppHidden(appId, hidden); setApps((items) => items.map((app) => app.id === appId ? { ...app, isHidden: hidden } : app)); } catch { setError(t("settingsActionError")); }
+    try { await setAppHidden(appId, hidden); if (mountedRef.current) setApps((items) => items.map((app) => app.id === appId ? { ...app, isHidden: hidden } : app)); } catch { if (mountedRef.current) setError(t("settingsActionError")); }
   }
 
   async function clearData() {
     if (!window.confirm(t("clearConfirm"))) return;
     if (!window.confirm(t("clearFinalConfirm"))) return;
-    try { await clearCollectedData(); await refresh(); } catch { setError(t("settingsActionError")); }
+    try { await clearCollectedData(); await refresh(); } catch { if (mountedRef.current) setError(t("settingsActionError")); }
   }
 
   return <div className="space-y-5">
