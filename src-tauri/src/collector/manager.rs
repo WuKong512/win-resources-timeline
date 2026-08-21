@@ -1,11 +1,15 @@
 use super::{
     interval_engine::{IntervalAction, IntervalEngine, UsageEvent},
+    nvidia_nvml::NvidiaNvmlProvider,
     provider::{CollectionPlan, ProviderHost, ProviderSample, WindowsBaselineProvider},
     system_metrics::now_ms,
 };
 use crate::{
     db::{writer, Database},
-    models::{CollectionSettings, CollectorStatus, ComputerState, ForegroundApp},
+    models::{
+        CollectionSessionMetricMetadata, CollectionSettings, CollectorStatus, ComputerState,
+        ForegroundApp, ResourceSnapshot, SystemSample,
+    },
     platform::{self, PlatformEvent},
 };
 use crossbeam_channel::{bounded, Receiver, Sender, TryRecvError};
@@ -488,12 +492,17 @@ fn run_collector(
     let mut settings = db
         .with_writer(writer::collection_settings)
         .unwrap_or_default();
-    let mut provider_host = ProviderHost::new(vec![Box::new(WindowsBaselineProvider::new())]);
+    let mut provider_host = ProviderHost::new(vec![
+        Box::new(WindowsBaselineProvider::new()),
+        Box::new(NvidiaNvmlProvider::new()),
+    ]);
     provider_host.probe_all_for_settings(&settings);
     provider_host.apply_desired_plan(
         CollectionPlan::build_desired(&settings, &provider_host.descriptors()),
         Instant::now(),
     );
+    let mut last_provider_metadata = Vec::<CollectionSessionMetricMetadata>::new();
+    sync_provider_metric_metadata(&db, &provider_host, &mut last_provider_metadata, now_ms());
     sync_provider_status(&status, provider_host.statuses());
     let mut tracked_app_keys: HashSet<String> =
         db.with_writer(writer::tracked_app_keys).unwrap_or_default();
@@ -729,6 +738,12 @@ fn run_collector(
                     provider_host.resume(Instant::now());
                     last_observation_ms = Some(now);
                 }
+                sync_provider_metric_metadata(
+                    &db,
+                    &provider_host,
+                    &mut last_provider_metadata,
+                    now,
+                );
                 sync_provider_status(&status, provider_host.statuses());
             }
             Some(Control::OpenWindow) => {
@@ -744,6 +759,12 @@ fn run_collector(
                     provider_host.apply_desired_plan(
                         CollectionPlan::build_desired(&next, &provider_host.descriptors()),
                         Instant::now(),
+                    );
+                    sync_provider_metric_metadata(
+                        &db,
+                        &provider_host,
+                        &mut last_provider_metadata,
+                        now,
                     );
                     settings = next;
                     last_prune = Instant::now() - Duration::from_secs(86_400);
@@ -784,6 +805,12 @@ fn run_collector(
             }) => {
                 provider_shutdown_deadline = Some(deadline);
                 let provider_stop_result = provider_host.stop_all(deadline);
+                sync_provider_metric_metadata(
+                    &db,
+                    &provider_host,
+                    &mut last_provider_metadata,
+                    now_ms(),
+                );
                 sync_provider_status(&status, provider_host.statuses());
                 if let Err(error) = &provider_stop_result {
                     eprintln!("collector provider shutdown failed: {error:?}");
@@ -922,13 +949,15 @@ fn run_collector(
                 }
             }
 
-            for sample in provider_host.sample_due(Instant::now(), now, &tracked_app_keys) {
-                match sample {
-                    ProviderSample::ResourceSnapshot(snapshot) => {
-                        frame_writer.enqueue(snapshot);
-                    }
-                }
+            let provider_samples = provider_host.sample_due(Instant::now(), now, &tracked_app_keys);
+            for snapshot in merge_provider_samples(
+                provider_samples,
+                now,
+                i64::try_from(settings.system_sample_interval_ms).unwrap_or(i64::MAX),
+            ) {
+                frame_writer.enqueue(snapshot);
             }
+            sync_provider_metric_metadata(&db, &provider_host, &mut last_provider_metadata, now);
             sync_provider_status(&status, provider_host.statuses());
             if last_system_flush.elapsed() >= Duration::from_millis(250)
                 && frame_writer.queue_depth() > 0
@@ -957,6 +986,7 @@ fn run_collector(
     let final_provider_deadline =
         provider_shutdown_deadline.unwrap_or_else(|| Instant::now() + Duration::from_secs(2));
     let _ = provider_host.stop_all(final_provider_deadline);
+    sync_provider_metric_metadata(&db, &provider_host, &mut last_provider_metadata, now_ms());
     sync_provider_status(&status, provider_host.statuses());
     if let Ok(mut value) = status.lock() {
         value.running = false;
@@ -1298,6 +1328,65 @@ fn normalize_path(path: &str) -> String {
         .to_lowercase()
 }
 
+pub(crate) fn merge_provider_samples(
+    samples: Vec<ProviderSample>,
+    timestamp_ms: i64,
+    sample_duration_ms: i64,
+) -> Vec<ResourceSnapshot> {
+    let mut snapshots = Vec::new();
+    let mut gpus = Vec::new();
+    for sample in samples {
+        match sample {
+            ProviderSample::ResourceSnapshot(snapshot) => snapshots.push(snapshot),
+            ProviderSample::GpuSamples(provider_gpus) => gpus.extend(provider_gpus),
+        }
+    }
+    if gpus.is_empty() {
+        return snapshots;
+    }
+    if let Some(snapshot) = snapshots
+        .iter_mut()
+        .find(|snapshot| snapshot.system.timestamp_ms == timestamp_ms)
+    {
+        snapshot.system.gpus.extend(gpus);
+        return snapshots;
+    }
+    snapshots.push(ResourceSnapshot {
+        system: SystemSample {
+            timestamp_ms,
+            sample_duration_ms: sample_duration_ms.max(1),
+            cpu_percent: None,
+            memory_percent: None,
+            memory_used_bytes: None,
+            memory_total_bytes: None,
+            disk_read_bytes_per_sec: None,
+            disk_write_bytes_per_sec: None,
+            gpus,
+            has_app_snapshot: false,
+        },
+        apps: Vec::new(),
+    });
+    snapshots
+}
+
+fn sync_provider_metric_metadata(
+    db: &Arc<Database>,
+    provider_host: &ProviderHost,
+    last_metadata: &mut Vec<CollectionSessionMetricMetadata>,
+    at_ms: i64,
+) {
+    let next_metadata = provider_host.collection_session_metric_metadata();
+    if *last_metadata == next_metadata {
+        return;
+    }
+    match db
+        .with_writer(|conn| writer::sync_collection_session_metrics(conn, &next_metadata, at_ms))
+    {
+        Ok(()) => *last_metadata = next_metadata,
+        Err(error) => eprintln!("collector provider metadata sync failed: {error}"),
+    }
+}
+
 fn flush_system_samples(
     db: &Database,
     frame_writer: &mut writer::FrameWriter,
@@ -1400,7 +1489,7 @@ mod tests {
     use super::*;
     use crate::{
         db::writer,
-        models::ForegroundApp,
+        models::{ForegroundApp, GpuSample},
         platform::{PlatformEvent, PlatformEventEnvelope},
     };
     use rusqlite::Connection;
@@ -2227,5 +2316,76 @@ mod tests {
                 .unwrap();
         assert!(matches!(prepared.event, UsageEvent::Foreground { .. }));
         harness.finish();
+    }
+
+    #[test]
+    fn gpu_provider_samples_share_the_baseline_frame_without_duplicate_baseline_rows() {
+        let baseline = ResourceSnapshot {
+            system: SystemSample {
+                timestamp_ms: 10_000,
+                sample_duration_ms: 2_000,
+                cpu_percent: Some(12.5),
+                memory_percent: Some(30.0),
+                memory_used_bytes: Some(3_000),
+                memory_total_bytes: Some(10_000),
+                disk_read_bytes_per_sec: Some(7),
+                disk_write_bytes_per_sec: Some(8),
+                gpus: Vec::new(),
+                has_app_snapshot: false,
+            },
+            apps: Vec::new(),
+        };
+        let gpu = GpuSample {
+            device_key: "gpu:nvidia:uuid:gpu-a".into(),
+            vendor: Some("NVIDIA".into()),
+            model: Some("GPU A".into()),
+            capacity_bytes: Some(16_000),
+            utilization_percent: Some(0.0),
+            memory_controller_utilization_percent: Some(0.0),
+            temperature_celsius: Some(42.0),
+            power_watts: Some(100.0),
+            graphics_clock_mhz: Some(2_000.0),
+            memory_clock_mhz: Some(12_000.0),
+            vram_used_bytes: Some(0),
+            vram_total_bytes: Some(16_000),
+            power_scope: Some("gpu_board".into()),
+            quality_mask: 0,
+        };
+
+        let merged = merge_provider_samples(
+            vec![
+                ProviderSample::ResourceSnapshot(baseline.clone()),
+                ProviderSample::GpuSamples(vec![gpu.clone()]),
+            ],
+            10_000,
+            2_000,
+        );
+        assert_eq!(merged.len(), 1);
+        assert_eq!(merged[0].system.cpu_percent, baseline.system.cpu_percent);
+        assert_eq!(merged[0].system.gpus, vec![gpu]);
+
+        let gpu_only = merge_provider_samples(
+            vec![ProviderSample::GpuSamples(merged[0].system.gpus.clone())],
+            12_000,
+            2_000,
+        );
+        assert_eq!(gpu_only.len(), 1);
+        assert_eq!(gpu_only[0].system.timestamp_ms, 12_000);
+        assert_eq!(gpu_only[0].system.cpu_percent, None);
+        assert_eq!(gpu_only[0].system.gpus.len(), 1);
+
+        let disabled = merge_provider_samples(
+            vec![ProviderSample::ResourceSnapshot(ResourceSnapshot {
+                system: SystemSample {
+                    timestamp_ms: 14_000,
+                    ..baseline.system
+                },
+                apps: Vec::new(),
+            })],
+            14_000,
+            2_000,
+        );
+        assert_eq!(disabled.len(), 1);
+        assert!(disabled[0].system.gpus.is_empty());
     }
 }

@@ -1,8 +1,9 @@
 use super::system_metrics::{DiskCapabilityProbe, PdhDiskCapabilityProbe, SystemSampler};
 use crate::models::{
-    CapabilityState, CapabilitySupportStatus, CollectionSettings, MetricCapabilityStatus,
-    MetricCategory, ProviderErrorCode, ProviderErrorSummary, ProviderLifecycleState,
-    ProviderStatus, ResourceSnapshot,
+    CapabilityState, CapabilitySupportStatus, CollectionSessionMetricMetadata, CollectionSettings,
+    MetricCapabilityStatus, MetricCategory, MetricRuntimeSupportStatus, ProviderErrorCode,
+    ProviderErrorSummary, ProviderLifecycleState, ProviderMetricMetadata, ProviderStatus,
+    ResourceSnapshot,
 };
 use crossbeam_channel::{bounded, Receiver, SendTimeoutError, Sender};
 use std::{
@@ -237,6 +238,7 @@ pub struct ProviderLifecycleOutcome {
 #[derive(Debug, Clone)]
 pub enum ProviderSample {
     ResourceSnapshot(ResourceSnapshot),
+    GpuSamples(Vec<crate::models::GpuSample>),
 }
 
 pub trait MetricProvider: Send {
@@ -279,6 +281,9 @@ pub trait MetricProvider: Send {
     ) -> Result<Option<ProviderSample>, ProviderError>;
     fn stop(&mut self, context: &ProviderCallContext) -> Result<(), ProviderError>;
     fn health(&self) -> ProviderHealthObservation;
+    fn metric_metadata(&self) -> Vec<ProviderMetricMetadata> {
+        Vec::new()
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -318,19 +323,31 @@ enum ProviderCommand {
     },
 }
 
+#[derive(Debug, Clone, Default)]
+struct ProviderObservation {
+    health: ProviderHealthObservation,
+    metric_metadata: Vec<ProviderMetricMetadata>,
+    capabilities: Vec<ProviderCapabilitySpec>,
+}
+
 enum ProviderReply {
     Probe {
         result: Result<Vec<ProviderCapabilitySpec>, ProviderError>,
-        health: ProviderHealthObservation,
+        observation: ProviderObservation,
     },
     Lifecycle {
         result: Result<ProviderLifecycleOutcome, ProviderError>,
-        health: ProviderHealthObservation,
+        observation: ProviderObservation,
     },
     Sample {
         result: Result<Option<ProviderSample>, ProviderError>,
-        health: ProviderHealthObservation,
+        observation: ProviderObservation,
     },
+}
+
+struct ProviderCallResult<T> {
+    result: Result<T, ProviderError>,
+    observation: ProviderObservation,
 }
 
 struct PendingProviderCall {
@@ -369,7 +386,7 @@ impl ProviderExecutor {
         generation: u64,
         deadline: Instant,
         requested_categories: Arc<BTreeSet<MetricCategory>>,
-    ) -> Result<(Vec<ProviderCapabilitySpec>, ProviderHealthObservation), ProviderError> {
+    ) -> Result<ProviderCallResult<Vec<ProviderCapabilitySpec>>, ProviderError> {
         let reply = self.execute(
             ProviderOperation::Probe,
             generation,
@@ -381,9 +398,13 @@ impl ProviderExecutor {
             },
         )?;
         match reply {
-            ProviderReply::Probe { result, health } => {
-                result.map(|capabilities| (capabilities, health))
-            }
+            ProviderReply::Probe {
+                result,
+                observation,
+            } => Ok(ProviderCallResult {
+                result,
+                observation,
+            }),
             ProviderReply::Lifecycle { .. } | ProviderReply::Sample { .. } => {
                 Err(ProviderError::new(
                     ProviderErrorCode::ProviderMissing,
@@ -398,7 +419,7 @@ impl ProviderExecutor {
         generation: u64,
         plan: &ProviderPlan,
         deadline: Instant,
-    ) -> Result<(ProviderLifecycleOutcome, ProviderHealthObservation), ProviderError> {
+    ) -> Result<ProviderCallResult<ProviderLifecycleOutcome>, ProviderError> {
         let reply = self.execute(
             ProviderOperation::Start,
             generation,
@@ -417,7 +438,7 @@ impl ProviderExecutor {
         generation: u64,
         plan: &ProviderPlan,
         deadline: Instant,
-    ) -> Result<(ProviderLifecycleOutcome, ProviderHealthObservation), ProviderError> {
+    ) -> Result<ProviderCallResult<ProviderLifecycleOutcome>, ProviderError> {
         let reply = self.execute(
             ProviderOperation::Reconfigure,
             generation,
@@ -437,7 +458,7 @@ impl ProviderExecutor {
         timestamp_ms: i64,
         tracked_app_keys: Arc<HashSet<String>>,
         deadline: Instant,
-    ) -> Result<(Option<ProviderSample>, ProviderHealthObservation), ProviderError> {
+    ) -> Result<ProviderCallResult<Option<ProviderSample>>, ProviderError> {
         let reply = self.execute(
             ProviderOperation::Sample,
             generation,
@@ -450,7 +471,13 @@ impl ProviderExecutor {
             },
         )?;
         match reply {
-            ProviderReply::Sample { result, health } => result.map(|sample| (sample, health)),
+            ProviderReply::Sample {
+                result,
+                observation,
+            } => Ok(ProviderCallResult {
+                result,
+                observation,
+            }),
             ProviderReply::Probe { .. } | ProviderReply::Lifecycle { .. } => {
                 Err(ProviderError::new(
                     ProviderErrorCode::ProviderMissing,
@@ -464,14 +491,14 @@ impl ProviderExecutor {
         &mut self,
         generation: u64,
         deadline: Instant,
-    ) -> Result<ProviderHealthObservation, ProviderError> {
+    ) -> Result<ProviderCallResult<ProviderLifecycleOutcome>, ProviderError> {
         let reply = self.execute(
             ProviderOperation::Stop,
             generation,
             deadline,
             |context, reply| ProviderCommand::Stop { context, reply },
         )?;
-        lifecycle_reply(reply).map(|(_, health)| health)
+        lifecycle_reply(reply)
     }
 
     fn cancel_pending(&self) {
@@ -567,9 +594,15 @@ impl ProviderExecutor {
 
 fn lifecycle_reply(
     reply: ProviderReply,
-) -> Result<(ProviderLifecycleOutcome, ProviderHealthObservation), ProviderError> {
+) -> Result<ProviderCallResult<ProviderLifecycleOutcome>, ProviderError> {
     match reply {
-        ProviderReply::Lifecycle { result, health } => result.map(|outcome| (outcome, health)),
+        ProviderReply::Lifecycle {
+            result,
+            observation,
+        } => Ok(ProviderCallResult {
+            result,
+            observation,
+        }),
         ProviderReply::Probe { .. } | ProviderReply::Sample { .. } => Err(ProviderError::new(
             ProviderErrorCode::ProviderMissing,
             "invalid provider lifecycle reply",
@@ -591,7 +624,7 @@ fn provider_worker(provider: &mut Box<dyn MetricProvider>, command_rx: Receiver<
                 (
                     ProviderReply::Probe {
                         result,
-                        health: provider.health(),
+                        observation: provider_observation(provider.as_ref()),
                     },
                     reply,
                 )
@@ -605,7 +638,7 @@ fn provider_worker(provider: &mut Box<dyn MetricProvider>, command_rx: Receiver<
                 (
                     ProviderReply::Lifecycle {
                         result,
-                        health: provider.health(),
+                        observation: provider_observation(provider.as_ref()),
                     },
                     reply,
                 )
@@ -619,7 +652,7 @@ fn provider_worker(provider: &mut Box<dyn MetricProvider>, command_rx: Receiver<
                 (
                     ProviderReply::Lifecycle {
                         result,
-                        health: provider.health(),
+                        observation: provider_observation(provider.as_ref()),
                     },
                     reply,
                 )
@@ -636,7 +669,7 @@ fn provider_worker(provider: &mut Box<dyn MetricProvider>, command_rx: Receiver<
                 (
                     ProviderReply::Sample {
                         result,
-                        health: provider.health(),
+                        observation: provider_observation(provider.as_ref()),
                     },
                     reply,
                 )
@@ -650,13 +683,21 @@ fn provider_worker(provider: &mut Box<dyn MetricProvider>, command_rx: Receiver<
                 (
                     ProviderReply::Lifecycle {
                         result,
-                        health: provider.health(),
+                        observation: provider_observation(provider.as_ref()),
                     },
                     reply,
                 )
             }
         };
         let _ = reply_tx.try_send(reply);
+    }
+}
+
+fn provider_observation(provider: &dyn MetricProvider) -> ProviderObservation {
+    ProviderObservation {
+        health: provider.health(),
+        metric_metadata: provider.metric_metadata(),
+        capabilities: provider.descriptor().capabilities.clone(),
     }
 }
 
@@ -671,6 +712,7 @@ fn call_with_context<T>(
 struct ProviderRuntime {
     descriptor: ProviderDescriptor,
     executor: ProviderExecutor,
+    metric_metadata: Vec<ProviderMetricMetadata>,
     plan: Option<ProviderPlan>,
     started: bool,
     lifecycle: ProviderLifecycleState,
@@ -684,6 +726,9 @@ struct ProviderRuntime {
     provider_health: ProviderHealthObservation,
     probe_failed: bool,
     stop_failure: Option<ProviderErrorSummary>,
+    /// Identifies a timed-out executor call whose failure has already been recorded by the Host.
+    /// The eventual cancelled completion must not count that same operation a second time.
+    accounted_pending_failure: Option<(ProviderOperation, u64)>,
     generation: u64,
     probe_generation: u64,
 }
@@ -715,6 +760,7 @@ impl ProviderHost {
                         ProviderRuntime {
                             descriptor,
                             executor: ProviderExecutor::new(provider),
+                            metric_metadata: Vec::new(),
                             plan: None,
                             started: false,
                             lifecycle: ProviderLifecycleState::Stopped,
@@ -728,6 +774,7 @@ impl ProviderHost {
                             provider_health: ProviderHealthObservation::default(),
                             probe_failed: false,
                             stop_failure: None,
+                            accounted_pending_failure: None,
                             generation: 0,
                             probe_generation: 0,
                         },
@@ -795,15 +842,34 @@ impl ProviderHost {
                     .executor
                     .probe(generation, control_deadline, requested_categories)
                 {
-                    Ok((capabilities, health)) => {
-                        let capability_changed = runtime.descriptor.capabilities != capabilities;
-                        runtime.descriptor.capabilities = capabilities;
-                        runtime.provider_health = health;
-                        runtime.probe_failed = false;
-                        runtime.consecutive_failures = 0;
-                        runtime.last_error = None;
-                        if !runtime.started {
-                            runtime.lifecycle = ProviderLifecycleState::Stopped;
+                    Ok(call) => {
+                        let ProviderCallResult {
+                            result,
+                            observation,
+                        } = call;
+                        let mut capability_changed = install_observation(runtime, &observation);
+                        let provider_counted_failure =
+                            update_health(runtime, observation.health.clone());
+                        match result {
+                            Ok(capabilities) => {
+                                capability_changed |=
+                                    runtime.descriptor.capabilities != capabilities;
+                                runtime.descriptor.capabilities = capabilities;
+                                runtime.probe_failed = false;
+                                runtime.consecutive_failures = 0;
+                                runtime.last_error = None;
+                                if !runtime.started {
+                                    runtime.lifecycle = ProviderLifecycleState::Stopped;
+                                }
+                            }
+                            Err(error) => {
+                                record_probe_failure_with_accounting(
+                                    runtime,
+                                    error,
+                                    provider_counted_failure,
+                                );
+                                capability_changed = true;
+                            }
                         }
                         capability_changed
                     }
@@ -887,25 +953,35 @@ impl ProviderHost {
                         return;
                     }
                     match completion.reply {
-                        ProviderReply::Probe { result, health } => match result {
-                            Ok(capabilities) => {
-                                capability_changed =
-                                    runtime.descriptor.capabilities != capabilities;
-                                runtime.descriptor.capabilities = capabilities;
-                                runtime.provider_health = health;
-                                runtime.probe_failed = false;
-                                runtime.consecutive_failures = 0;
-                                runtime.last_error = None;
-                                if !runtime.started {
-                                    runtime.lifecycle = ProviderLifecycleState::Stopped;
+                        ProviderReply::Probe {
+                            result,
+                            observation,
+                        } => {
+                            capability_changed |= install_observation(runtime, &observation);
+                            let provider_counted_failure =
+                                update_health(runtime, observation.health.clone());
+                            match result {
+                                Ok(capabilities) => {
+                                    capability_changed |=
+                                        runtime.descriptor.capabilities != capabilities;
+                                    runtime.descriptor.capabilities = capabilities;
+                                    runtime.probe_failed = false;
+                                    runtime.consecutive_failures = 0;
+                                    runtime.last_error = None;
+                                    if !runtime.started {
+                                        runtime.lifecycle = ProviderLifecycleState::Stopped;
+                                    }
+                                }
+                                Err(error) => {
+                                    record_probe_failure_with_accounting(
+                                        runtime,
+                                        error,
+                                        provider_counted_failure,
+                                    );
+                                    capability_changed = true;
                                 }
                             }
-                            Err(error) => {
-                                let previous = runtime.descriptor.capabilities.clone();
-                                record_probe_failure(runtime, error);
-                                capability_changed = previous != runtime.descriptor.capabilities;
-                            }
-                        },
+                        }
                         _ => {
                             let previous = runtime.descriptor.capabilities.clone();
                             record_probe_failure(
@@ -921,8 +997,115 @@ impl ProviderHost {
                 }
                 ProviderOperation::Sample => {
                     // A timed-out sample is deliberately never replayed into the current frame.
-                    // If user intent changed while it was pending, release the provider now.
-                    cleanup = !desired_active && runtime.started;
+                    // Its observations are accepted only when it still belongs to the current
+                    // lifecycle generation and active intent.
+                    if completion.generation != runtime.generation {
+                        if runtime.accounted_pending_failure
+                            == Some((ProviderOperation::Sample, completion.generation))
+                        {
+                            runtime.accounted_pending_failure = None;
+                        }
+                        cleanup = !desired_active && runtime.started;
+                    } else {
+                        let accounted_timeout = runtime.accounted_pending_failure
+                            == Some((ProviderOperation::Sample, completion.generation));
+                        if accounted_timeout {
+                            runtime.accounted_pending_failure = None;
+                        }
+                        match completion.reply {
+                            ProviderReply::Sample {
+                                result,
+                                observation,
+                            } if desired_active => {
+                                capability_changed |= install_observation(runtime, &observation);
+                                let provider_counted_failure =
+                                    update_health(runtime, observation.health.clone());
+                                let runtime_failure = observation
+                                    .health
+                                    .last_error
+                                    .as_ref()
+                                    .filter(|error| error.code == ProviderErrorCode::RuntimeFailed)
+                                    .cloned();
+                                match result {
+                                    Ok(_sample) => {
+                                        if let Some(summary) = runtime_failure {
+                                            record_failure_from_observation(
+                                                runtime,
+                                                provider_error(summary),
+                                                provider_counted_failure,
+                                            );
+                                            let interval_ms = runtime
+                                                .plan
+                                                .as_ref()
+                                                .map(|plan| plan.interval_ms)
+                                                .unwrap_or(1);
+                                            let backoff = failure_backoff(
+                                                interval_ms,
+                                                runtime.consecutive_failures,
+                                            );
+                                            runtime.started = false;
+                                            runtime.lifecycle = ProviderLifecycleState::Failed;
+                                            runtime.retry_action =
+                                                Some(ProviderRetryAction::Reconfigure);
+                                            runtime.retry_at = Some(now + backoff);
+                                            runtime.next_sample_at = Some(now + backoff);
+                                        } else {
+                                            runtime.lifecycle = ProviderLifecycleState::Running;
+                                            runtime.last_error =
+                                                runtime.provider_health.last_error.clone();
+                                            runtime.consecutive_failures = 0;
+                                        }
+                                    }
+                                    Err(error) => {
+                                        let error_code = error.code;
+                                        let runtime_failure =
+                                            error_code == ProviderErrorCode::RuntimeFailed;
+                                        if !(accounted_timeout
+                                            && error_code == ProviderErrorCode::Timeout)
+                                        {
+                                            record_failure_from_observation(
+                                                runtime,
+                                                error,
+                                                provider_counted_failure,
+                                            );
+                                        }
+                                        let interval_ms = runtime
+                                            .plan
+                                            .as_ref()
+                                            .map(|plan| plan.interval_ms)
+                                            .unwrap_or(1);
+                                        let backoff = failure_backoff(
+                                            interval_ms,
+                                            runtime.consecutive_failures,
+                                        );
+                                        if !(accounted_timeout
+                                            && error_code == ProviderErrorCode::Timeout)
+                                        {
+                                            runtime.next_sample_at = Some(now + backoff);
+                                        }
+                                        if runtime_failure {
+                                            runtime.started = false;
+                                            runtime.retry_action =
+                                                Some(ProviderRetryAction::Reconfigure);
+                                            runtime.retry_at = Some(now + backoff);
+                                        }
+                                    }
+                                }
+                            }
+                            ProviderReply::Sample { .. } => {
+                                cleanup = runtime.started;
+                            }
+                            _ => {
+                                record_failure(
+                                    runtime,
+                                    ProviderError::new(
+                                        ProviderErrorCode::ProviderMissing,
+                                        "invalid provider sample reply",
+                                    ),
+                                );
+                            }
+                        }
+                    }
                 }
                 ProviderOperation::Start | ProviderOperation::Reconfigure => {
                     let action = match completion.operation {
@@ -931,29 +1114,51 @@ impl ProviderHost {
                         _ => unreachable!(),
                     };
                     let current = completion.generation == runtime.generation;
-                    let (result, health) = match completion.reply {
-                        ProviderReply::Lifecycle { result, health } => (result, health),
-                        _ => (
-                            Err(ProviderError::new(
+                    let accounted_timeout = runtime.accounted_pending_failure
+                        == Some((completion.operation, completion.generation));
+                    if accounted_timeout {
+                        runtime.accounted_pending_failure = None;
+                    }
+                    let call = match completion.reply {
+                        ProviderReply::Lifecycle {
+                            result,
+                            observation,
+                        } => ProviderCallResult {
+                            result,
+                            observation,
+                        },
+                        _ => ProviderCallResult {
+                            result: Err(ProviderError::new(
                                 ProviderErrorCode::ProviderMissing,
                                 "invalid provider lifecycle reply",
                             )),
-                            ProviderHealthObservation::default(),
-                        ),
+                            observation: ProviderObservation::default(),
+                        },
+                    };
+                    let ProviderCallResult {
+                        result,
+                        observation,
+                    } = call;
+                    if current {
+                        capability_changed |= install_observation(runtime, &observation);
+                    }
+                    let provider_counted_failure = if current {
+                        update_health(runtime, observation.health.clone())
+                    } else {
+                        false
                     };
                     match result {
                         Ok(outcome) => {
-                            if let Some(capabilities) = outcome.capabilities {
-                                runtime.descriptor.capabilities = capabilities;
-                                capability_changed = true;
-                            }
                             runtime.started = true;
                             if current && desired_active {
-                                update_health(runtime, health);
+                                if let Some(capabilities) = outcome.capabilities {
+                                    capability_changed |=
+                                        runtime.descriptor.capabilities != capabilities;
+                                    runtime.descriptor.capabilities = capabilities;
+                                }
                                 runtime.lifecycle = ProviderLifecycleState::Running;
-                                runtime.last_error = None;
+                                runtime.last_error = runtime.provider_health.last_error.clone();
                                 runtime.stop_failure = None;
-                                runtime.provider_health.last_error = None;
                                 runtime.consecutive_failures = 0;
                                 runtime.next_sample_at = Some(now);
                                 clear_retry(runtime);
@@ -973,19 +1178,29 @@ impl ProviderHost {
                         Err(error) => {
                             runtime.started = false;
                             if current && desired_active {
-                                record_failure(runtime, error);
+                                let duplicate_timeout =
+                                    accounted_timeout && error.code == ProviderErrorCode::Timeout;
+                                if !duplicate_timeout {
+                                    record_failure_from_observation(
+                                        runtime,
+                                        error,
+                                        provider_counted_failure,
+                                    );
+                                }
                                 runtime.retry_action = Some(action);
                                 let interval_ms = runtime
                                     .plan
                                     .as_ref()
                                     .map(|plan| plan.interval_ms)
                                     .unwrap_or(1);
-                                runtime.retry_at = Some(
-                                    now + failure_backoff(
-                                        interval_ms,
-                                        runtime.consecutive_failures,
-                                    ),
-                                );
+                                if !duplicate_timeout {
+                                    runtime.retry_at = Some(
+                                        now + failure_backoff(
+                                            interval_ms,
+                                            runtime.consecutive_failures,
+                                        ),
+                                    );
+                                }
                                 runtime.next_sample_at = None;
                             } else if desired_active {
                                 // A stale failure must not replace the newer plan's intent, but
@@ -1009,7 +1224,10 @@ impl ProviderHost {
                 ProviderOperation::Stop => {
                     let current = completion.generation == runtime.generation;
                     let (result, health) = match completion.reply {
-                        ProviderReply::Lifecycle { result, health } => (result.map(|_| ()), health),
+                        ProviderReply::Lifecycle {
+                            result,
+                            observation,
+                        } => (result.map(|_| ()), observation.health),
                         _ => (
                             Err(ProviderError::new(
                                 ProviderErrorCode::ProviderMissing,
@@ -1018,9 +1236,13 @@ impl ProviderHost {
                             ProviderHealthObservation::default(),
                         ),
                     };
+                    let provider_counted_failure = if current {
+                        update_health(runtime, health.clone())
+                    } else {
+                        false
+                    };
                     match result {
                         Ok(()) => {
-                            update_health(runtime, health);
                             runtime.started = false;
                             runtime.stop_failure = None;
                             runtime.last_error = None;
@@ -1037,10 +1259,17 @@ impl ProviderHost {
                                     ProviderLifecycleState::Stopped
                                 };
                             }
-                            let _ = current;
                         }
                         Err(error) => {
-                            record_failure(runtime, error.clone());
+                            if current {
+                                record_failure_from_observation(
+                                    runtime,
+                                    error.clone(),
+                                    provider_counted_failure,
+                                );
+                            } else {
+                                record_failure(runtime, error.clone());
+                            }
                             runtime.started = false;
                             runtime.stop_failure = runtime.last_error.clone();
                             runtime.lifecycle = ProviderLifecycleState::Failed;
@@ -1353,30 +1582,96 @@ impl ProviderHost {
                 continue;
             }
             runtime.next_sample_at = Some(now + Duration::from_millis(plan.interval_ms.max(1)));
+            let mut capability_changed = false;
             match runtime.executor.sample(
                 runtime.generation,
                 timestamp_ms,
                 tracked_app_keys.clone(),
                 Instant::now() + PROVIDER_SAMPLE_TIMEOUT,
             ) {
-                Ok((sample, health)) => {
-                    update_health(runtime, health);
-                    runtime.lifecycle = ProviderLifecycleState::Running;
-                    runtime.consecutive_failures = 0;
-                    runtime.last_error = None;
-                    runtime.provider_health.last_error = None;
-                    if sample.is_some() {
-                        runtime.last_success_at_ms = Some(timestamp_ms);
-                    }
-                    if let Some(sample) = sample {
-                        samples.push(sample);
+                Ok(call) => {
+                    let ProviderCallResult {
+                        result,
+                        observation,
+                    } = call;
+                    capability_changed |= install_observation(runtime, &observation);
+                    let provider_counted_failure =
+                        update_health(runtime, observation.health.clone());
+                    let runtime_failure = observation
+                        .health
+                        .last_error
+                        .as_ref()
+                        .filter(|error| error.code == ProviderErrorCode::RuntimeFailed)
+                        .cloned();
+                    match result {
+                        Ok(sample) => {
+                            if sample.is_some() {
+                                runtime.last_success_at_ms = Some(timestamp_ms);
+                            }
+                            if let Some(summary) = runtime_failure {
+                                record_failure_from_observation(
+                                    runtime,
+                                    provider_error(summary),
+                                    provider_counted_failure,
+                                );
+                                let backoff =
+                                    failure_backoff(plan.interval_ms, runtime.consecutive_failures);
+                                runtime.started = false;
+                                runtime.retry_action = Some(ProviderRetryAction::Reconfigure);
+                                runtime.retry_at = Some(now + backoff);
+                                runtime.next_sample_at = Some(now + backoff);
+                            } else {
+                                runtime.lifecycle = ProviderLifecycleState::Running;
+                                runtime.consecutive_failures = 0;
+                                runtime.last_error = runtime.provider_health.last_error.clone();
+                            }
+                            if let Some(sample) = sample {
+                                samples.push(sample);
+                            }
+                        }
+                        Err(error) => {
+                            let runtime_failure = error.code == ProviderErrorCode::RuntimeFailed;
+                            record_failure_from_observation(
+                                runtime,
+                                error,
+                                provider_counted_failure,
+                            );
+                            let backoff =
+                                failure_backoff(plan.interval_ms, runtime.consecutive_failures);
+                            runtime.next_sample_at = Some(now + backoff);
+                            if runtime_failure {
+                                // A provider that explicitly lost its native runtime must re-enter
+                                // via the existing lifecycle reconciliation path instead of
+                                // attempting to revive its session from inside `sample`.
+                                runtime.started = false;
+                                runtime.retry_action = Some(ProviderRetryAction::Reconfigure);
+                                runtime.retry_at = Some(now + backoff);
+                            }
+                        }
                     }
                 }
                 Err(error) => {
+                    let runtime_failure = error.code == ProviderErrorCode::RuntimeFailed;
+                    let pending_failure = runtime.executor.pending();
                     record_failure(runtime, error);
+                    if pending_failure {
+                        runtime.accounted_pending_failure =
+                            Some((ProviderOperation::Sample, runtime.generation));
+                    }
                     let backoff = failure_backoff(plan.interval_ms, runtime.consecutive_failures);
                     runtime.next_sample_at = Some(now + backoff);
+                    if runtime_failure {
+                        // A provider that explicitly lost its native runtime must re-enter via
+                        // the existing lifecycle reconciliation path instead of attempting to
+                        // revive its session from inside `sample`.
+                        runtime.started = false;
+                        runtime.retry_action = Some(ProviderRetryAction::Reconfigure);
+                        runtime.retry_at = Some(now + backoff);
+                    }
                 }
+            }
+            if capability_changed {
+                self.sync_plan_with_capabilities(&provider_id, now);
             }
         }
         samples
@@ -1447,6 +1742,21 @@ impl ProviderHost {
             }
         }
         first_error.map_or(Ok(()), Err)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_failure_state(
+        &self,
+        provider_id: &str,
+    ) -> Option<(u64, u32, bool, Option<ProviderErrorCode>)> {
+        self.providers.get(provider_id).map(|runtime| {
+            (
+                runtime.failure_count,
+                runtime.consecutive_failures,
+                runtime.retry_action == Some(ProviderRetryAction::Reconfigure),
+                runtime.last_error.as_ref().map(|error| error.code),
+            )
+        })
     }
 
     pub fn statuses(&self) -> Vec<ProviderStatus> {
@@ -1549,12 +1859,89 @@ impl ProviderHost {
             })
             .collect()
     }
+
+    /// Returns provider-reported per-metric runtime truth after it has been reconciled with the
+    /// desired plan. Persistence remains a collector/writer responsibility.
+    pub fn collection_session_metric_metadata(&self) -> Vec<CollectionSessionMetricMetadata> {
+        let mut metadata = Vec::new();
+        for (provider_id, runtime) in &self.providers {
+            let desired_plan = self.desired_plan.provider(provider_id);
+            for metric in &runtime.metric_metadata {
+                let enabled = desired_plan.is_some_and(|plan| {
+                    plan.enabled && plan.enabled_categories.contains(&metric.category)
+                });
+                let support_status = if metric.support_status
+                    == MetricRuntimeSupportStatus::Supported
+                    && enabled
+                    && runtime.probe_failed
+                {
+                    MetricRuntimeSupportStatus::ProbeFailed
+                } else if metric.support_status == MetricRuntimeSupportStatus::Supported
+                    && enabled
+                    && runtime.lifecycle == ProviderLifecycleState::Failed
+                {
+                    metric_failure_status(runtime.last_error.as_ref())
+                } else {
+                    metric.support_status
+                };
+                metadata.push(CollectionSessionMetricMetadata {
+                    provider_id: provider_id.clone(),
+                    category: metric.category,
+                    metric_key: metric.metric_key.clone(),
+                    device: metric.device.clone(),
+                    enabled,
+                    support_status,
+                    interval_ms: desired_plan.map(|plan| plan.interval_ms),
+                });
+            }
+        }
+        metadata.sort_by(|left, right| {
+            left.provider_id
+                .cmp(&right.provider_id)
+                .then_with(|| left.metric_key.cmp(&right.metric_key))
+                .then_with(|| {
+                    left.device
+                        .as_ref()
+                        .map(|device| device.stable_key.as_str())
+                        .cmp(
+                            &right
+                                .device
+                                .as_ref()
+                                .map(|device| device.stable_key.as_str()),
+                        )
+                })
+        });
+        metadata
+    }
 }
 
-fn update_health(runtime: &mut ProviderRuntime, health: ProviderHealthObservation) {
+fn metric_failure_status(error: Option<&ProviderErrorSummary>) -> MetricRuntimeSupportStatus {
+    match error.map(|error| error.code) {
+        Some(ProviderErrorCode::PermissionDenied) => MetricRuntimeSupportStatus::PermissionDenied,
+        Some(ProviderErrorCode::ProviderMissing) => MetricRuntimeSupportStatus::ProviderMissing,
+        Some(ProviderErrorCode::Unsupported) => MetricRuntimeSupportStatus::Unsupported,
+        Some(_) | None => MetricRuntimeSupportStatus::Failed,
+    }
+}
+
+/// Installs provider-owned health and reports whether its cumulative failure count advanced.
+///
+/// The returned bit is the accounting hand-off between a provider observation and the Host:
+/// when a provider has already recorded the failure in its health snapshot, the Host must still
+/// reconcile lifecycle/backoff state but must not count the same event again.
+fn update_health(runtime: &mut ProviderRuntime, health: ProviderHealthObservation) -> bool {
     runtime.last_success_at_ms = health.last_success_at_ms.or(runtime.last_success_at_ms);
+    let provider_counted_failure = health.failure_count > runtime.failure_count;
     runtime.failure_count = runtime.failure_count.max(health.failure_count);
     runtime.provider_health = health;
+    provider_counted_failure
+}
+
+fn install_observation(runtime: &mut ProviderRuntime, observation: &ProviderObservation) -> bool {
+    let capability_changed = runtime.descriptor.capabilities != observation.capabilities;
+    runtime.descriptor.capabilities = observation.capabilities.clone();
+    runtime.metric_metadata = observation.metric_metadata.clone();
+    capability_changed
 }
 
 fn clear_retry(runtime: &mut ProviderRuntime) {
@@ -1563,7 +1950,15 @@ fn clear_retry(runtime: &mut ProviderRuntime) {
 }
 
 fn record_probe_failure(runtime: &mut ProviderRuntime, error: ProviderError) {
-    record_failure(runtime, error.clone());
+    record_probe_failure_with_accounting(runtime, error, false);
+}
+
+fn record_probe_failure_with_accounting(
+    runtime: &mut ProviderRuntime,
+    error: ProviderError,
+    provider_counted_failure: bool,
+) {
+    record_failure_from_observation(runtime, error.clone(), provider_counted_failure);
     runtime.probe_failed = true;
     runtime.descriptor.capabilities = runtime
         .descriptor
@@ -1607,8 +2002,26 @@ fn normal_control_deadline() -> Instant {
 }
 
 fn record_failure(runtime: &mut ProviderRuntime, error: ProviderError) {
+    record_failure_with_accounting(runtime, error, true);
+}
+
+fn record_failure_from_observation(
+    runtime: &mut ProviderRuntime,
+    error: ProviderError,
+    provider_counted_failure: bool,
+) {
+    record_failure_with_accounting(runtime, error, !provider_counted_failure);
+}
+
+fn record_failure_with_accounting(
+    runtime: &mut ProviderRuntime,
+    error: ProviderError,
+    increment_failure_count: bool,
+) {
     runtime.lifecycle = ProviderLifecycleState::Failed;
-    runtime.failure_count = runtime.failure_count.saturating_add(1);
+    if increment_failure_count {
+        runtime.failure_count = runtime.failure_count.saturating_add(1);
+    }
     runtime.consecutive_failures = runtime.consecutive_failures.saturating_add(1);
     let summary = error_summary(error);
     runtime.last_error = Some(summary.clone());
@@ -1627,6 +2040,10 @@ fn attempt_start(
     now: Instant,
     deadline: Instant,
 ) -> bool {
+    let operation = match action {
+        ProviderRetryAction::Start => ProviderOperation::Start,
+        ProviderRetryAction::Reconfigure => ProviderOperation::Reconfigure,
+    };
     let result = match action {
         ProviderRetryAction::Start => runtime.executor.start(generation, plan, deadline),
         ProviderRetryAction::Reconfigure => {
@@ -1634,25 +2051,43 @@ fn attempt_start(
         }
     };
     match result {
-        Ok((outcome, health)) => {
-            let capability_changed = outcome.capabilities.is_some();
-            if let Some(capabilities) = outcome.capabilities {
-                runtime.descriptor.capabilities = capabilities;
+        Ok(call) => match call.result {
+            Ok(outcome) => {
+                let mut capability_changed = install_observation(runtime, &call.observation);
+                if let Some(capabilities) = outcome.capabilities {
+                    capability_changed |= runtime.descriptor.capabilities != capabilities;
+                    runtime.descriptor.capabilities = capabilities;
+                }
+                update_health(runtime, call.observation.health);
+                runtime.started = true;
+                runtime.lifecycle = ProviderLifecycleState::Running;
+                runtime.last_error = runtime.provider_health.last_error.clone();
+                runtime.stop_failure = None;
+                runtime.consecutive_failures = 0;
+                runtime.next_sample_at = Some(now);
+                clear_retry(runtime);
+                capability_changed
             }
-            update_health(runtime, health);
-            runtime.started = true;
-            runtime.lifecycle = ProviderLifecycleState::Running;
-            runtime.last_error = None;
-            runtime.stop_failure = None;
-            runtime.provider_health.last_error = None;
-            runtime.consecutive_failures = 0;
-            runtime.next_sample_at = Some(now);
-            clear_retry(runtime);
-            capability_changed
-        }
+            Err(error) => {
+                install_observation(runtime, &call.observation);
+                let provider_counted_failure =
+                    update_health(runtime, call.observation.health.clone());
+                runtime.started = false;
+                record_failure_from_observation(runtime, error, provider_counted_failure);
+                runtime.retry_action = Some(action);
+                runtime.retry_at =
+                    Some(now + failure_backoff(plan.interval_ms, runtime.consecutive_failures));
+                runtime.next_sample_at = None;
+                false
+            }
+        },
         Err(error) => {
+            let pending_failure = runtime.executor.pending_operation() == Some(operation);
             runtime.started = false;
             record_failure(runtime, error);
+            if pending_failure {
+                runtime.accounted_pending_failure = Some((operation, generation));
+            }
             runtime.retry_action = Some(action);
             runtime.retry_at =
                 Some(now + failure_backoff(plan.interval_ms, runtime.consecutive_failures));
@@ -1702,13 +2137,23 @@ fn stop_runtime(
     runtime.next_sample_at = None;
     clear_retry(runtime);
     match result {
-        Ok(health) => {
-            update_health(runtime, health);
-            runtime.lifecycle = ProviderLifecycleState::Stopped;
-            runtime.last_error = None;
-            runtime.stop_failure = None;
-            Ok(())
-        }
+        Ok(call) => match call.result {
+            Ok(_) => {
+                update_health(runtime, call.observation.health);
+                runtime.lifecycle = ProviderLifecycleState::Stopped;
+                runtime.last_error = None;
+                runtime.stop_failure = None;
+                Ok(())
+            }
+            Err(error) => {
+                let provider_counted_failure =
+                    update_health(runtime, call.observation.health.clone());
+                record_failure_from_observation(runtime, error.clone(), provider_counted_failure);
+                runtime.stop_failure = runtime.last_error.clone();
+                runtime.lifecycle = ProviderLifecycleState::Failed;
+                Err(error)
+            }
+        },
         Err(error) => {
             record_failure(runtime, error.clone());
             runtime.stop_failure = runtime.last_error.clone();
@@ -1728,6 +2173,13 @@ fn error_summary(error: ProviderError) -> ProviderErrorSummary {
     ProviderErrorSummary {
         code: error.code,
         message: error.message,
+    }
+}
+
+fn provider_error(summary: ProviderErrorSummary) -> ProviderError {
+    ProviderError {
+        code: summary.code,
+        message: summary.message,
     }
 }
 
@@ -1982,6 +2434,11 @@ mod tests {
             self.released.store(true, Ordering::Release);
         }
 
+        fn reset(&self) {
+            self.entered.store(false, Ordering::Release);
+            self.released.store(false, Ordering::Release);
+        }
+
         fn entered(&self) -> bool {
             self.entered.load(Ordering::Acquire)
         }
@@ -1993,6 +2450,7 @@ mod tests {
         start_failures_remaining: Arc<Mutex<u32>>,
         reconfigure_failures_remaining: Arc<Mutex<u32>>,
         sample_failures_remaining: Arc<Mutex<u32>>,
+        sample_failure_reports_health: bool,
         sample_delay: Option<Duration>,
         start_delay: Option<Duration>,
         probe_delay: Option<Duration>,
@@ -2005,6 +2463,10 @@ mod tests {
         stop_delay: Option<Duration>,
         stop_gate: Option<Gate>,
         probe_results: Arc<Mutex<VecDeque<Vec<ProviderCapabilitySpec>>>>,
+        probe_metric_metadata: Arc<Mutex<VecDeque<Vec<ProviderMetricMetadata>>>>,
+        reconfigure_metric_metadata: Arc<Mutex<VecDeque<Vec<ProviderMetricMetadata>>>>,
+        sample_metric_metadata: Arc<Mutex<VecDeque<Vec<ProviderMetricMetadata>>>>,
+        metric_metadata: Vec<ProviderMetricMetadata>,
         health: ProviderHealthObservation,
     }
 
@@ -2027,6 +2489,7 @@ mod tests {
                     start_failures_remaining: Arc::new(Mutex::new(0)),
                     reconfigure_failures_remaining: Arc::new(Mutex::new(0)),
                     sample_failures_remaining: Arc::new(Mutex::new(0)),
+                    sample_failure_reports_health: false,
                     sample_delay: None,
                     start_delay: None,
                     probe_delay: None,
@@ -2039,6 +2502,10 @@ mod tests {
                     stop_delay: None,
                     stop_gate: None,
                     probe_results: Arc::new(Mutex::new(VecDeque::new())),
+                    probe_metric_metadata: Arc::new(Mutex::new(VecDeque::new())),
+                    reconfigure_metric_metadata: Arc::new(Mutex::new(VecDeque::new())),
+                    sample_metric_metadata: Arc::new(Mutex::new(VecDeque::new())),
+                    metric_metadata: Vec::new(),
                     health: ProviderHealthObservation::default(),
                 },
                 counters,
@@ -2061,6 +2528,11 @@ mod tests {
 
         fn sample_failures(self, count: u32) -> Self {
             *self.sample_failures_remaining.lock().unwrap() = count;
+            self
+        }
+
+        fn sample_failures_reported_in_health(mut self) -> Self {
+            self.sample_failure_reports_health = true;
             self
         }
 
@@ -2104,6 +2576,26 @@ mod tests {
             self
         }
 
+        fn probe_metric_metadata(self, metadata: Vec<Vec<ProviderMetricMetadata>>) -> Self {
+            *self.probe_metric_metadata.lock().unwrap() = metadata.into();
+            self
+        }
+
+        fn sample_metric_metadata(self, metadata: Vec<Vec<ProviderMetricMetadata>>) -> Self {
+            *self.sample_metric_metadata.lock().unwrap() = metadata.into();
+            self
+        }
+
+        fn reconfigure_metric_metadata(self, metadata: Vec<Vec<ProviderMetricMetadata>>) -> Self {
+            *self.reconfigure_metric_metadata.lock().unwrap() = metadata.into();
+            self
+        }
+
+        fn initial_metric_metadata(mut self, metadata: Vec<ProviderMetricMetadata>) -> Self {
+            self.metric_metadata = metadata;
+            self
+        }
+
         fn stop_failure(mut self, code: ProviderErrorCode) -> Self {
             self.stop_failure = Some(code);
             *self.stop_failures_remaining.lock().unwrap() = u32::MAX;
@@ -2143,6 +2635,9 @@ mod tests {
             }
             if let Some(delay) = self.probe_delay {
                 thread::sleep(delay);
+            }
+            if let Some(metadata) = self.probe_metric_metadata.lock().unwrap().pop_front() {
+                self.metric_metadata = metadata;
             }
             Ok(self
                 .probe_results
@@ -2190,6 +2685,9 @@ mod tests {
             if let Some(gate) = &self.reconfigure_gate {
                 gate.wait();
             }
+            if let Some(metadata) = self.reconfigure_metric_metadata.lock().unwrap().pop_front() {
+                self.metric_metadata = metadata;
+            }
             let should_fail = {
                 let mut remaining = self.reconfigure_failures_remaining.lock().unwrap();
                 let should_fail = *remaining > 0;
@@ -2234,10 +2732,20 @@ mod tests {
                 should_fail
             };
             if should_fail {
+                if self.sample_failure_reports_health {
+                    self.health.failure_count = self.health.failure_count.saturating_add(1);
+                    self.health.last_error = Some(ProviderErrorSummary {
+                        code: ProviderErrorCode::SampleFailed,
+                        message: Some("deterministic sample failure".to_string()),
+                    });
+                }
                 return Err(ProviderError::new(
                     ProviderErrorCode::SampleFailed,
                     "deterministic sample failure",
                 ));
+            }
+            if let Some(metadata) = self.sample_metric_metadata.lock().unwrap().pop_front() {
+                self.metric_metadata = metadata;
             }
             let snapshot = ResourceSnapshot {
                 system: SystemSample {
@@ -2293,6 +2801,10 @@ mod tests {
         fn health(&self) -> ProviderHealthObservation {
             self.health.clone()
         }
+
+        fn metric_metadata(&self) -> Vec<ProviderMetricMetadata> {
+            self.metric_metadata.clone()
+        }
     }
 
     fn settings_with(categories: Vec<MetricCategory>) -> CollectionSettings {
@@ -2339,7 +2851,9 @@ mod tests {
             .unwrap();
         assert_eq!(cpu.state, CapabilityState::SupportedEnabled);
         let samples = sample_at(&mut host, now, 100);
-        let ProviderSample::ResourceSnapshot(snapshot) = &samples[0];
+        let ProviderSample::ResourceSnapshot(snapshot) = &samples[0] else {
+            panic!("windows baseline provider returned a non-baseline sample")
+        };
         assert_eq!(snapshot.system.cpu_percent, Some(0.0));
         assert_eq!(snapshot.system.disk_read_bytes_per_sec, Some(0));
         assert_eq!(snapshot.system.disk_write_bytes_per_sec, Some(0));
@@ -3017,6 +3531,58 @@ mod tests {
     }
 
     #[test]
+    fn stale_probe_metadata_cannot_overwrite_new_disabled_intent() {
+        let gate = Gate::new();
+        gate.release();
+        let current_metadata = vec![ProviderMetricMetadata {
+            category: MetricCategory::Cpu,
+            metric_key: "cpu.current".to_string(),
+            device: None,
+            support_status: MetricRuntimeSupportStatus::Unsupported,
+        }];
+        let stale_metadata = vec![ProviderMetricMetadata {
+            category: MetricCategory::Cpu,
+            metric_key: "cpu.stale".to_string(),
+            device: None,
+            support_status: MetricRuntimeSupportStatus::Supported,
+        }];
+        let (provider, _) = FakeProvider::new(
+            "stale-probe-metadata",
+            vec![ProviderCapabilitySpec::supported(MetricCategory::Cpu)],
+            ProviderSchedule::Fixed(10),
+        );
+        let provider = provider
+            .probe_gate(gate.clone())
+            .probe_metric_metadata(vec![current_metadata.clone(), stale_metadata]);
+        let mut host = ProviderHost::new(vec![Box::new(provider)]);
+        let enabled = settings_with(vec![MetricCategory::Cpu]);
+        host.probe_all_for_settings(&enabled);
+        assert!(host
+            .collection_session_metric_metadata()
+            .iter()
+            .any(|metric| metric.metric_key == "cpu.current"));
+
+        gate.reset();
+        host.probe_all_for_settings(&enabled);
+        assert!(gate.entered());
+        let disabled = settings_with(Vec::new());
+        // This increments the probe generation while leaving the old probe pending; it does
+        // not start another probe until the pending reply is drained.
+        host.probe_all_for_settings(&disabled);
+        gate.release();
+        host.apply_desired_plan(desired_plan_for(&host, &disabled), Instant::now());
+
+        let metadata = host.collection_session_metric_metadata();
+        assert!(metadata.iter().any(|metric| {
+            metric.metric_key == "cpu.current"
+                && metric.support_status == MetricRuntimeSupportStatus::Unsupported
+        }));
+        assert!(!metadata
+            .iter()
+            .any(|metric| metric.metric_key == "cpu.stale"));
+    }
+
+    #[test]
     fn late_probe_success_restores_desired_plan_and_starts_provider() {
         let gate = Gate::new();
         let (provider, counters) = FakeProvider::new(
@@ -3134,6 +3700,130 @@ mod tests {
         }
         assert_eq!(current.len(), 1);
         assert_eq!(counters.lock().unwrap().sample_count, 2);
+    }
+
+    #[test]
+    fn stale_sample_metadata_cannot_overwrite_disabled_generation_truth() {
+        let gate = Gate::new();
+        let current_metadata = vec![ProviderMetricMetadata {
+            category: MetricCategory::Cpu,
+            metric_key: "cpu.current".to_string(),
+            device: None,
+            support_status: MetricRuntimeSupportStatus::Unsupported,
+        }];
+        let stale_metadata = vec![ProviderMetricMetadata {
+            category: MetricCategory::Cpu,
+            metric_key: "cpu.stale".to_string(),
+            device: None,
+            support_status: MetricRuntimeSupportStatus::Supported,
+        }];
+        let (provider, counters) = FakeProvider::new(
+            "stale-sample-metadata",
+            vec![ProviderCapabilitySpec::supported(MetricCategory::Cpu)],
+            ProviderSchedule::Fixed(10),
+        );
+        let provider = provider
+            .initial_metric_metadata(current_metadata.clone())
+            .sample_gate(gate.clone())
+            .sample_metric_metadata(vec![stale_metadata]);
+        let mut host = ProviderHost::new(vec![Box::new(provider)]);
+        let enabled = settings_with(vec![MetricCategory::Cpu]);
+        let now = Instant::now();
+        host.apply_plan(plan_for(&host, &enabled), now);
+        assert!(sample_at(&mut host, now, 1).is_empty());
+        assert!(gate.entered());
+
+        let disabled = settings_with(Vec::new());
+        host.apply_plan(plan_for(&host, &disabled), now + Duration::from_millis(1));
+        assert_eq!(
+            host.collection_session_metric_metadata(),
+            vec![CollectionSessionMetricMetadata {
+                provider_id: "stale-sample-metadata".to_string(),
+                category: MetricCategory::Cpu,
+                metric_key: "cpu.current".to_string(),
+                device: None,
+                enabled: false,
+                support_status: MetricRuntimeSupportStatus::Unsupported,
+                interval_ms: Some(10),
+            }]
+        );
+
+        gate.release();
+        for _ in 0..200 {
+            host.apply_plan(host.plan().clone(), Instant::now());
+            let counters_snapshot = *counters.lock().unwrap();
+            if counters_snapshot.sample_count == 1 && counters_snapshot.stop_count == 1 {
+                break;
+            }
+            thread::yield_now();
+        }
+        assert_eq!(counters.lock().unwrap().sample_count, 1);
+        assert_eq!(counters.lock().unwrap().stop_count, 1);
+        let metadata = host.collection_session_metric_metadata();
+        assert!(metadata.iter().any(|metric| {
+            metric.metric_key == "cpu.current"
+                && metric.support_status == MetricRuntimeSupportStatus::Unsupported
+        }));
+        assert!(!metadata
+            .iter()
+            .any(|metric| metric.metric_key == "cpu.stale"));
+    }
+
+    #[test]
+    fn stale_reconfigure_metadata_cannot_resurrect_old_generation_truth() {
+        let gate = Gate::new();
+        let current_metadata = vec![ProviderMetricMetadata {
+            category: MetricCategory::Cpu,
+            metric_key: "cpu.current".to_string(),
+            device: None,
+            support_status: MetricRuntimeSupportStatus::Unsupported,
+        }];
+        let stale_metadata = vec![ProviderMetricMetadata {
+            category: MetricCategory::Cpu,
+            metric_key: "cpu.stale".to_string(),
+            device: None,
+            support_status: MetricRuntimeSupportStatus::Supported,
+        }];
+        let (provider, counters) = FakeProvider::new(
+            "stale-reconfigure-metadata",
+            vec![ProviderCapabilitySpec::supported(MetricCategory::Cpu)],
+            ProviderSchedule::System,
+        );
+        let provider = provider
+            .initial_metric_metadata(current_metadata)
+            .reconfigure_gate(gate.clone())
+            .reconfigure_metric_metadata(vec![stale_metadata]);
+        let mut host = ProviderHost::new(vec![Box::new(provider)]);
+        let enabled = settings_with(vec![MetricCategory::Cpu]);
+        let now = Instant::now();
+        host.apply_plan(plan_for(&host, &enabled), now);
+
+        let changed = CollectionSettings {
+            system_sample_interval_ms: 10_000,
+            ..enabled.clone()
+        };
+        host.apply_plan(plan_for(&host, &changed), now + Duration::from_millis(1));
+        assert!(gate.entered());
+
+        let disabled = settings_with(Vec::new());
+        host.apply_plan(plan_for(&host, &disabled), now + Duration::from_millis(2));
+        gate.release();
+        for _ in 0..200 {
+            host.apply_plan(host.plan().clone(), Instant::now());
+            if counters.lock().unwrap().stop_count == 1 {
+                break;
+            }
+            thread::yield_now();
+        }
+
+        let metadata = host.collection_session_metric_metadata();
+        assert!(metadata.iter().any(|metric| {
+            metric.metric_key == "cpu.current"
+                && metric.support_status == MetricRuntimeSupportStatus::Unsupported
+        }));
+        assert!(!metadata
+            .iter()
+            .any(|metric| metric.metric_key == "cpu.stale"));
     }
 
     #[test]
@@ -3353,6 +4043,56 @@ mod tests {
     }
 
     #[test]
+    fn provider_reported_failure_is_counted_once() {
+        let (provider, _) = FakeProvider::new(
+            "provider-reported-failure",
+            vec![ProviderCapabilitySpec::supported(MetricCategory::Cpu)],
+            ProviderSchedule::Fixed(10),
+        );
+        let provider = provider
+            .sample_failures(1)
+            .sample_failures_reported_in_health();
+        let mut host = ProviderHost::new(vec![Box::new(provider)]);
+        let now = Instant::now();
+        let settings = settings_with(vec![MetricCategory::Cpu]);
+        host.apply_plan(plan_for(&host, &settings), now);
+
+        assert!(sample_at(&mut host, now, 1).is_empty());
+        let status = &host.statuses()[0];
+        assert_eq!(status.failure_count, 1);
+        assert_eq!(
+            status.last_error.as_ref().unwrap().code,
+            ProviderErrorCode::SampleFailed
+        );
+        let runtime = host.providers.get("provider-reported-failure").unwrap();
+        assert_eq!(runtime.consecutive_failures, 1);
+    }
+
+    #[test]
+    fn host_recorded_failure_without_provider_health_counts_once() {
+        let (provider, _) = FakeProvider::new(
+            "host-recorded-failure",
+            vec![ProviderCapabilitySpec::supported(MetricCategory::Cpu)],
+            ProviderSchedule::Fixed(10),
+        );
+        let provider = provider.sample_failures(1);
+        let mut host = ProviderHost::new(vec![Box::new(provider)]);
+        let now = Instant::now();
+        let settings = settings_with(vec![MetricCategory::Cpu]);
+        host.apply_plan(plan_for(&host, &settings), now);
+
+        assert!(sample_at(&mut host, now, 1).is_empty());
+        let status = &host.statuses()[0];
+        assert_eq!(status.failure_count, 1);
+        assert_eq!(
+            status.last_error.as_ref().unwrap().code,
+            ProviderErrorCode::SampleFailed
+        );
+        let runtime = host.providers.get("host-recorded-failure").unwrap();
+        assert_eq!(runtime.consecutive_failures, 1);
+    }
+
+    #[test]
     fn sample_timeout_isolated_from_healthy_provider() {
         let (slow, slow_counters) = FakeProvider::new(
             "a-slow",
@@ -3383,6 +4123,44 @@ mod tests {
             slow_status.last_error.unwrap().code,
             ProviderErrorCode::Timeout
         );
+    }
+
+    #[test]
+    fn host_timeout_is_counted_once_after_cancelled_completion() {
+        let (provider, _) = FakeProvider::new(
+            "timeout-accounting",
+            vec![ProviderCapabilitySpec::supported(MetricCategory::Cpu)],
+            ProviderSchedule::Fixed(10),
+        );
+        let provider = provider.sample_delay(Duration::from_secs(2));
+        let mut host = ProviderHost::new(vec![Box::new(provider)]);
+        let start = Instant::now();
+        let settings = settings_with(vec![MetricCategory::Cpu]);
+        host.apply_plan(plan_for(&host, &settings), start);
+
+        assert!(sample_at(&mut host, start, 1).is_empty());
+        let after_timeout = host.test_failure_state("timeout-accounting").unwrap();
+        assert_eq!(after_timeout.0, 1);
+        assert_eq!(after_timeout.1, 1);
+
+        let poll_at = start + Duration::from_millis(1);
+        for _ in 0..200 {
+            let _ = sample_at(&mut host, poll_at, 2);
+            if !host
+                .providers
+                .get("timeout-accounting")
+                .unwrap()
+                .executor
+                .pending()
+            {
+                break;
+            }
+            thread::sleep(Duration::from_millis(2));
+        }
+
+        let after_completion = host.test_failure_state("timeout-accounting").unwrap();
+        assert_eq!(after_completion.0, 1);
+        assert_eq!(after_completion.1, 1);
     }
 
     #[test]

@@ -9,7 +9,7 @@ Windows 原生 API 能稳定提供 CPU、内存、进程和磁盘基础指标，
 | 层级 | Provider | 典型能力 | 默认策略 |
 | --- | --- | --- | --- |
 | 基线 | Windows / PDH / sysinfo | CPU/内存/磁盘/进程 | 内置并默认启用 |
-| 厂商 | NVIDIA NVML | GPU 使用率、温度、功耗、频率、显存 | 检测到兼容 NVIDIA 驱动时启用 |
+| 厂商 | NVIDIA NVML | GPU 使用率、温度、功耗、频率、显存 | runtime capability detection；GPU category 继续由 settings 控制，默认关闭 |
 | 厂商 | AMD ADLX | AMD GPU 常用指标 | 检测到兼容设备/运行库时启用 |
 | 厂商 | Intel 官方接口 | Intel GPU 常用指标 | 能力探测通过时启用 |
 | 兼容 | LibreHardwareMonitor bridge | CPU/主板等传感器补充 | 可选组件，明确版本与许可 |
@@ -120,8 +120,8 @@ PR-04A 先建立通用 GPU storage contract，再进入正式硬件 Provider：
 - GPU board power 只允许 `power_scope = gpu_board`，不能冒充整机功耗。
 - GPU 原始 query 使用 500..10000 的 per-device `maxPoints` 上限，SQL 侧完成选择；`system_samples` 先限制 frame 集合再读取其 GPU rows。
 
-正式 NVIDIA NVML Provider 仍需对应 Spike-01B 补齐 administrator comparison、30-minute idle、30-minute representative-load、enable/disable/re-enable、shutdown/cleanup、DLL missing、partial unsupported/failure handling，以及可行时的 sleep/wake/low-power lifecycle evidence。
+Spike-01B 已在当前开发机以 PASS 完成 NVIDIA NVML 的 short-term implementation admission：administrator comparison、30-minute idle、30-minute representative-load、enable/disable/re-enable、shutdown/cleanup、DLL missing、partial unsupported/failure handling 和真实 sleep/wake evidence 均已完成。PR-04 可在现有 ProviderHost/FrameWriter/v8 contract 后接入 production NVIDIA Provider；这不是 default-enable 或跨设备支持声明。
 
 24-hour soak、数据库增长 soak、AMD/Intel validation、广泛 NVIDIA hardware matrix 和完整 release hardware matrix 属于后续 default-enable、support declaration 或 release/stability gate；它们不再被写成 PR-04A storage contract 的 entry blocker，但也不能被省略后宣布全系列 production support。
 
-本 PR 明确不新增 NVML production provider、`nvidia-smi` 调用、AMD ADLX、Intel Sysman、CPU sensor、UI redesign 或 PR-05 范围。
+本 PR 的 NVIDIA Provider 落地不新增 `nvidia-smi` 调用、AMD ADLX、Intel Sysman、CPU sensor、UI redesign 或 PR-05 范围；`tools/metric-probe` 保持独立。

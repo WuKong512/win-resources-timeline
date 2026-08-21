@@ -123,8 +123,10 @@ mod tests {
     use crate::{
         db::{query, writer},
         models::{
-            ActivityState, AppResourceSample, BootIdentity, CollectionSettings, ComputerState,
-            ForegroundApp, GpuSample, ResourceSnapshot, SystemSample, GPU_BOARD_POWER_SCOPE,
+            ActivityState, AppResourceSample, BootIdentity, CollectionSessionMetricMetadata,
+            CollectionSettings, ComputerState, ForegroundApp, GpuSample, MetricCategory,
+            MetricRuntimeSupportStatus, ResourceSnapshot, RuntimeDeviceMetadata, SystemSample,
+            GPU_BOARD_POWER_SCOPE,
         },
     };
     use rusqlite::params;
@@ -2576,6 +2578,207 @@ mod tests {
             assert_eq!(
                 metadata,
                 ("test-provider".into(), 2_000, "supported".into())
+            );
+            Ok(())
+        })
+        .unwrap();
+
+        drop(db);
+        cleanup_test_files(&path);
+    }
+
+    #[test]
+    fn nvidia_runtime_metadata_reuses_uuid_devices_and_preserves_gpu_history() {
+        const METRICS: [&str; 8] = [
+            "gpu.utilization_percent",
+            "gpu.memory_controller_utilization_percent",
+            "gpu.temperature_celsius",
+            "gpu.power_watts",
+            "gpu.graphics_clock_mhz",
+            "gpu.memory_clock_mhz",
+            "gpu.vram_used_bytes",
+            "gpu.vram_total_bytes",
+        ];
+
+        let path = test_path("nvidia-runtime-metadata");
+        cleanup_test_files(&path);
+        let db = Database::open(path.clone()).unwrap();
+        let gpu_a = RuntimeDeviceMetadata {
+            stable_key: "gpu:nvidia:uuid:gpu-a".into(),
+            category: MetricCategory::Gpu,
+            vendor: Some("NVIDIA".into()),
+            model: Some("GPU A".into()),
+            capacity_bytes: Some(16 * 1024 * 1024 * 1024),
+        };
+        let gpu_b = RuntimeDeviceMetadata {
+            stable_key: "gpu:nvidia:uuid:gpu-b".into(),
+            category: MetricCategory::Gpu,
+            vendor: Some("NVIDIA".into()),
+            model: Some("GPU B".into()),
+            capacity_bytes: Some(8 * 1024 * 1024 * 1024),
+        };
+        let mut metadata = Vec::new();
+        for device in [gpu_a.clone(), gpu_b.clone()] {
+            for metric_key in METRICS {
+                metadata.push(CollectionSessionMetricMetadata {
+                    provider_id: "nvidia-nvml".into(),
+                    category: MetricCategory::Gpu,
+                    metric_key: metric_key.into(),
+                    device: Some(device.clone()),
+                    enabled: true,
+                    support_status: if device.stable_key == gpu_b.stable_key
+                        && metric_key == "gpu.power_watts"
+                    {
+                        MetricRuntimeSupportStatus::Unsupported
+                    } else {
+                        MetricRuntimeSupportStatus::Supported
+                    },
+                    interval_ms: Some(2_000),
+                });
+            }
+        }
+        db.with_writer(|conn| writer::sync_collection_session_metrics(conn, &metadata, 1_000))
+            .unwrap();
+
+        let gpu = |device: &RuntimeDeviceMetadata, power_watts: Option<f64>| GpuSample {
+            device_key: device.stable_key.clone(),
+            vendor: device.vendor.clone(),
+            model: device.model.clone(),
+            capacity_bytes: device.capacity_bytes,
+            utilization_percent: Some(0.0),
+            memory_controller_utilization_percent: Some(0.0),
+            temperature_celsius: Some(44.0),
+            power_watts,
+            graphics_clock_mhz: Some(2_000.0),
+            memory_clock_mhz: Some(12_000.0),
+            vram_used_bytes: Some(0),
+            vram_total_bytes: device.capacity_bytes,
+            power_scope: power_watts.map(|_| GPU_BOARD_POWER_SCOPE.into()),
+            quality_mask: 0,
+        };
+        let snapshot = |timestamp_ms, gpus| ResourceSnapshot {
+            system: SystemSample {
+                timestamp_ms,
+                sample_duration_ms: 2_000,
+                cpu_percent: Some(12.0),
+                memory_percent: Some(34.0),
+                memory_used_bytes: Some(1_000),
+                memory_total_bytes: Some(2_000),
+                disk_read_bytes_per_sec: None,
+                disk_write_bytes_per_sec: None,
+                gpus,
+                has_app_snapshot: false,
+            },
+            apps: Vec::new(),
+        };
+
+        let mut frame_writer = writer::FrameWriter::new(8, 0);
+        frame_writer.enqueue(snapshot(
+            2_000,
+            vec![gpu(&gpu_a, Some(100.0)), gpu(&gpu_b, None)],
+        ));
+        db.with_writer(|conn| frame_writer.flush_all(conn)).unwrap();
+
+        let disabled_metadata: Vec<_> = metadata
+            .iter()
+            .cloned()
+            .map(|mut item| {
+                item.enabled = false;
+                item
+            })
+            .collect();
+        db.with_writer(|conn| {
+            writer::sync_collection_session_metrics(conn, &disabled_metadata, 3_000)
+        })
+        .unwrap();
+        // A disabled provider emits no GPU output. The ordinary baseline frame remains valid.
+        frame_writer.enqueue(snapshot(3_000, Vec::new()));
+        db.with_writer(|conn| frame_writer.flush_all(conn)).unwrap();
+        assert_eq!(
+            db.read(|conn| {
+                conn.query_row(
+                    "SELECT COUNT(*) FROM collection_session_metric WHERE enabled = 0",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+            })
+            .unwrap(),
+            16
+        );
+
+        db.with_writer(|conn| writer::sync_collection_session_metrics(conn, &metadata, 4_000))
+            .unwrap();
+        // Reordered enumeration still writes the same two UUID-keyed devices.
+        frame_writer.enqueue(snapshot(
+            4_000,
+            vec![gpu(&gpu_b, None), gpu(&gpu_a, Some(101.0))],
+        ));
+        db.with_writer(|conn| frame_writer.flush_all(conn)).unwrap();
+
+        db.read(|conn| {
+            assert_eq!(
+                conn.query_row(
+                    "SELECT COUNT(*) FROM hardware_device WHERE category = 'gpu'",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )?,
+                2
+            );
+            assert_eq!(
+                conn.query_row("SELECT COUNT(*) FROM gpu_sample", [], |row| row
+                    .get::<_, i64>(0))?,
+                4
+            );
+            assert_eq!(
+                conn.query_row(
+                    "SELECT COUNT(*)
+                     FROM gpu_sample sample
+                     JOIN sample_frame frame ON frame.id = sample.frame_id
+                     WHERE frame.ts = 2000",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )?,
+                2
+            );
+            assert_eq!(
+                conn.query_row(
+                    "SELECT COUNT(*)
+                     FROM collection_session_metric metric
+                     JOIN provider ON provider.id = metric.provider_id
+                     WHERE provider.kind = 'gpu' AND provider.name = 'nvidia-nvml'",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )?,
+                16
+            );
+            let power_metadata: (String, i64, String, String, i64) = conn.query_row(
+                "SELECT provider.name, metric.enabled, metric.support_status,
+                        device.stable_key, metric.interval_ms
+                 FROM collection_session_metric metric
+                 JOIN provider ON provider.id = metric.provider_id
+                 JOIN hardware_device device ON device.id = metric.device_id
+                 WHERE metric.metric_key = 'gpu.power_watts'
+                   AND device.stable_key = 'gpu:nvidia:uuid:gpu-b'",
+                [],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                    ))
+                },
+            )?;
+            assert_eq!(
+                power_metadata,
+                (
+                    "nvidia-nvml".into(),
+                    1,
+                    "unsupported".into(),
+                    "gpu:nvidia:uuid:gpu-b".into(),
+                    2_000,
+                )
             );
             Ok(())
         })
