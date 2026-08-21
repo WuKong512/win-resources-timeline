@@ -5,7 +5,7 @@ import type {
   GpuSample,
   MetricCategory,
   ProviderStatus,
-  TimelineSample,
+  TimelineGap,
   SystemSample
 } from "../types/resource";
 
@@ -38,23 +38,30 @@ export function gpuDevices(samples: SystemSample[]): GpuSample[] {
   return [...devices.values()];
 }
 
-export function timelineChartSamples(samples: TimelineSample[]): TimelineSample[] {
-  return samples.flatMap((sample) => {
-    if (sample.sourceGapBeforeMs <= 0) return [sample];
-    return [{
-      ...sample,
-      timestampMs: sample.timestampMs - sample.sourceGapBeforeMs,
-      sourceGapBeforeMs: 0,
-      cpuPercent: null,
-      memoryPercent: null,
-      memoryUsedBytes: null,
-      memoryTotalBytes: null,
-      diskReadBytesPerSec: null,
-      diskWriteBytesPerSec: null,
-      gpus: [],
-      hasAppSnapshot: false
-    }, sample];
-  });
+export function timelineChartSamples(samples: SystemSample[], gaps: TimelineGap[]): SystemSample[] {
+  if (!gaps.length) return samples;
+  const gapMarkers = gaps.map((gap) => ({
+    timestampMs: gap.startMs,
+    sampleDurationMs: 0,
+    cpuPercent: null,
+    memoryPercent: null,
+    memoryUsedBytes: null,
+    memoryTotalBytes: null,
+    diskReadBytesPerSec: null,
+    diskWriteBytesPerSec: null,
+    gpus: [],
+    hasAppSnapshot: false
+  } satisfies SystemSample));
+  return [...samples, ...gapMarkers].sort((left, right) => left.timestampMs - right.timestampMs);
+}
+
+export function timelineRefreshIntervalMs(preset: 1 | 7 | 30, isCurrentDate: boolean): number | undefined {
+  if (!isCurrentDate || preset === 30) return undefined;
+  return preset === 1 ? 5_000 : 60_000;
+}
+
+export function timelineCoverageState(coverage: number): "complete" | "incomplete" {
+  return coverage >= 0.999 ? "complete" : "incomplete";
 }
 
 export function aggregateCategoryCapability(

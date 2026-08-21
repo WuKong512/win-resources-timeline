@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Activity, AlertTriangle, CircleHelp, Cpu, Database, HardDrive, MemoryStick, MonitorCog } from "lucide-react";
 import {
   getAppResourceSamples,
@@ -16,7 +16,7 @@ import { useI18n } from "../i18n";
 import { useUiStore } from "../stores/uiStore";
 import type { AppResourceSample, CapabilityState, CollectionSettings, CollectorStatus, GpuSample, ProviderStatus, SystemSample, TimelineQueryResult } from "../types/resource";
 import { formatBytes, formatClock, localDateString, localDayRange, shiftLocalDate } from "../utils/time";
-import { aggregateCategoryCapability, gpuDevices, metricDataState } from "../utils/uiSemantics";
+import { aggregateCategoryCapability, gpuDevices, metricDataState, timelineCoverageState, timelineRefreshIntervalMs } from "../utils/uiSemantics";
 
 type WindowPreset = 1 | 7 | 30;
 
@@ -34,30 +34,49 @@ export function TimelinePage() {
   const [processEvidence, setProcessEvidence] = useState<AppResourceSample[]>([]);
   const [processLoading, setProcessLoading] = useState(false);
   const [loading, setLoading] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState("");
+  const [refreshError, setRefreshError] = useState("");
+  const timelineRef = useRef<TimelineQueryResult | null>(null);
+  const requestIdRef = useRef(0);
 
   const range = useMemo(() => windowRange(selectedDate, preset), [preset, selectedDate]);
-  const loadTimeline = useCallback(() => {
+  const loadTimeline = useCallback((background = false) => {
     let cancelled = false;
-    setLoading(true);
-    setError("");
+    const requestId = requestIdRef.current + 1;
+    requestIdRef.current = requestId;
+    if (background) {
+      setRefreshing(true);
+      setRefreshError("");
+    } else {
+      timelineRef.current = null;
+      setTimeline(null);
+      setLoading(true);
+      setError("");
+      setRefreshError("");
+    }
     Promise.all([
       getSystemTimeline(range.startMs, range.endMs, 2_500),
       getCollectorStatus(),
       getCollectionSettings()
     ])
       .then(([nextTimeline, nextStatus, nextSettings]) => {
-        if (cancelled) return;
+        if (cancelled || requestId !== requestIdRef.current) return;
+        timelineRef.current = nextTimeline;
         setTimeline(nextTimeline);
         setStatus(nextStatus);
         setSettings(nextSettings);
         setSelected((current) => current && nextTimeline.samples.some((sample) => sample.timestampMs === current.timestampMs) ? current : null);
       })
       .catch(() => {
-        if (!cancelled) setError(t("timelineErrorMessage"));
+        if (cancelled || requestId !== requestIdRef.current) return;
+        if (background && timelineRef.current) setRefreshError(t("timelineRefreshFailed"));
+        else setError(t("timelineErrorMessage"));
       })
       .finally(() => {
-        if (!cancelled) setLoading(false);
+        if (cancelled || requestId !== requestIdRef.current) return;
+        if (background) setRefreshing(false);
+        else setLoading(false);
       });
     return () => { cancelled = true; };
   }, [range.endMs, range.startMs, t]);
@@ -83,9 +102,12 @@ export function TimelinePage() {
   useEffect(() => loadTimeline(), [loadTimeline]);
 
   useEffect(() => {
-    const timer = selectedDate === localDateString() ? window.setInterval(() => loadTimeline(), 5_000) : undefined;
+    const refreshIntervalMs = timelineRefreshIntervalMs(preset, selectedDate === localDateString());
+    const timer = refreshIntervalMs != null
+      ? window.setInterval(() => loadTimeline(true), refreshIntervalMs)
+      : undefined;
     return () => { if (timer != null) window.clearInterval(timer); };
-  }, [loadTimeline, selectedDate]);
+  }, [loadTimeline, preset, selectedDate]);
 
   useEffect(() => {
     if (!selected?.hasAppSnapshot) {
@@ -123,12 +145,13 @@ export function TimelinePage() {
       </div>
     </header>
 
-    {error ? <InlineError message={error} onRetry={loadTimeline} title={t("timelineErrorTitle")} /> : loading ? <TimelineLoading /> : <>
+    {error && !timeline ? <InlineError message={error} onRetry={loadTimeline} title={t("timelineErrorTitle")} /> : loading ? <TimelineLoading /> : <>
+      {(refreshing || refreshError) && <div role={refreshError ? "alert" : "status"} className={`${refreshError ? "error-surface" : "border-border bg-muted/40 text-muted-foreground"} flex flex-wrap items-center justify-between gap-3 rounded-lg border px-4 py-2.5 text-xs`}><span>{refreshError || t("timelineRefreshing")}</span>{refreshError && <Button variant="outline" className="h-8 px-2.5 text-xs" onClick={() => loadTimeline(true)}>{t("retry")}</Button>}</div>}
       <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
         <SignalCard icon={<Cpu size={16} />} label={t("metricCpu")} value={latest?.cpuPercent} capability={aggregateCategoryCapability(status?.providerStatus ?? [], settings, "cpu")} unit="percent" />
         <SignalCard icon={<MemoryStick size={16} />} label={t("metricMemory")} value={latest?.memoryPercent} capability={aggregateCategoryCapability(status?.providerStatus ?? [], settings, "memory")} unit="percent" />
         <SignalCard icon={<HardDrive size={16} />} label={t("metricDiskRead")} value={latest?.diskReadBytesPerSec} capability={aggregateCategoryCapability(status?.providerStatus ?? [], settings, "disk")} unit="rate" />
-        <SignalCard icon={<Database size={16} />} label={t("timelineCoverage")} value={coverage} capability={coverage < 0.999 ? "incomplete" : "supportedEnabled"} unit="coverage" />
+        <SignalCard icon={<Database size={16} />} label={t("timelineCoverage")} value={coverage} capability={timelineCoverageState(coverage) === "incomplete" ? "incomplete" : "supportedEnabled"} unit="coverage" />
       </div>
 
       <Card className="overflow-hidden">
@@ -142,7 +165,7 @@ export function TimelinePage() {
           </div>
         </CardHeader>
         <CardContent className="pt-4">
-          {samples.length ? <ResourceTimelineChart samples={samples} selectedTimestampMs={selected?.timestampMs ?? null} onSampleSelect={setSelected} ariaLabel={t("timelinePageTitle")} /> : <EmptyState title={t("timelineEmpty")} hint={t("timelineEmptyHint")} />}
+          {samples.length ? <ResourceTimelineChart samples={samples} gaps={timeline?.gaps ?? []} startMs={range.startMs} endMs={range.endMs} selectedTimestampMs={selected?.timestampMs ?? null} onSampleSelect={setSelected} ariaLabel={t("timelinePageTitle")} /> : <EmptyState title={t("timelineEmpty")} hint={t("timelineEmptyHint")} />}
           <div className="mt-2 flex flex-wrap items-center gap-x-5 gap-y-2 border-t border-border/70 pt-3 text-[11px] text-muted-foreground">
             <span className="font-medium text-foreground">{t("timelineLegend")}</span><span>— {t("legendZero")}</span><span>╱ {t("legendMissing")}</span><span>□ {t("legendDisabled")}</span><span>! {t("legendFailed")}</span>
           </div>

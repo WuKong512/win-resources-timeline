@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { mainNavigation } from "../navigation";
-import type { CapabilityState, CollectionSettings, ComputerStateInterval, MetricCategory, ProviderStatus, SystemSample, TimelineSample } from "../types/resource";
-import { aggregateCategoryCapability, evidenceStatusTone, gpuDevices, metricDataState, stateDurations, timelineChartSamples, toggleCategory } from "./uiSemantics";
+import type { CapabilityState, CollectionSettings, ComputerStateInterval, MetricCategory, ProviderStatus, SystemSample, TimelineGap } from "../types/resource";
+import { aggregateCategoryCapability, evidenceStatusTone, gpuDevices, metricDataState, stateDurations, timelineChartSamples, timelineCoverageState, timelineRefreshIntervalMs, toggleCategory } from "./uiSemantics";
 
 function sample(timestampMs: number, gpus: SystemSample["gpus"] = []): SystemSample {
   return {
@@ -16,10 +16,6 @@ function sample(timestampMs: number, gpus: SystemSample["gpus"] = []): SystemSam
     gpus,
     hasAppSnapshot: false
   };
-}
-
-function timelineSample(timestampMs: number, sourceGapBeforeMs = 0): TimelineSample {
-  return { ...sample(timestampMs), sourceGapBeforeMs };
 }
 
 function provider(providerId: string, state: CapabilityState, category: MetricCategory = "gpu"): ProviderStatus {
@@ -64,13 +60,40 @@ describe("PR-06 information architecture semantics", () => {
   });
 
   it("uses backend gap markers without inferring gaps from bounded point spacing", () => {
-    const continuous = timelineChartSamples([timelineSample(1_000), timelineSample(6_000)]);
+    const continuous = timelineChartSamples([sample(1_000), sample(6_000)], []);
     expect(continuous).toHaveLength(2);
 
-    const withRealGap = timelineChartSamples([timelineSample(1_000), timelineSample(56_000, 50_000)]);
-    expect(withRealGap).toHaveLength(3);
-    expect(withRealGap[1].timestampMs).toBe(6_000);
-    expect(withRealGap[1].cpuPercent).toBeNull();
+    const withRealGap: TimelineGap = { startMs: 6_000, endMs: 56_000, durationMs: 50_000 };
+    const withRealGapSamples = timelineChartSamples([sample(1_000), sample(56_000)], [withRealGap]);
+    expect(withRealGapSamples).toHaveLength(3);
+    expect(withRealGapSamples[1].timestampMs).toBe(6_000);
+    expect(withRealGapSamples[1].cpuPercent).toBeNull();
+
+    const widelySpacedWithoutBackendGap = timelineChartSamples([sample(1_000), sample(56_000)], []);
+    expect(widelySpacedWithoutBackendGap).toHaveLength(2);
+
+    const jittered = [sample(1_000), sample(6_007), sample(11_003), sample(16_011), sample(21_002)];
+    expect(timelineChartSamples(jittered, [])).toEqual(jittered);
+
+    const clippedGap: TimelineGap = { startMs: 10_000, endMs: 20_000, durationMs: 10_000 };
+    const requestedStart = 10_000;
+    const requestedEnd = 30_000;
+    expect(clippedGap.startMs).toBeGreaterThanOrEqual(requestedStart);
+    expect(clippedGap.endMs).toBeLessThanOrEqual(requestedEnd);
+    expect(timelineChartSamples([sample(10_000), sample(25_000)], [clippedGap])[1].timestampMs).toBe(10_000);
+  });
+
+  it("limits current-window refresh to the smallest useful range", () => {
+    expect(timelineRefreshIntervalMs(1, true)).toBe(5_000);
+    expect(timelineRefreshIntervalMs(7, true)).toBe(60_000);
+    expect(timelineRefreshIntervalMs(30, true)).toBeUndefined();
+    expect(timelineRefreshIntervalMs(1, false)).toBeUndefined();
+  });
+
+  it("keeps incomplete timeline coverage separate from a provider failure", () => {
+    expect(timelineCoverageState(1)).toBe("complete");
+    expect(timelineCoverageState(0.5)).toBe("incomplete");
+    expect(timelineCoverageState(0)).not.toBe("failed");
   });
 
   it("keeps an enabled provider visible when another provider is unsupported or failed", () => {

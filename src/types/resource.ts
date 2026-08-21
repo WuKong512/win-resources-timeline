@@ -96,8 +96,10 @@ export interface SystemSample {
   hasAppSnapshot: boolean;
 }
 
-export interface TimelineSample extends SystemSample {
-  sourceGapBeforeMs: number;
+export interface TimelineGap {
+  startMs: number;
+  endMs: number;
+  durationMs: number;
 }
 
 export interface TimelineQueryResult {
@@ -105,7 +107,8 @@ export interface TimelineQueryResult {
   endMs: number;
   observedMs: number;
   coverage: number;
-  samples: TimelineSample[];
+  samples: SystemSample[];
+  gaps: TimelineGap[];
 }
 
 export interface AppResourceSample {

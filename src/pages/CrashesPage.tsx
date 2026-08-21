@@ -6,7 +6,7 @@ import { Badge } from "../components/ui/Badge";
 import { Button } from "../components/ui/Button";
 import { Card, CardContent, CardHeader, CardTitle } from "../components/ui/Card";
 import { useI18n } from "../i18n";
-import type { CrashCaseSummary, CrashDetectorStatus, CrashEvidenceDetail, CrashEvidenceMetric, CrashEvidenceProcessEntry, CrashEvidenceWindow, CrashSystemEvent, SystemSample, TimelineSample } from "../types/resource";
+import type { CrashCaseSummary, CrashDetectorStatus, CrashEvidenceDetail, CrashEvidenceMetric, CrashEvidenceProcessEntry, CrashEvidenceWindow, CrashSystemEvent, SystemSample, TimelineQueryResult } from "../types/resource";
 import { formatBytes, formatClock } from "../utils/time";
 import { evidenceStatusTone } from "../utils/uiSemantics";
 
@@ -18,7 +18,7 @@ export function CrashesPage() {
   const [detector, setDetector] = useState<CrashDetectorStatus | null>(null);
   const [selectedId, setSelectedId] = useState<number | null>(null);
   const [detail, setDetail] = useState<CrashEvidenceDetail | null>(null);
-  const [curveSamples, setCurveSamples] = useState<TimelineSample[]>([]);
+  const [curveTimeline, setCurveTimeline] = useState<TimelineQueryResult | null>(null);
   const [selectedWindow, setSelectedWindow] = useState<CrashEvidenceWindow>("pre_30m");
   const [loading, setLoading] = useState(true);
   const [detailLoading, setDetailLoading] = useState(false);
@@ -48,13 +48,13 @@ export function CrashesPage() {
   useEffect(() => {
     if (selectedId == null) {
       setDetail(null);
-      setCurveSamples([]);
+      setCurveTimeline(null);
       return;
     }
     let cancelled = false;
     const selectedCase = cases.find((item) => item.id === selectedId);
     setDetail(null);
-    setCurveSamples([]);
+    setCurveTimeline(null);
     setDetailLoading(true);
     setCurveLoading(true);
     setDetailError("");
@@ -65,7 +65,7 @@ export function CrashesPage() {
       .then(([nextDetail, nextCurves]) => {
         if (cancelled) return;
         setDetail(nextDetail);
-        setCurveSamples(nextCurves?.samples ?? []);
+        setCurveTimeline(nextCurves);
       })
       .catch(() => {
         if (!cancelled) setDetailError(t("crashDetailErrorMessage"));
@@ -87,7 +87,7 @@ export function CrashesPage() {
     {error ? <InlineError title={t("crashCasesError")} message={error} onRetry={loadCases} /> : loading ? <CrashLoading /> : <>
       <div className="grid gap-3 xl:grid-cols-[310px_minmax(0,1fr)]">
         <Card className="overflow-hidden"><CardHeader className="border-b border-border/70"><div className="flex items-center justify-between gap-3"><CardTitle>{t("crashCaseList")}</CardTitle><Badge className="border-border bg-muted text-muted-foreground">{cases.length}</Badge></div></CardHeader><CardContent className="px-2 pb-2 pt-2">{cases.length ? <div className="space-y-1">{cases.map((item) => <CaseListItem key={item.id} item={item} selected={item.id === selectedId} onClick={() => { setSelectedId(item.id); setSelectedWindow("pre_30m"); }} />)}</div> : <div className="px-3 py-10 text-center"><CircleHelp size={22} className="mx-auto text-muted-foreground" /><div className="mt-3 text-sm font-semibold">{t("noCrashCases")}</div><p className="mt-1 text-xs leading-5 text-muted-foreground">{t("noCrashCasesHint")}</p></div>}</CardContent></Card>
-        <CrashDetail detail={detail} selectedCase={selectedCase} detailLoading={detailLoading} detailError={detailError} onRetry={() => setDetailReload((value) => value + 1)} selectedWindow={selectedWindow} setSelectedWindow={setSelectedWindow} curveSamples={curveSamples} curveLoading={curveLoading} onCurveSelect={onCurveSelect} visibleMetrics={visibleMetrics} language={language} />
+        <CrashDetail detail={detail} selectedCase={selectedCase} detailLoading={detailLoading} detailError={detailError} onRetry={() => setDetailReload((value) => value + 1)} selectedWindow={selectedWindow} setSelectedWindow={setSelectedWindow} curveTimeline={curveTimeline} curveLoading={curveLoading} onCurveSelect={onCurveSelect} visibleMetrics={visibleMetrics} language={language} />
       </div>
     </>}
   </div>;
@@ -98,12 +98,12 @@ function CaseListItem({ item, selected, onClick }: { item: CrashCaseSummary; sel
   return <button type="button" onClick={onClick} className={`w-full rounded-lg border px-3 py-3 text-left transition-[background-color,border-color,transform] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/35 ${selected ? "border-primary/45 bg-accent" : "border-transparent hover:border-border hover:bg-muted/55"}`} aria-pressed={selected}><div className="flex items-start justify-between gap-3"><div className="min-w-0"><div className="truncate text-sm font-semibold">{classificationLabel(item.classification, t)}</div><div className="mt-1 font-mono text-[11px] text-muted-foreground">{new Date(item.anchorTimeMs).toLocaleString(language)}</div></div><EvidenceBadge status={item.evidenceStatus} /></div><div className="mt-2 flex items-center gap-2 text-[10px] text-muted-foreground">{item.hasActiveHold && <><ShieldCheck size={12} />{t("activeHold")}</>}<span className="ml-auto">{t("sampleCount")}: {item.summaryCount}</span></div></button>;
 }
 
-function CrashDetail({ detail, selectedCase, detailLoading, detailError, onRetry, selectedWindow, setSelectedWindow, curveSamples, curveLoading, onCurveSelect, visibleMetrics, language }: { detail: CrashEvidenceDetail | null; selectedCase: CrashCaseSummary | null; detailLoading: boolean; detailError: string; onRetry: () => void; selectedWindow: CrashEvidenceWindow; setSelectedWindow: (window: CrashEvidenceWindow) => void; curveSamples: TimelineSample[]; curveLoading: boolean; onCurveSelect: (sample: SystemSample) => void; visibleMetrics: CrashEvidenceMetric[]; language: "en" | "zh-CN" }) {
+function CrashDetail({ detail, selectedCase, detailLoading, detailError, onRetry, selectedWindow, setSelectedWindow, curveTimeline, curveLoading, onCurveSelect, visibleMetrics, language }: { detail: CrashEvidenceDetail | null; selectedCase: CrashCaseSummary | null; detailLoading: boolean; detailError: string; onRetry: () => void; selectedWindow: CrashEvidenceWindow; setSelectedWindow: (window: CrashEvidenceWindow) => void; curveTimeline: TimelineQueryResult | null; curveLoading: boolean; onCurveSelect: (sample: SystemSample) => void; visibleMetrics: CrashEvidenceMetric[]; language: "en" | "zh-CN" }) {
   const { t } = useI18n();
   if (!selectedCase) return <Card className="empty-state min-h-[360px]"><FileSearch size={24} className="text-muted-foreground" /><div className="font-semibold text-foreground">{t("selectCrashCase")}</div></Card>;
   return <div className="space-y-3">{detailError && <InlineError title={t("crashDetailError")} message={detailError} onRetry={onRetry} />}{detailLoading || !detail ? <Card className="min-h-[360px]"><div className="flex h-full min-h-[360px] items-center justify-center text-sm text-muted-foreground">{t("crashDetailLoading")}</div></Card> : <>
     <Card className="overflow-hidden"><CardHeader className="border-b border-border/70"><div className="flex flex-wrap items-start justify-between gap-3"><div><div className="eyebrow">{t("incidentTime")}</div><CardTitle className="mt-1 text-lg">{new Date(detail.case.anchorTimeMs).toLocaleString(language)}</CardTitle><p className="mt-1 text-xs text-muted-foreground">{classificationLabel(detail.case.classification, t)}</p></div><div className="flex flex-wrap items-center justify-end gap-2"><EvidenceBadge status={detail.case.evidenceStatus} /><Badge className={detail.case.hasActiveHold ? "border-[hsl(var(--success)/0.3)] bg-[hsl(var(--success-surface))] text-[hsl(var(--success))]" : "border-border bg-muted text-muted-foreground"}>{detail.case.hasActiveHold ? t("activeHold") : t("noActiveHold")}</Badge></div></div></CardHeader><CardContent className="pt-4"><div className="grid gap-3 text-sm sm:grid-cols-3"><Fact label={t("classification")} value={classificationLabel(detail.case.classification, t)} /><Fact label={t("evidenceStatus")} value={evidenceStatusLabel(detail.case.evidenceStatus, t)} /><Fact label={t("processingVersion")} value={detail.case.processingVersion} mono /></div>{detail.case.hasActiveHold && <div className="success-surface mt-4 flex items-start gap-2 rounded-lg border px-3 py-2.5 text-xs"><ShieldCheck size={14} className="mt-0.5 shrink-0" />{t("holdProtected")}</div>}<p className="mt-4 border-t border-border/70 pt-3 text-xs leading-5 text-muted-foreground">{t("evidenceNotice")}</p></CardContent></Card>
-    <Card className="overflow-hidden"><CardHeader className="border-b border-border/70"><div className="flex flex-wrap items-center justify-between gap-3"><CardTitle>{t("resourceCurves")}</CardTitle><span className="text-xs text-muted-foreground">{t("crashCurveHint")}</span></div></CardHeader><CardContent className="pt-4">{curveLoading ? <div className="skeleton-line h-[390px] rounded-lg" aria-busy="true" /> : curveSamples.length ? <ResourceTimelineChart samples={curveSamples} selectedTimestampMs={null} onSampleSelect={onCurveSelect} ariaLabel={t("resourceCurves")} /> : <div className="empty-state min-h-[220px]">{detail.case.evidenceStatus === "pending" || detail.case.evidenceStatus === "post_pending" ? <><Clock3 size={22} className="text-muted-foreground" /><div className="font-semibold text-foreground">{t("evidenceUnavailable")}</div></> : <><CircleHelp size={22} className="text-muted-foreground" /><div className="font-semibold text-foreground">{t("noResourceCurves")}</div></>}</div>}</CardContent></Card>
+    <Card className="overflow-hidden"><CardHeader className="border-b border-border/70"><div className="flex flex-wrap items-center justify-between gap-3"><CardTitle>{t("resourceCurves")}</CardTitle><span className="text-xs text-muted-foreground">{t("crashCurveHint")}</span></div></CardHeader><CardContent className="pt-4">{curveLoading ? <div className="skeleton-line h-[390px] rounded-lg" aria-busy="true" /> : curveTimeline?.samples.length ? <ResourceTimelineChart samples={curveTimeline.samples} gaps={curveTimeline.gaps} startMs={curveTimeline.startMs} endMs={curveTimeline.endMs} selectedTimestampMs={null} onSampleSelect={onCurveSelect} ariaLabel={t("resourceCurves")} /> : <div className="empty-state min-h-[220px]">{detail.case.evidenceStatus === "pending" || detail.case.evidenceStatus === "post_pending" ? <><Clock3 size={22} className="text-muted-foreground" /><div className="font-semibold text-foreground">{t("evidenceUnavailable")}</div></> : <><CircleHelp size={22} className="text-muted-foreground" /><div className="font-semibold text-foreground">{t("noResourceCurves")}</div></>}</div>}</CardContent></Card>
     <Card className="overflow-hidden"><CardHeader className="border-b border-border/70"><CardTitle>{t("evidenceWindows")}</CardTitle></CardHeader><CardContent className="pt-4"><div className="segmented-control w-full overflow-x-auto">{windows.map((window) => <button key={window} type="button" className={`segmented-control-item min-w-max ${selectedWindow === window ? "segmented-control-active" : ""}`} onClick={() => setSelectedWindow(window)}>{windowLabel(window, t)}</button>)}</div><div className="mt-4">{visibleMetrics.length ? <EvidenceMetricTable metrics={visibleMetrics} language={language} /> : <div className="rounded-lg border border-dashed border-border px-4 py-8 text-center text-sm text-muted-foreground">{detail.case.evidenceStatus === "pending" || detail.case.evidenceStatus === "post_pending" ? t("evidenceUnavailable") : t("noDataForWindow")}</div>}</div></CardContent></Card>
     <div className="grid gap-3 xl:grid-cols-2"><EventTable events={detail.events} language={language} /><ProcessTable processes={detail.processes.filter((item) => item.window === selectedWindow)} language={language} /></div>
   </>}</div>;

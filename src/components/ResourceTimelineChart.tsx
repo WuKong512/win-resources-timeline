@@ -1,13 +1,16 @@
 import { useEffect, useRef } from "react";
 import * as echarts from "echarts";
 import { useI18n } from "../i18n";
-import type { GpuSample, SystemSample, TimelineSample } from "../types/resource";
+import type { GpuSample, SystemSample, TimelineGap } from "../types/resource";
 import { formatBytes, formatClock } from "../utils/time";
 import { timelineChartSamples } from "../utils/uiSemantics";
 import { useUiStore } from "../stores/uiStore";
 
 type ResourceTimelineChartProps = {
-  samples: TimelineSample[];
+  samples: SystemSample[];
+  gaps: TimelineGap[];
+  startMs: number;
+  endMs: number;
   selectedTimestampMs: number | null;
   onSampleSelect: (sample: SystemSample) => void;
   ariaLabel: string;
@@ -23,6 +26,9 @@ function gpuLabel(gpu: GpuSample) {
 
 export function ResourceTimelineChart({
   samples,
+  gaps,
+  startMs,
+  endMs,
   selectedTimestampMs,
   onSampleSelect,
   ariaLabel
@@ -42,7 +48,7 @@ export function ResourceTimelineChart({
     const muted = cssColor("--muted");
     const card = cssColor("--card");
     const colors = ["--signal-cyan", "--signal-blue", "--signal-violet", "--signal-amber", "--signal-coral"].map(cssColor);
-    const chartSamples = timelineChartSamples(samples);
+    const chartSamples = timelineChartSamples(samples, gaps);
     const devices = [...new Map(samples.flatMap((sample) => sample.gpus).map((gpu) => [gpu.deviceKey, gpu])).values()];
     const gpuSeries = devices.map((gpu, index) => ({
       name: `${t("metricGpuUsage")} · ${gpuLabel(gpu)}`,
@@ -92,7 +98,7 @@ export function ResourceTimelineChart({
         { type: "inside" },
         { type: "slider", height: 18, borderColor: "transparent", backgroundColor: muted, fillerColor: colors[1], opacity: 0.28, handleStyle: { color: colors[1], borderColor: colors[1] }, dataBackground: { lineStyle: { color: mutedForeground }, areaStyle: { color: border } } }
       ],
-      xAxis: { type: "time", axisLine: { lineStyle: { color: border } }, axisTick: { show: false }, axisLabel: { color: mutedForeground, fontSize: 11 }, splitLine: { show: false } },
+      xAxis: { type: "time", min: startMs, max: endMs, axisLine: { lineStyle: { color: border } }, axisTick: { show: false }, axisLabel: { color: mutedForeground, fontSize: 11 }, splitLine: { show: false } },
       yAxis: [
         { type: "value", name: "%", min: 0, max: 100, nameTextStyle: { color: mutedForeground }, axisLine: { show: false }, axisTick: { show: false }, axisLabel: { color: mutedForeground, fontSize: 11 }, splitLine: { lineStyle: { color: border, type: "dashed" } } },
         { type: "value", name: "B/s", nameTextStyle: { color: mutedForeground }, axisLine: { show: false }, axisTick: { show: false }, axisLabel: { color: mutedForeground, fontSize: 11, formatter: (value: number) => formatBytes(value, language) }, splitLine: { show: false } }
@@ -131,7 +137,7 @@ export function ResourceTimelineChart({
       chart.dispose();
       chartRef.current = null;
     };
-  }, [language, onSampleSelect, resolvedTheme, samples, t]);
+  }, [endMs, gaps, language, onSampleSelect, resolvedTheme, samples, startMs, t]);
 
   useEffect(() => {
     chartRef.current?.setOption({

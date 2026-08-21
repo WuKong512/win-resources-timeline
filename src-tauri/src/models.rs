@@ -354,14 +354,12 @@ pub struct SystemSample {
     pub has_app_snapshot: bool,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
-pub struct TimelineSample {
-    #[serde(flatten)]
-    pub sample: SystemSample,
-    /// Gap between the previous source frame and this frame. This is computed before
-    /// bounded selection, so downsampling alone never creates a gap marker.
-    pub source_gap_before_ms: i64,
+pub struct TimelineGap {
+    pub start_ms: i64,
+    pub end_ms: i64,
+    pub duration_ms: i64,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -371,7 +369,8 @@ pub struct SystemTimeline {
     pub end_ms: i64,
     pub observed_ms: i64,
     pub coverage: f64,
-    pub samples: Vec<TimelineSample>,
+    pub samples: Vec<SystemSample>,
+    pub gaps: Vec<TimelineGap>,
 }
 
 #[derive(Debug, Clone, Serialize)]
