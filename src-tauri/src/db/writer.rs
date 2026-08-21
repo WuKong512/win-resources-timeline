@@ -1939,6 +1939,18 @@ pub fn select_prunable_frame_ids(
 }
 
 pub fn clear_collected_data(conn: &Connection) -> rusqlite::Result<()> {
+    let active_holds: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM retention_hold WHERE released_at_ms IS NULL",
+        [],
+        |row| row.get(0),
+    )?;
+    if active_holds > 0 {
+        return Err(rusqlite::Error::ToSqlConversionFailure(Box::new(
+            io::Error::other(
+                "clear collected data refused: active crash retention holds protect evidence; release holds first",
+            ),
+        )));
+    }
     let tx = conn.unchecked_transaction()?;
     tx.execute("DELETE FROM foreground_interval", [])?;
     tx.execute("DELETE FROM sample_frame", [])?;

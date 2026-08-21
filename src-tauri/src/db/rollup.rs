@@ -332,8 +332,11 @@ pub fn rebuild_process_rollup_1h_bucket(
     tx.commit()
 }
 
-/// Rebuilds one local calendar day from the minute layer. Crash/hang counters are copied from
-/// any existing verified row and are never inferred from resource evidence.
+/// Rebuilds one local calendar day from selected-observation minute rows. These are totals and
+/// statistics for process instances that entered the configured Top-N/foreground selection, not
+/// a full all-process account; `coverage < 1` is therefore an incomplete day and missing values
+/// remain NULL. Crash/hang counters are copied from any existing verified row and are never
+/// inferred from resource evidence.
 pub fn rebuild_app_resource_daily(conn: &Connection, local_date: &str) -> rusqlite::Result<()> {
     if local_date.trim().is_empty() {
         return Ok(());

@@ -106,10 +106,10 @@ v7 已有的 `gpu_sample` 表能够承载部分 GPU 指标，但不能无损表�
 - `process_rollup_1m`：按 minute/app 保存加权 avg、max、CPU time、I/O totals、GPU active time、coverage 和命中原因。
 - `process_rollup_1h`：按 hour/app 保存由分钟数据生成的长期趋势。
 - `app_usage_daily`：按 local_date/app 保存 foreground_total_ms、active_usage_ms、idle_foreground_ms、launch_count。
-- `app_resource_daily`：按 local_date/app 保存 CPU 计算量/贡献、内存峰值、GPU 活跃时长、I/O totals、crash/hang count 和 coverage。
+- `app_resource_daily`：按 local_date/app 保存来自已选观测（Top-N/前台）分钟行的 CPU 计算量/贡献、内存峰值、GPU 活跃时长、I/O totals、crash/hang count 和 coverage；它不是全天所有进程的完整账户，`coverage < 1` 表示观测不完整。
 - `energy_rollup_daily`：按 local_date/device/power_scope 保存 energy_wh、covered/expected duration、Provider 和构成。
 
-详细进程样本只写 Top-N/前台/关注/异常集合；采集器可在内存中为所有可访问进程维护轻量累计值，并定期刷新应用日报，避免长期统计只覆盖曾进入 Top-N 的应用。GPU/网络归属若成本过高允许只覆盖选择集，但必须保存 coverage。
+详细进程样本只写 Top-N/前台/关注/异常集合；PR-05 的日报只从这些已选观测生成，不把未观测进程或缺失时间段补成零。GPU/网络归属若成本过高允许只覆盖选择集，但必须保存 coverage。
 
 聚合表必须保存 processing_version、源时间范围、sample_count 和 coverage。avg 使用覆盖时间加权；max 可从下层 max 继续聚合；CPU time 与字节数直接相加。日界线以采集时区规则计算；跨午夜区间在聚合时切分，原始区间不拆碎。
 

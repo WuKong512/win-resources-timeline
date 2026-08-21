@@ -79,9 +79,9 @@ Spike-01B 已在当前 RTX 5070 Ti 开发机完成 short-term implementation adm
 PR-05 已在 schema v8 上实现进程与崩溃证据后端边界：
 
 - `ProcessSelector` 在 raw process instance 层按 CPU、working-set memory、I/O 各取固定 Top-N=5，加入可解析的 foreground process，并以稳定 PID+creation-time+executable identity 去重和合并 selection-reason bitmask；watched/anomaly 位保留但本 PR 不引入对应设置或检测器。
-- FrameWriter 保存可空的 process metrics、PID/创建时间、quality/selection facts；1 分钟 rollup 聚合到 logical app，1 小时由分钟层生成，日报由分钟层生成。加权 avg、实际 frame duration 的 additive totals、max、OR reason 和 coverage 均落在已有 v8 表中，处理版本为 `process-rollup-v1`。
-- Windows crash detector 在启动后异步读取 native Windows Event Log API，使用 channel + record id/time cursor；归一化事件、稳定 crash case、atomic retention hold 和 `crash-evidence-v1` objective summaries 已实现。四个 summary window 使用 `window:<window>:metric:<metric>` 命名空间以复用 v8 的 summary uniqueness。
-- 已覆盖 selector、rollup、事件分类/游标、hold 保护/释放、证据统计、分设备 GPU、幂等 rebuild、隐私摘要和 schema v8 回归测试。schema version 未变更，也未新增 migration。
+- FrameWriter 保存可空的 process metrics、PID/创建时间、quality/selection facts；1 分钟 rollup 聚合到 logical app，1 小时由分钟层生成，日报由已选观测分钟层生成。加权 avg、实际 frame duration 的 additive totals、max、OR reason 和 coverage 均落在已有 v8 表中；日报不是全进程全天账户，coverage 小于 1 必须保留为不完整，处理版本为 `process-rollup-v1`。
+- Windows crash detector 在启动后异步读取 native Windows Event Log API，使用 channel + record id/time cursor 持续排空 256 条分页；Event 41/6008/1001 分开保留 log time 与物理 anchor，跨批次按稳定 incident identity 合并并按证据强度 refinement。`crash-evidence-v1` objective summaries 具备 `pending`/`post_pending`/`partial`/`complete`/`failed` 生命周期，atomic retention hold 在 active 时阻止 clear。四个 summary window 使用 `window:<window>:metric:<metric>` 命名空间以复用 v8 的 summary uniqueness。
+- 已覆盖 selector、rollup、事件分类/游标、native 语义和 EvtNext 错误映射、跨批次 correlation、>256 backlog、hold 保护/释放、证据统计、延迟 post retry、分设备 GPU、幂等 rebuild、隐私摘要和 schema v8 回归测试。schema version 未变更，也未新增 migration。
 - PR-06 UI、用户-facing retention settings、release soak、跨硬件真实崩溃矩阵、dump 解析、root-cause/diagnostic reasoning 均为 deferred/non-goal。
 
 ## 架构基线完成定义
