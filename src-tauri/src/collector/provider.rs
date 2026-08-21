@@ -323,22 +323,31 @@ enum ProviderCommand {
     },
 }
 
+#[derive(Debug, Clone, Default)]
+struct ProviderObservation {
+    health: ProviderHealthObservation,
+    metric_metadata: Vec<ProviderMetricMetadata>,
+    capabilities: Vec<ProviderCapabilitySpec>,
+}
+
 enum ProviderReply {
     Probe {
         result: Result<Vec<ProviderCapabilitySpec>, ProviderError>,
-        health: ProviderHealthObservation,
-        metric_metadata: Vec<ProviderMetricMetadata>,
+        observation: ProviderObservation,
     },
     Lifecycle {
         result: Result<ProviderLifecycleOutcome, ProviderError>,
-        health: ProviderHealthObservation,
-        metric_metadata: Vec<ProviderMetricMetadata>,
+        observation: ProviderObservation,
     },
     Sample {
         result: Result<Option<ProviderSample>, ProviderError>,
-        health: ProviderHealthObservation,
-        metric_metadata: Vec<ProviderMetricMetadata>,
+        observation: ProviderObservation,
     },
+}
+
+struct ProviderCallResult<T> {
+    result: Result<T, ProviderError>,
+    observation: ProviderObservation,
 }
 
 struct PendingProviderCall {
@@ -357,7 +366,6 @@ struct ProviderCompletion {
 struct ProviderExecutor {
     command_tx: Sender<ProviderCommand>,
     pending: Option<PendingProviderCall>,
-    metric_metadata: Vec<ProviderMetricMetadata>,
 }
 
 impl ProviderExecutor {
@@ -370,26 +378,7 @@ impl ProviderExecutor {
         Self {
             command_tx,
             pending: None,
-            metric_metadata: Vec::new(),
         }
-    }
-
-    fn metric_metadata(&self) -> &[ProviderMetricMetadata] {
-        &self.metric_metadata
-    }
-
-    fn capture_metric_metadata(&mut self, reply: &ProviderReply) {
-        self.metric_metadata = match reply {
-            ProviderReply::Probe {
-                metric_metadata, ..
-            }
-            | ProviderReply::Lifecycle {
-                metric_metadata, ..
-            }
-            | ProviderReply::Sample {
-                metric_metadata, ..
-            } => metric_metadata.clone(),
-        };
     }
 
     fn probe(
@@ -397,7 +386,7 @@ impl ProviderExecutor {
         generation: u64,
         deadline: Instant,
         requested_categories: Arc<BTreeSet<MetricCategory>>,
-    ) -> Result<(Vec<ProviderCapabilitySpec>, ProviderHealthObservation), ProviderError> {
+    ) -> Result<ProviderCallResult<Vec<ProviderCapabilitySpec>>, ProviderError> {
         let reply = self.execute(
             ProviderOperation::Probe,
             generation,
@@ -408,11 +397,14 @@ impl ProviderExecutor {
                 reply,
             },
         )?;
-        self.capture_metric_metadata(&reply);
         match reply {
-            ProviderReply::Probe { result, health, .. } => {
-                result.map(|capabilities| (capabilities, health))
-            }
+            ProviderReply::Probe {
+                result,
+                observation,
+            } => Ok(ProviderCallResult {
+                result,
+                observation,
+            }),
             ProviderReply::Lifecycle { .. } | ProviderReply::Sample { .. } => {
                 Err(ProviderError::new(
                     ProviderErrorCode::ProviderMissing,
@@ -427,7 +419,7 @@ impl ProviderExecutor {
         generation: u64,
         plan: &ProviderPlan,
         deadline: Instant,
-    ) -> Result<(ProviderLifecycleOutcome, ProviderHealthObservation), ProviderError> {
+    ) -> Result<ProviderCallResult<ProviderLifecycleOutcome>, ProviderError> {
         let reply = self.execute(
             ProviderOperation::Start,
             generation,
@@ -438,7 +430,6 @@ impl ProviderExecutor {
                 reply,
             },
         )?;
-        self.capture_metric_metadata(&reply);
         lifecycle_reply(reply)
     }
 
@@ -447,7 +438,7 @@ impl ProviderExecutor {
         generation: u64,
         plan: &ProviderPlan,
         deadline: Instant,
-    ) -> Result<(ProviderLifecycleOutcome, ProviderHealthObservation), ProviderError> {
+    ) -> Result<ProviderCallResult<ProviderLifecycleOutcome>, ProviderError> {
         let reply = self.execute(
             ProviderOperation::Reconfigure,
             generation,
@@ -458,7 +449,6 @@ impl ProviderExecutor {
                 reply,
             },
         )?;
-        self.capture_metric_metadata(&reply);
         lifecycle_reply(reply)
     }
 
@@ -468,7 +458,7 @@ impl ProviderExecutor {
         timestamp_ms: i64,
         tracked_app_keys: Arc<HashSet<String>>,
         deadline: Instant,
-    ) -> Result<(Option<ProviderSample>, ProviderHealthObservation), ProviderError> {
+    ) -> Result<ProviderCallResult<Option<ProviderSample>>, ProviderError> {
         let reply = self.execute(
             ProviderOperation::Sample,
             generation,
@@ -480,9 +470,14 @@ impl ProviderExecutor {
                 reply,
             },
         )?;
-        self.capture_metric_metadata(&reply);
         match reply {
-            ProviderReply::Sample { result, health, .. } => result.map(|sample| (sample, health)),
+            ProviderReply::Sample {
+                result,
+                observation,
+            } => Ok(ProviderCallResult {
+                result,
+                observation,
+            }),
             ProviderReply::Probe { .. } | ProviderReply::Lifecycle { .. } => {
                 Err(ProviderError::new(
                     ProviderErrorCode::ProviderMissing,
@@ -496,15 +491,14 @@ impl ProviderExecutor {
         &mut self,
         generation: u64,
         deadline: Instant,
-    ) -> Result<ProviderHealthObservation, ProviderError> {
+    ) -> Result<ProviderCallResult<ProviderLifecycleOutcome>, ProviderError> {
         let reply = self.execute(
             ProviderOperation::Stop,
             generation,
             deadline,
             |context, reply| ProviderCommand::Stop { context, reply },
         )?;
-        self.capture_metric_metadata(&reply);
-        lifecycle_reply(reply).map(|(_, health)| health)
+        lifecycle_reply(reply)
     }
 
     fn cancel_pending(&self) {
@@ -582,14 +576,11 @@ impl ProviderExecutor {
             .reply
             .recv_timeout(deadline.saturating_duration_since(Instant::now()))
         {
-            Ok(reply) => {
-                self.capture_metric_metadata(&reply);
-                Ok(Some(ProviderCompletion {
-                    operation: pending.operation,
-                    generation: pending.generation,
-                    reply,
-                }))
-            }
+            Ok(reply) => Ok(Some(ProviderCompletion {
+                operation: pending.operation,
+                generation: pending.generation,
+                reply,
+            })),
             Err(crossbeam_channel::RecvTimeoutError::Disconnected) => Err(
                 ProviderError::without_message(ProviderErrorCode::ProviderMissing),
             ),
@@ -603,9 +594,15 @@ impl ProviderExecutor {
 
 fn lifecycle_reply(
     reply: ProviderReply,
-) -> Result<(ProviderLifecycleOutcome, ProviderHealthObservation), ProviderError> {
+) -> Result<ProviderCallResult<ProviderLifecycleOutcome>, ProviderError> {
     match reply {
-        ProviderReply::Lifecycle { result, health, .. } => result.map(|outcome| (outcome, health)),
+        ProviderReply::Lifecycle {
+            result,
+            observation,
+        } => Ok(ProviderCallResult {
+            result,
+            observation,
+        }),
         ProviderReply::Probe { .. } | ProviderReply::Sample { .. } => Err(ProviderError::new(
             ProviderErrorCode::ProviderMissing,
             "invalid provider lifecycle reply",
@@ -627,8 +624,7 @@ fn provider_worker(provider: &mut Box<dyn MetricProvider>, command_rx: Receiver<
                 (
                     ProviderReply::Probe {
                         result,
-                        health: provider.health(),
-                        metric_metadata: provider.metric_metadata(),
+                        observation: provider_observation(provider.as_ref()),
                     },
                     reply,
                 )
@@ -642,8 +638,7 @@ fn provider_worker(provider: &mut Box<dyn MetricProvider>, command_rx: Receiver<
                 (
                     ProviderReply::Lifecycle {
                         result,
-                        health: provider.health(),
-                        metric_metadata: provider.metric_metadata(),
+                        observation: provider_observation(provider.as_ref()),
                     },
                     reply,
                 )
@@ -657,8 +652,7 @@ fn provider_worker(provider: &mut Box<dyn MetricProvider>, command_rx: Receiver<
                 (
                     ProviderReply::Lifecycle {
                         result,
-                        health: provider.health(),
-                        metric_metadata: provider.metric_metadata(),
+                        observation: provider_observation(provider.as_ref()),
                     },
                     reply,
                 )
@@ -675,8 +669,7 @@ fn provider_worker(provider: &mut Box<dyn MetricProvider>, command_rx: Receiver<
                 (
                     ProviderReply::Sample {
                         result,
-                        health: provider.health(),
-                        metric_metadata: provider.metric_metadata(),
+                        observation: provider_observation(provider.as_ref()),
                     },
                     reply,
                 )
@@ -690,14 +683,21 @@ fn provider_worker(provider: &mut Box<dyn MetricProvider>, command_rx: Receiver<
                 (
                     ProviderReply::Lifecycle {
                         result,
-                        health: provider.health(),
-                        metric_metadata: provider.metric_metadata(),
+                        observation: provider_observation(provider.as_ref()),
                     },
                     reply,
                 )
             }
         };
         let _ = reply_tx.try_send(reply);
+    }
+}
+
+fn provider_observation(provider: &dyn MetricProvider) -> ProviderObservation {
+    ProviderObservation {
+        health: provider.health(),
+        metric_metadata: provider.metric_metadata(),
+        capabilities: provider.descriptor().capabilities.clone(),
     }
 }
 
@@ -712,6 +712,7 @@ fn call_with_context<T>(
 struct ProviderRuntime {
     descriptor: ProviderDescriptor,
     executor: ProviderExecutor,
+    metric_metadata: Vec<ProviderMetricMetadata>,
     plan: Option<ProviderPlan>,
     started: bool,
     lifecycle: ProviderLifecycleState,
@@ -756,6 +757,7 @@ impl ProviderHost {
                         ProviderRuntime {
                             descriptor,
                             executor: ProviderExecutor::new(provider),
+                            metric_metadata: Vec::new(),
                             plan: None,
                             started: false,
                             lifecycle: ProviderLifecycleState::Stopped,
@@ -836,15 +838,29 @@ impl ProviderHost {
                     .executor
                     .probe(generation, control_deadline, requested_categories)
                 {
-                    Ok((capabilities, health)) => {
-                        let capability_changed = runtime.descriptor.capabilities != capabilities;
-                        runtime.descriptor.capabilities = capabilities;
-                        runtime.provider_health = health;
-                        runtime.probe_failed = false;
-                        runtime.consecutive_failures = 0;
-                        runtime.last_error = None;
-                        if !runtime.started {
-                            runtime.lifecycle = ProviderLifecycleState::Stopped;
+                    Ok(call) => {
+                        let ProviderCallResult {
+                            result,
+                            observation,
+                        } = call;
+                        let mut capability_changed = install_observation(runtime, &observation);
+                        match result {
+                            Ok(capabilities) => {
+                                capability_changed |=
+                                    runtime.descriptor.capabilities != capabilities;
+                                runtime.descriptor.capabilities = capabilities;
+                                runtime.provider_health = observation.health;
+                                runtime.probe_failed = false;
+                                runtime.consecutive_failures = 0;
+                                runtime.last_error = None;
+                                if !runtime.started {
+                                    runtime.lifecycle = ProviderLifecycleState::Stopped;
+                                }
+                            }
+                            Err(error) => {
+                                record_probe_failure(runtime, error);
+                                capability_changed = true;
+                            }
                         }
                         capability_changed
                     }
@@ -928,25 +944,30 @@ impl ProviderHost {
                         return;
                     }
                     match completion.reply {
-                        ProviderReply::Probe { result, health, .. } => match result {
-                            Ok(capabilities) => {
-                                capability_changed =
-                                    runtime.descriptor.capabilities != capabilities;
-                                runtime.descriptor.capabilities = capabilities;
-                                runtime.provider_health = health;
-                                runtime.probe_failed = false;
-                                runtime.consecutive_failures = 0;
-                                runtime.last_error = None;
-                                if !runtime.started {
-                                    runtime.lifecycle = ProviderLifecycleState::Stopped;
+                        ProviderReply::Probe {
+                            result,
+                            observation,
+                        } => {
+                            capability_changed |= install_observation(runtime, &observation);
+                            match result {
+                                Ok(capabilities) => {
+                                    capability_changed |=
+                                        runtime.descriptor.capabilities != capabilities;
+                                    runtime.descriptor.capabilities = capabilities;
+                                    runtime.provider_health = observation.health;
+                                    runtime.probe_failed = false;
+                                    runtime.consecutive_failures = 0;
+                                    runtime.last_error = None;
+                                    if !runtime.started {
+                                        runtime.lifecycle = ProviderLifecycleState::Stopped;
+                                    }
+                                }
+                                Err(error) => {
+                                    record_probe_failure(runtime, error);
+                                    capability_changed = true;
                                 }
                             }
-                            Err(error) => {
-                                let previous = runtime.descriptor.capabilities.clone();
-                                record_probe_failure(runtime, error);
-                                capability_changed = previous != runtime.descriptor.capabilities;
-                            }
-                        },
+                        }
                         _ => {
                             let previous = runtime.descriptor.capabilities.clone();
                             record_probe_failure(
@@ -962,8 +983,87 @@ impl ProviderHost {
                 }
                 ProviderOperation::Sample => {
                     // A timed-out sample is deliberately never replayed into the current frame.
-                    // If user intent changed while it was pending, release the provider now.
-                    cleanup = !desired_active && runtime.started;
+                    // Its observations are accepted only when it still belongs to the current
+                    // lifecycle generation and active intent.
+                    if completion.generation != runtime.generation {
+                        cleanup = !desired_active && runtime.started;
+                    } else {
+                        match completion.reply {
+                            ProviderReply::Sample {
+                                result,
+                                observation,
+                            } if desired_active => {
+                                capability_changed |= install_observation(runtime, &observation);
+                                let runtime_failure = observation
+                                    .health
+                                    .last_error
+                                    .as_ref()
+                                    .filter(|error| error.code == ProviderErrorCode::RuntimeFailed)
+                                    .cloned();
+                                match result {
+                                    Ok(_sample) => {
+                                        update_health(runtime, observation.health);
+                                        if let Some(summary) = runtime_failure {
+                                            record_failure(runtime, provider_error(summary));
+                                            let interval_ms = runtime
+                                                .plan
+                                                .as_ref()
+                                                .map(|plan| plan.interval_ms)
+                                                .unwrap_or(1);
+                                            let backoff = failure_backoff(
+                                                interval_ms,
+                                                runtime.consecutive_failures,
+                                            );
+                                            runtime.started = false;
+                                            runtime.lifecycle = ProviderLifecycleState::Failed;
+                                            runtime.retry_action =
+                                                Some(ProviderRetryAction::Reconfigure);
+                                            runtime.retry_at = Some(now + backoff);
+                                            runtime.next_sample_at = Some(now + backoff);
+                                        } else {
+                                            runtime.lifecycle = ProviderLifecycleState::Running;
+                                            runtime.last_error =
+                                                runtime.provider_health.last_error.clone();
+                                            runtime.consecutive_failures = 0;
+                                        }
+                                    }
+                                    Err(error) => {
+                                        let runtime_failure =
+                                            error.code == ProviderErrorCode::RuntimeFailed;
+                                        record_failure(runtime, error);
+                                        let interval_ms = runtime
+                                            .plan
+                                            .as_ref()
+                                            .map(|plan| plan.interval_ms)
+                                            .unwrap_or(1);
+                                        let backoff = failure_backoff(
+                                            interval_ms,
+                                            runtime.consecutive_failures,
+                                        );
+                                        runtime.next_sample_at = Some(now + backoff);
+                                        if runtime_failure {
+                                            runtime.started = false;
+                                            runtime.retry_action =
+                                                Some(ProviderRetryAction::Reconfigure);
+                                            runtime.retry_at = Some(now + backoff);
+                                        }
+                                    }
+                                }
+                            }
+                            ProviderReply::Sample { .. } => {
+                                cleanup = runtime.started;
+                            }
+                            _ => {
+                                record_failure(
+                                    runtime,
+                                    ProviderError::new(
+                                        ProviderErrorCode::ProviderMissing,
+                                        "invalid provider sample reply",
+                                    ),
+                                );
+                            }
+                        }
+                    }
                 }
                 ProviderOperation::Start | ProviderOperation::Reconfigure => {
                     let action = match completion.operation {
@@ -972,25 +1072,39 @@ impl ProviderHost {
                         _ => unreachable!(),
                     };
                     let current = completion.generation == runtime.generation;
-                    let (result, health) = match completion.reply {
-                        ProviderReply::Lifecycle { result, health, .. } => (result, health),
-                        _ => (
-                            Err(ProviderError::new(
+                    let call = match completion.reply {
+                        ProviderReply::Lifecycle {
+                            result,
+                            observation,
+                        } => ProviderCallResult {
+                            result,
+                            observation,
+                        },
+                        _ => ProviderCallResult {
+                            result: Err(ProviderError::new(
                                 ProviderErrorCode::ProviderMissing,
                                 "invalid provider lifecycle reply",
                             )),
-                            ProviderHealthObservation::default(),
-                        ),
+                            observation: ProviderObservation::default(),
+                        },
                     };
+                    let ProviderCallResult {
+                        result,
+                        observation,
+                    } = call;
+                    if current {
+                        capability_changed |= install_observation(runtime, &observation);
+                    }
                     match result {
                         Ok(outcome) => {
-                            if let Some(capabilities) = outcome.capabilities {
-                                runtime.descriptor.capabilities = capabilities;
-                                capability_changed = true;
-                            }
                             runtime.started = true;
                             if current && desired_active {
-                                update_health(runtime, health);
+                                if let Some(capabilities) = outcome.capabilities {
+                                    capability_changed |=
+                                        runtime.descriptor.capabilities != capabilities;
+                                    runtime.descriptor.capabilities = capabilities;
+                                }
+                                update_health(runtime, observation.health);
                                 runtime.lifecycle = ProviderLifecycleState::Running;
                                 runtime.last_error = runtime.provider_health.last_error.clone();
                                 runtime.stop_failure = None;
@@ -1049,9 +1163,10 @@ impl ProviderHost {
                 ProviderOperation::Stop => {
                     let current = completion.generation == runtime.generation;
                     let (result, health) = match completion.reply {
-                        ProviderReply::Lifecycle { result, health, .. } => {
-                            (result.map(|_| ()), health)
-                        }
+                        ProviderReply::Lifecycle {
+                            result,
+                            observation,
+                        } => (result.map(|_| ()), observation.health),
                         _ => (
                             Err(ProviderError::new(
                                 ProviderErrorCode::ProviderMissing,
@@ -1062,7 +1177,9 @@ impl ProviderHost {
                     };
                     match result {
                         Ok(()) => {
-                            update_health(runtime, health);
+                            if current {
+                                update_health(runtime, health);
+                            }
                             runtime.started = false;
                             runtime.stop_failure = None;
                             runtime.last_error = None;
@@ -1079,7 +1196,6 @@ impl ProviderHost {
                                     ProviderLifecycleState::Stopped
                                 };
                             }
-                            let _ = current;
                         }
                         Err(error) => {
                             record_failure(runtime, error.clone());
@@ -1395,22 +1511,63 @@ impl ProviderHost {
                 continue;
             }
             runtime.next_sample_at = Some(now + Duration::from_millis(plan.interval_ms.max(1)));
+            let mut capability_changed = false;
             match runtime.executor.sample(
                 runtime.generation,
                 timestamp_ms,
                 tracked_app_keys.clone(),
                 Instant::now() + PROVIDER_SAMPLE_TIMEOUT,
             ) {
-                Ok((sample, health)) => {
-                    update_health(runtime, health);
-                    runtime.lifecycle = ProviderLifecycleState::Running;
-                    runtime.consecutive_failures = 0;
-                    runtime.last_error = runtime.provider_health.last_error.clone();
-                    if sample.is_some() {
-                        runtime.last_success_at_ms = Some(timestamp_ms);
-                    }
-                    if let Some(sample) = sample {
-                        samples.push(sample);
+                Ok(call) => {
+                    let ProviderCallResult {
+                        result,
+                        observation,
+                    } = call;
+                    capability_changed |= install_observation(runtime, &observation);
+                    let runtime_failure = observation
+                        .health
+                        .last_error
+                        .as_ref()
+                        .filter(|error| error.code == ProviderErrorCode::RuntimeFailed)
+                        .cloned();
+                    match result {
+                        Ok(sample) => {
+                            update_health(runtime, observation.health);
+                            if sample.is_some() {
+                                runtime.last_success_at_ms = Some(timestamp_ms);
+                            }
+                            if let Some(summary) = runtime_failure {
+                                record_failure(runtime, provider_error(summary));
+                                let backoff =
+                                    failure_backoff(plan.interval_ms, runtime.consecutive_failures);
+                                runtime.started = false;
+                                runtime.retry_action = Some(ProviderRetryAction::Reconfigure);
+                                runtime.retry_at = Some(now + backoff);
+                                runtime.next_sample_at = Some(now + backoff);
+                            } else {
+                                runtime.lifecycle = ProviderLifecycleState::Running;
+                                runtime.consecutive_failures = 0;
+                                runtime.last_error = runtime.provider_health.last_error.clone();
+                            }
+                            if let Some(sample) = sample {
+                                samples.push(sample);
+                            }
+                        }
+                        Err(error) => {
+                            let runtime_failure = error.code == ProviderErrorCode::RuntimeFailed;
+                            record_failure(runtime, error);
+                            let backoff =
+                                failure_backoff(plan.interval_ms, runtime.consecutive_failures);
+                            runtime.next_sample_at = Some(now + backoff);
+                            if runtime_failure {
+                                // A provider that explicitly lost its native runtime must re-enter
+                                // via the existing lifecycle reconciliation path instead of
+                                // attempting to revive its session from inside `sample`.
+                                runtime.started = false;
+                                runtime.retry_action = Some(ProviderRetryAction::Reconfigure);
+                                runtime.retry_at = Some(now + backoff);
+                            }
+                        }
                     }
                 }
                 Err(error) => {
@@ -1427,6 +1584,9 @@ impl ProviderHost {
                         runtime.retry_at = Some(now + backoff);
                     }
                 }
+            }
+            if capability_changed {
+                self.sync_plan_with_capabilities(&provider_id, now);
             }
         }
         samples
@@ -1606,7 +1766,7 @@ impl ProviderHost {
         let mut metadata = Vec::new();
         for (provider_id, runtime) in &self.providers {
             let desired_plan = self.desired_plan.provider(provider_id);
-            for metric in runtime.executor.metric_metadata() {
+            for metric in &runtime.metric_metadata {
                 let enabled = desired_plan.is_some_and(|plan| {
                     plan.enabled && plan.enabled_categories.contains(&metric.category)
                 });
@@ -1668,6 +1828,13 @@ fn update_health(runtime: &mut ProviderRuntime, health: ProviderHealthObservatio
     runtime.last_success_at_ms = health.last_success_at_ms.or(runtime.last_success_at_ms);
     runtime.failure_count = runtime.failure_count.max(health.failure_count);
     runtime.provider_health = health;
+}
+
+fn install_observation(runtime: &mut ProviderRuntime, observation: &ProviderObservation) -> bool {
+    let capability_changed = runtime.descriptor.capabilities != observation.capabilities;
+    runtime.descriptor.capabilities = observation.capabilities.clone();
+    runtime.metric_metadata = observation.metric_metadata.clone();
+    capability_changed
 }
 
 fn clear_retry(runtime: &mut ProviderRuntime) {
@@ -1747,21 +1914,34 @@ fn attempt_start(
         }
     };
     match result {
-        Ok((outcome, health)) => {
-            let capability_changed = outcome.capabilities.is_some();
-            if let Some(capabilities) = outcome.capabilities {
-                runtime.descriptor.capabilities = capabilities;
+        Ok(call) => match call.result {
+            Ok(outcome) => {
+                let mut capability_changed = install_observation(runtime, &call.observation);
+                if let Some(capabilities) = outcome.capabilities {
+                    capability_changed |= runtime.descriptor.capabilities != capabilities;
+                    runtime.descriptor.capabilities = capabilities;
+                }
+                update_health(runtime, call.observation.health);
+                runtime.started = true;
+                runtime.lifecycle = ProviderLifecycleState::Running;
+                runtime.last_error = runtime.provider_health.last_error.clone();
+                runtime.stop_failure = None;
+                runtime.consecutive_failures = 0;
+                runtime.next_sample_at = Some(now);
+                clear_retry(runtime);
+                capability_changed
             }
-            update_health(runtime, health);
-            runtime.started = true;
-            runtime.lifecycle = ProviderLifecycleState::Running;
-            runtime.last_error = runtime.provider_health.last_error.clone();
-            runtime.stop_failure = None;
-            runtime.consecutive_failures = 0;
-            runtime.next_sample_at = Some(now);
-            clear_retry(runtime);
-            capability_changed
-        }
+            Err(error) => {
+                install_observation(runtime, &call.observation);
+                runtime.started = false;
+                record_failure(runtime, error);
+                runtime.retry_action = Some(action);
+                runtime.retry_at =
+                    Some(now + failure_backoff(plan.interval_ms, runtime.consecutive_failures));
+                runtime.next_sample_at = None;
+                false
+            }
+        },
         Err(error) => {
             runtime.started = false;
             record_failure(runtime, error);
@@ -1814,13 +1994,21 @@ fn stop_runtime(
     runtime.next_sample_at = None;
     clear_retry(runtime);
     match result {
-        Ok(health) => {
-            update_health(runtime, health);
-            runtime.lifecycle = ProviderLifecycleState::Stopped;
-            runtime.last_error = None;
-            runtime.stop_failure = None;
-            Ok(())
-        }
+        Ok(call) => match call.result {
+            Ok(_) => {
+                update_health(runtime, call.observation.health);
+                runtime.lifecycle = ProviderLifecycleState::Stopped;
+                runtime.last_error = None;
+                runtime.stop_failure = None;
+                Ok(())
+            }
+            Err(error) => {
+                record_failure(runtime, error.clone());
+                runtime.stop_failure = runtime.last_error.clone();
+                runtime.lifecycle = ProviderLifecycleState::Failed;
+                Err(error)
+            }
+        },
         Err(error) => {
             record_failure(runtime, error.clone());
             runtime.stop_failure = runtime.last_error.clone();
@@ -1840,6 +2028,13 @@ fn error_summary(error: ProviderError) -> ProviderErrorSummary {
     ProviderErrorSummary {
         code: error.code,
         message: error.message,
+    }
+}
+
+fn provider_error(summary: ProviderErrorSummary) -> ProviderError {
+    ProviderError {
+        code: summary.code,
+        message: summary.message,
     }
 }
 
@@ -2094,6 +2289,11 @@ mod tests {
             self.released.store(true, Ordering::Release);
         }
 
+        fn reset(&self) {
+            self.entered.store(false, Ordering::Release);
+            self.released.store(false, Ordering::Release);
+        }
+
         fn entered(&self) -> bool {
             self.entered.load(Ordering::Acquire)
         }
@@ -2117,6 +2317,10 @@ mod tests {
         stop_delay: Option<Duration>,
         stop_gate: Option<Gate>,
         probe_results: Arc<Mutex<VecDeque<Vec<ProviderCapabilitySpec>>>>,
+        probe_metric_metadata: Arc<Mutex<VecDeque<Vec<ProviderMetricMetadata>>>>,
+        reconfigure_metric_metadata: Arc<Mutex<VecDeque<Vec<ProviderMetricMetadata>>>>,
+        sample_metric_metadata: Arc<Mutex<VecDeque<Vec<ProviderMetricMetadata>>>>,
+        metric_metadata: Vec<ProviderMetricMetadata>,
         health: ProviderHealthObservation,
     }
 
@@ -2151,6 +2355,10 @@ mod tests {
                     stop_delay: None,
                     stop_gate: None,
                     probe_results: Arc::new(Mutex::new(VecDeque::new())),
+                    probe_metric_metadata: Arc::new(Mutex::new(VecDeque::new())),
+                    reconfigure_metric_metadata: Arc::new(Mutex::new(VecDeque::new())),
+                    sample_metric_metadata: Arc::new(Mutex::new(VecDeque::new())),
+                    metric_metadata: Vec::new(),
                     health: ProviderHealthObservation::default(),
                 },
                 counters,
@@ -2216,6 +2424,26 @@ mod tests {
             self
         }
 
+        fn probe_metric_metadata(self, metadata: Vec<Vec<ProviderMetricMetadata>>) -> Self {
+            *self.probe_metric_metadata.lock().unwrap() = metadata.into();
+            self
+        }
+
+        fn sample_metric_metadata(self, metadata: Vec<Vec<ProviderMetricMetadata>>) -> Self {
+            *self.sample_metric_metadata.lock().unwrap() = metadata.into();
+            self
+        }
+
+        fn reconfigure_metric_metadata(self, metadata: Vec<Vec<ProviderMetricMetadata>>) -> Self {
+            *self.reconfigure_metric_metadata.lock().unwrap() = metadata.into();
+            self
+        }
+
+        fn initial_metric_metadata(mut self, metadata: Vec<ProviderMetricMetadata>) -> Self {
+            self.metric_metadata = metadata;
+            self
+        }
+
         fn stop_failure(mut self, code: ProviderErrorCode) -> Self {
             self.stop_failure = Some(code);
             *self.stop_failures_remaining.lock().unwrap() = u32::MAX;
@@ -2255,6 +2483,9 @@ mod tests {
             }
             if let Some(delay) = self.probe_delay {
                 thread::sleep(delay);
+            }
+            if let Some(metadata) = self.probe_metric_metadata.lock().unwrap().pop_front() {
+                self.metric_metadata = metadata;
             }
             Ok(self
                 .probe_results
@@ -2301,6 +2532,9 @@ mod tests {
             self.counters.lock().unwrap().reconfigure_count += 1;
             if let Some(gate) = &self.reconfigure_gate {
                 gate.wait();
+            }
+            if let Some(metadata) = self.reconfigure_metric_metadata.lock().unwrap().pop_front() {
+                self.metric_metadata = metadata;
             }
             let should_fail = {
                 let mut remaining = self.reconfigure_failures_remaining.lock().unwrap();
@@ -2350,6 +2584,9 @@ mod tests {
                     ProviderErrorCode::SampleFailed,
                     "deterministic sample failure",
                 ));
+            }
+            if let Some(metadata) = self.sample_metric_metadata.lock().unwrap().pop_front() {
+                self.metric_metadata = metadata;
             }
             let snapshot = ResourceSnapshot {
                 system: SystemSample {
@@ -2404,6 +2641,10 @@ mod tests {
 
         fn health(&self) -> ProviderHealthObservation {
             self.health.clone()
+        }
+
+        fn metric_metadata(&self) -> Vec<ProviderMetricMetadata> {
+            self.metric_metadata.clone()
         }
     }
 
@@ -3131,6 +3372,58 @@ mod tests {
     }
 
     #[test]
+    fn stale_probe_metadata_cannot_overwrite_new_disabled_intent() {
+        let gate = Gate::new();
+        gate.release();
+        let current_metadata = vec![ProviderMetricMetadata {
+            category: MetricCategory::Cpu,
+            metric_key: "cpu.current".to_string(),
+            device: None,
+            support_status: MetricRuntimeSupportStatus::Unsupported,
+        }];
+        let stale_metadata = vec![ProviderMetricMetadata {
+            category: MetricCategory::Cpu,
+            metric_key: "cpu.stale".to_string(),
+            device: None,
+            support_status: MetricRuntimeSupportStatus::Supported,
+        }];
+        let (provider, _) = FakeProvider::new(
+            "stale-probe-metadata",
+            vec![ProviderCapabilitySpec::supported(MetricCategory::Cpu)],
+            ProviderSchedule::Fixed(10),
+        );
+        let provider = provider
+            .probe_gate(gate.clone())
+            .probe_metric_metadata(vec![current_metadata.clone(), stale_metadata]);
+        let mut host = ProviderHost::new(vec![Box::new(provider)]);
+        let enabled = settings_with(vec![MetricCategory::Cpu]);
+        host.probe_all_for_settings(&enabled);
+        assert!(host
+            .collection_session_metric_metadata()
+            .iter()
+            .any(|metric| metric.metric_key == "cpu.current"));
+
+        gate.reset();
+        host.probe_all_for_settings(&enabled);
+        assert!(gate.entered());
+        let disabled = settings_with(Vec::new());
+        // This increments the probe generation while leaving the old probe pending; it does
+        // not start another probe until the pending reply is drained.
+        host.probe_all_for_settings(&disabled);
+        gate.release();
+        host.apply_desired_plan(desired_plan_for(&host, &disabled), Instant::now());
+
+        let metadata = host.collection_session_metric_metadata();
+        assert!(metadata.iter().any(|metric| {
+            metric.metric_key == "cpu.current"
+                && metric.support_status == MetricRuntimeSupportStatus::Unsupported
+        }));
+        assert!(!metadata
+            .iter()
+            .any(|metric| metric.metric_key == "cpu.stale"));
+    }
+
+    #[test]
     fn late_probe_success_restores_desired_plan_and_starts_provider() {
         let gate = Gate::new();
         let (provider, counters) = FakeProvider::new(
@@ -3248,6 +3541,130 @@ mod tests {
         }
         assert_eq!(current.len(), 1);
         assert_eq!(counters.lock().unwrap().sample_count, 2);
+    }
+
+    #[test]
+    fn stale_sample_metadata_cannot_overwrite_disabled_generation_truth() {
+        let gate = Gate::new();
+        let current_metadata = vec![ProviderMetricMetadata {
+            category: MetricCategory::Cpu,
+            metric_key: "cpu.current".to_string(),
+            device: None,
+            support_status: MetricRuntimeSupportStatus::Unsupported,
+        }];
+        let stale_metadata = vec![ProviderMetricMetadata {
+            category: MetricCategory::Cpu,
+            metric_key: "cpu.stale".to_string(),
+            device: None,
+            support_status: MetricRuntimeSupportStatus::Supported,
+        }];
+        let (provider, counters) = FakeProvider::new(
+            "stale-sample-metadata",
+            vec![ProviderCapabilitySpec::supported(MetricCategory::Cpu)],
+            ProviderSchedule::Fixed(10),
+        );
+        let provider = provider
+            .initial_metric_metadata(current_metadata.clone())
+            .sample_gate(gate.clone())
+            .sample_metric_metadata(vec![stale_metadata]);
+        let mut host = ProviderHost::new(vec![Box::new(provider)]);
+        let enabled = settings_with(vec![MetricCategory::Cpu]);
+        let now = Instant::now();
+        host.apply_plan(plan_for(&host, &enabled), now);
+        assert!(sample_at(&mut host, now, 1).is_empty());
+        assert!(gate.entered());
+
+        let disabled = settings_with(Vec::new());
+        host.apply_plan(plan_for(&host, &disabled), now + Duration::from_millis(1));
+        assert_eq!(
+            host.collection_session_metric_metadata(),
+            vec![CollectionSessionMetricMetadata {
+                provider_id: "stale-sample-metadata".to_string(),
+                category: MetricCategory::Cpu,
+                metric_key: "cpu.current".to_string(),
+                device: None,
+                enabled: false,
+                support_status: MetricRuntimeSupportStatus::Unsupported,
+                interval_ms: Some(10),
+            }]
+        );
+
+        gate.release();
+        for _ in 0..200 {
+            host.apply_plan(host.plan().clone(), Instant::now());
+            let counters_snapshot = *counters.lock().unwrap();
+            if counters_snapshot.sample_count == 1 && counters_snapshot.stop_count == 1 {
+                break;
+            }
+            thread::yield_now();
+        }
+        assert_eq!(counters.lock().unwrap().sample_count, 1);
+        assert_eq!(counters.lock().unwrap().stop_count, 1);
+        let metadata = host.collection_session_metric_metadata();
+        assert!(metadata.iter().any(|metric| {
+            metric.metric_key == "cpu.current"
+                && metric.support_status == MetricRuntimeSupportStatus::Unsupported
+        }));
+        assert!(!metadata
+            .iter()
+            .any(|metric| metric.metric_key == "cpu.stale"));
+    }
+
+    #[test]
+    fn stale_reconfigure_metadata_cannot_resurrect_old_generation_truth() {
+        let gate = Gate::new();
+        let current_metadata = vec![ProviderMetricMetadata {
+            category: MetricCategory::Cpu,
+            metric_key: "cpu.current".to_string(),
+            device: None,
+            support_status: MetricRuntimeSupportStatus::Unsupported,
+        }];
+        let stale_metadata = vec![ProviderMetricMetadata {
+            category: MetricCategory::Cpu,
+            metric_key: "cpu.stale".to_string(),
+            device: None,
+            support_status: MetricRuntimeSupportStatus::Supported,
+        }];
+        let (provider, counters) = FakeProvider::new(
+            "stale-reconfigure-metadata",
+            vec![ProviderCapabilitySpec::supported(MetricCategory::Cpu)],
+            ProviderSchedule::System,
+        );
+        let provider = provider
+            .initial_metric_metadata(current_metadata)
+            .reconfigure_gate(gate.clone())
+            .reconfigure_metric_metadata(vec![stale_metadata]);
+        let mut host = ProviderHost::new(vec![Box::new(provider)]);
+        let enabled = settings_with(vec![MetricCategory::Cpu]);
+        let now = Instant::now();
+        host.apply_plan(plan_for(&host, &enabled), now);
+
+        let changed = CollectionSettings {
+            system_sample_interval_ms: 10_000,
+            ..enabled.clone()
+        };
+        host.apply_plan(plan_for(&host, &changed), now + Duration::from_millis(1));
+        assert!(gate.entered());
+
+        let disabled = settings_with(Vec::new());
+        host.apply_plan(plan_for(&host, &disabled), now + Duration::from_millis(2));
+        gate.release();
+        for _ in 0..200 {
+            host.apply_plan(host.plan().clone(), Instant::now());
+            if counters.lock().unwrap().stop_count == 1 {
+                break;
+            }
+            thread::yield_now();
+        }
+
+        let metadata = host.collection_session_metric_metadata();
+        assert!(metadata.iter().any(|metric| {
+            metric.metric_key == "cpu.current"
+                && metric.support_status == MetricRuntimeSupportStatus::Unsupported
+        }));
+        assert!(!metadata
+            .iter()
+            .any(|metric| metric.metric_key == "cpu.stale"));
     }
 
     #[test]

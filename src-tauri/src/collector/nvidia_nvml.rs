@@ -86,10 +86,18 @@ impl NvmlMetric {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+enum NvmlFailureScope {
+    Metric,
+    Device,
+    Session,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct NvmlFailure {
     support_status: MetricRuntimeSupportStatus,
     provider_error: ProviderErrorCode,
     reason: &'static str,
+    scope: NvmlFailureScope,
 }
 
 impl NvmlFailure {
@@ -98,6 +106,7 @@ impl NvmlFailure {
             support_status: MetricRuntimeSupportStatus::ProviderMissing,
             provider_error: ProviderErrorCode::ProviderMissing,
             reason,
+            scope: NvmlFailureScope::Session,
         }
     }
 
@@ -106,11 +115,20 @@ impl NvmlFailure {
             support_status: MetricRuntimeSupportStatus::Unsupported,
             provider_error: ProviderErrorCode::Unsupported,
             reason,
+            scope: NvmlFailureScope::Metric,
         }
     }
 
     fn is_runtime_fatal(&self) -> bool {
         self.provider_error == ProviderErrorCode::RuntimeFailed
+    }
+
+    fn is_device_fatal(&self) -> bool {
+        self.is_runtime_fatal() && self.scope == NvmlFailureScope::Device
+    }
+
+    fn is_session_fatal(&self) -> bool {
+        self.is_runtime_fatal() && self.scope == NvmlFailureScope::Session
     }
 
     fn as_provider_error(&self, fallback: ProviderErrorCode) -> ProviderError {
@@ -132,6 +150,7 @@ fn nvml_failure(status: u32) -> NvmlFailure {
             support_status: MetricRuntimeSupportStatus::PermissionDenied,
             provider_error: ProviderErrorCode::PermissionDenied,
             reason: "nvml_no_permission",
+            scope: NvmlFailureScope::Metric,
         },
         NVML_ERROR_DRIVER_NOT_LOADED => NvmlFailure::provider_missing("nvml_driver_missing"),
         NVML_ERROR_LIBRARY_NOT_FOUND => NvmlFailure::provider_missing("nvml_runtime_missing"),
@@ -140,26 +159,31 @@ fn nvml_failure(status: u32) -> NvmlFailure {
             support_status: MetricRuntimeSupportStatus::Failed,
             provider_error: ProviderErrorCode::RuntimeFailed,
             reason: "nvml_gpu_lost",
+            scope: NvmlFailureScope::Device,
         },
         NVML_ERROR_RESET_REQUIRED => NvmlFailure {
             support_status: MetricRuntimeSupportStatus::Failed,
             provider_error: ProviderErrorCode::RuntimeFailed,
             reason: "nvml_reset_required",
+            scope: NvmlFailureScope::Session,
         },
         NVML_ERROR_LIB_RM_VERSION_MISMATCH => NvmlFailure {
             support_status: MetricRuntimeSupportStatus::Failed,
             provider_error: ProviderErrorCode::RuntimeFailed,
             reason: "nvml_driver_library_mismatch",
+            scope: NvmlFailureScope::Session,
         },
         NVML_ERROR_TIMEOUT => NvmlFailure {
             support_status: MetricRuntimeSupportStatus::Failed,
             provider_error: ProviderErrorCode::SampleFailed,
             reason: "nvml_timeout",
+            scope: NvmlFailureScope::Metric,
         },
         _ => NvmlFailure {
             support_status: MetricRuntimeSupportStatus::Failed,
             provider_error: ProviderErrorCode::SampleFailed,
             reason: "nvml_call_failed",
+            scope: NvmlFailureScope::Metric,
         },
     }
 }
@@ -613,7 +637,8 @@ impl NvmlSession {
         let mut samples = Vec::with_capacity(self.devices.len());
         let mut metadata = Vec::with_capacity(self.devices.len() * NvmlMetric::ALL.len());
         let mut first_failure = None;
-        let mut fatal_failure = None;
+        let mut device_failure = None;
+        let mut session_failure = None;
         let mut has_value = false;
 
         for device in &mut self.devices {
@@ -622,17 +647,33 @@ impl NvmlSession {
             if first_failure.is_none() {
                 first_failure = outcome.first_failure.clone();
             }
-            if fatal_failure.is_none() {
-                fatal_failure = outcome.fatal_failure.clone();
+            if device_failure.is_none()
+                && outcome
+                    .fatal_failure
+                    .as_ref()
+                    .is_some_and(NvmlFailure::is_device_fatal)
+            {
+                device_failure = outcome.fatal_failure.clone();
+            }
+            if session_failure.is_none()
+                && outcome
+                    .fatal_failure
+                    .as_ref()
+                    .is_some_and(NvmlFailure::is_session_fatal)
+            {
+                session_failure = outcome.fatal_failure.clone();
             }
             metadata.extend(outcome.metadata);
-            samples.push(outcome.sample);
+            if let Some(sample) = outcome.sample {
+                samples.push(sample);
+            }
         }
         SessionSample {
             samples,
             metadata,
             first_failure,
-            fatal_failure,
+            device_failure,
+            session_failure,
             has_value,
         }
     }
@@ -656,12 +697,13 @@ struct SessionSample {
     samples: Vec<GpuSample>,
     metadata: Vec<ProviderMetricMetadata>,
     first_failure: Option<NvmlFailure>,
-    fatal_failure: Option<NvmlFailure>,
+    device_failure: Option<NvmlFailure>,
+    session_failure: Option<NvmlFailure>,
     has_value: bool,
 }
 
 struct DeviceSample {
-    sample: GpuSample,
+    sample: Option<GpuSample>,
     metadata: Vec<ProviderMetricMetadata>,
     first_failure: Option<NvmlFailure>,
     fatal_failure: Option<NvmlFailure>,
@@ -759,32 +801,36 @@ fn sample_device(dispatch: &mut dyn NvmlDispatch, device: &mut NvmlDevice) -> De
         || graphics_clock.value.is_some()
         || memory_clock.value.is_some()
         || memory.value.is_some();
+    let sample = (!fatal_failure
+        .as_ref()
+        .is_some_and(NvmlFailure::is_runtime_fatal))
+    .then_some(GpuSample {
+        device_key: device.metadata.stable_key.clone(),
+        vendor: device.metadata.vendor.clone(),
+        model: device.metadata.model.clone(),
+        capacity_bytes: device.metadata.capacity_bytes,
+        utilization_percent: utilization.value.as_ref().map(|value| value.gpu as f64),
+        memory_controller_utilization_percent: utilization
+            .value
+            .as_ref()
+            .map(|value| value.memory as f64),
+        temperature_celsius: temperature.value.map(|value| value as f64),
+        power_watts: power.value.map(|value| value as f64 / 1_000.0),
+        graphics_clock_mhz: graphics_clock.value.map(|value| value as f64),
+        memory_clock_mhz: memory_clock.value.map(|value| value as f64),
+        vram_used_bytes: memory
+            .value
+            .as_ref()
+            .and_then(|value| bytes_to_i64(value.used)),
+        vram_total_bytes,
+        power_scope: power
+            .value
+            .is_some()
+            .then(|| GPU_BOARD_POWER_SCOPE.to_string()),
+        quality_mask: 0,
+    });
     DeviceSample {
-        sample: GpuSample {
-            device_key: device.metadata.stable_key.clone(),
-            vendor: device.metadata.vendor.clone(),
-            model: device.metadata.model.clone(),
-            capacity_bytes: device.metadata.capacity_bytes,
-            utilization_percent: utilization.value.as_ref().map(|value| value.gpu as f64),
-            memory_controller_utilization_percent: utilization
-                .value
-                .as_ref()
-                .map(|value| value.memory as f64),
-            temperature_celsius: temperature.value.map(|value| value as f64),
-            power_watts: power.value.map(|value| value as f64 / 1_000.0),
-            graphics_clock_mhz: graphics_clock.value.map(|value| value as f64),
-            memory_clock_mhz: memory_clock.value.map(|value| value as f64),
-            vram_used_bytes: memory
-                .value
-                .as_ref()
-                .and_then(|value| bytes_to_i64(value.used)),
-            vram_total_bytes,
-            power_scope: power
-                .value
-                .is_some()
-                .then(|| GPU_BOARD_POWER_SCOPE.to_string()),
-            quality_mask: 0,
-        },
+        sample,
         metadata,
         first_failure,
         fatal_failure,
@@ -948,8 +994,13 @@ impl NvidiaNvmlProvider {
         } else {
             self.health.last_error = None;
         }
-        if let Some(failure) = outcome.fatal_failure.as_ref() {
+        if let Some(failure) = outcome.session_failure.as_ref() {
             self.set_unavailable(failure, true);
+            self.record_failure(failure, ProviderErrorCode::RuntimeFailed);
+        } else if let Some(failure) = outcome.device_failure.as_ref() {
+            // A single lost board does not make healthy NVIDIA boards unavailable. The
+            // ProviderHost will schedule bounded reconfigure/re-discovery from this health
+            // observation after the probe reply is accepted.
             self.record_failure(failure, ProviderErrorCode::RuntimeFailed);
         }
         let shutdown = session.shutdown();
@@ -1070,12 +1121,19 @@ impl MetricProvider for NvidiaNvmlProvider {
         };
         let outcome = session.sample_all();
         self.metadata = outcome.metadata;
-        if let Some(failure) = outcome.fatal_failure.as_ref() {
+        self.update_capability_from_metadata();
+        if let Some(failure) = outcome.session_failure.as_ref() {
+            // A session-wide runtime fault is recoverable through the Host's bounded
+            // reconfigure path. Keep the category declared so the desired intent is not
+            // silently discarded while the failed session is being replaced.
+            self.set_capability(CapabilitySupportStatus::Supported, None);
             self.record_failure(failure, ProviderErrorCode::RuntimeFailed);
             let _ = self.release_session();
             return Err(failure.as_provider_error(ProviderErrorCode::RuntimeFailed));
         }
-        if let Some(failure) = outcome.first_failure.as_ref() {
+        if let Some(failure) = outcome.device_failure.as_ref() {
+            self.record_failure(failure, ProviderErrorCode::RuntimeFailed);
+        } else if let Some(failure) = outcome.first_failure.as_ref() {
             self.record_failure(failure, ProviderErrorCode::SampleFailed);
         } else {
             self.health.last_error = None;
@@ -1084,8 +1142,7 @@ impl MetricProvider for NvidiaNvmlProvider {
             self.health.last_success_at_ms = Some(timestamp_ms);
         }
         context.check()?;
-        Ok(outcome
-            .has_value
+        Ok((outcome.has_value && !outcome.samples.is_empty())
             .then_some(ProviderSample::GpuSamples(outcome.samples)))
     }
 
@@ -1577,6 +1634,10 @@ mod tests {
             metric.metric_key == "gpu.power_watts"
                 && metric.support_status == MetricRuntimeSupportStatus::Unsupported
         }));
+        assert_eq!(
+            host.descriptors()[0].capabilities[0].support_status,
+            CapabilitySupportStatus::Supported
+        );
 
         let transient_probe =
             FakeSessionConfig::with_devices(vec![FakeDevice::new("GPU-B", "GPU B")]);
@@ -1606,6 +1667,67 @@ mod tests {
         // Six native calls form the eight storage fields; no internal retry added a seventh call.
         let metric_call_count = stats.lock().unwrap().metric_call_count;
         assert_eq!(metric_call_count, 18);
+    }
+
+    #[test]
+    fn sampling_all_metrics_unavailable_downgrades_and_recovers_category_capability() {
+        let probe = FakeSessionConfig::with_devices(vec![FakeDevice::new("GPU-A", "GPU A")]);
+        let mut unavailable =
+            FakeSessionConfig::with_devices(vec![FakeDevice::new("GPU-A", "GPU A")]);
+        for metric in [
+            NvmlMetric::Utilization,
+            NvmlMetric::Temperature,
+            NvmlMetric::Power,
+            NvmlMetric::GraphicsClock,
+            NvmlMetric::MemoryClock,
+            NvmlMetric::VramUsed,
+        ] {
+            unavailable = unavailable.status("GPU-A", metric, &[NVML_ERROR_NOT_SUPPORTED]);
+        }
+        let recovery_probe =
+            FakeSessionConfig::with_devices(vec![FakeDevice::new("GPU-A", "GPU A")]);
+        let recovery_start = recovery_probe.clone();
+        let (loader, _) = FakeLoader::new(vec![
+            Ok(probe),
+            Ok(unavailable),
+            Ok(recovery_probe),
+            Ok(recovery_start),
+        ]);
+        let settings = gpu_settings();
+        let mut host = host_with(NvidiaNvmlProvider::with_loader(Box::new(loader)), &settings);
+
+        assert!(host
+            .sample_due(Instant::now(), 2_000, &HashSet::new())
+            .is_empty());
+        assert_eq!(
+            host.descriptors()[0].capabilities[0].support_status,
+            CapabilitySupportStatus::Unsupported
+        );
+        assert!(host
+            .collection_session_metric_metadata()
+            .iter()
+            .all(|metric| metric.support_status == MetricRuntimeSupportStatus::Unsupported));
+        assert!(
+            !host
+                .plan()
+                .provider(NVIDIA_NVML_PROVIDER_ID)
+                .unwrap()
+                .enabled
+        );
+
+        host.probe_all_for_settings(&settings);
+        assert_eq!(
+            host.descriptors()[0].capabilities[0].support_status,
+            CapabilitySupportStatus::Supported
+        );
+        host.apply_desired_plan(
+            CollectionPlan::build_desired(&settings, &host.descriptors()),
+            Instant::now(),
+        );
+        assert_eq!(
+            gpu_samples(host.sample_due(Instant::now(), 4_000, &HashSet::new(),)).len(),
+            1
+        );
     }
 
     #[test]
@@ -1642,6 +1764,46 @@ mod tests {
         ));
         assert_eq!(recovered_samples.len(), 1);
         assert!(stats.lock().unwrap().init_count >= 3);
+    }
+
+    #[test]
+    fn session_wide_runtime_failure_releases_session_without_invalid_samples() {
+        let probe = FakeSessionConfig::with_devices(vec![FakeDevice::new("GPU-A", "GPU A")]);
+        let mut failing = FakeSessionConfig::with_devices(vec![FakeDevice::new("GPU-A", "GPU A")]);
+        for metric in [
+            NvmlMetric::Utilization,
+            NvmlMetric::Temperature,
+            NvmlMetric::Power,
+            NvmlMetric::GraphicsClock,
+            NvmlMetric::MemoryClock,
+            NvmlMetric::VramUsed,
+        ] {
+            failing = failing.status("GPU-A", metric, &[NVML_ERROR_RESET_REQUIRED]);
+        }
+        let recovered = FakeSessionConfig::with_devices(vec![FakeDevice::new("GPU-A", "GPU A")]);
+        let (loader, stats) = FakeLoader::new(vec![Ok(probe), Ok(failing), Ok(recovered)]);
+        let mut host = host_with(
+            NvidiaNvmlProvider::with_loader(Box::new(loader)),
+            &gpu_settings(),
+        );
+
+        assert!(host
+            .sample_due(Instant::now(), 2_000, &HashSet::new())
+            .is_empty());
+        assert_eq!(host.statuses()[0].lifecycle, ProviderLifecycleState::Failed);
+        assert_eq!(stats.lock().unwrap().shutdown_count, 2);
+        assert!(host
+            .collection_session_metric_metadata()
+            .iter()
+            .all(|metric| metric.support_status == MetricRuntimeSupportStatus::Failed));
+
+        let recovered_samples = gpu_samples(host.sample_due(
+            Instant::now() + Duration::from_secs(6),
+            8_000,
+            &HashSet::new(),
+        ));
+        assert_eq!(recovered_samples.len(), 1);
+        assert_eq!(stats.lock().unwrap().init_count, 3);
     }
 
     #[test]
@@ -1761,6 +1923,59 @@ mod tests {
         assert_eq!(samples.len(), 1);
         assert_eq!(samples[0].device_key, "gpu:nvidia:uuid:gpu-a");
         assert_eq!(samples[0].power_watts, Some(41.776));
+    }
+
+    #[test]
+    fn runtime_device_loss_keeps_healthy_gpu_and_reenters_host_recovery() {
+        let a = FakeDevice::new("GPU-A", "GPU A");
+        let b = FakeDevice::new("GPU-B", "GPU B");
+        let probe = FakeSessionConfig::with_devices(vec![a.clone(), b.clone()]);
+        let failing = FakeSessionConfig::with_devices(vec![a.clone(), b.clone()]).status(
+            "GPU-B",
+            NvmlMetric::Utilization,
+            &[NVML_ERROR_GPU_IS_LOST],
+        );
+        let recovered = FakeSessionConfig::with_devices(vec![a, b]);
+        let (loader, stats) = FakeLoader::new(vec![Ok(probe), Ok(failing), Ok(recovered)]);
+        let mut host = host_with(
+            NvidiaNvmlProvider::with_loader(Box::new(loader)),
+            &gpu_settings(),
+        );
+
+        let first = gpu_samples(host.sample_due(Instant::now(), 2_000, &HashSet::new()));
+        assert_eq!(first.len(), 1);
+        assert_eq!(first[0].device_key, "gpu:nvidia:uuid:gpu-a");
+        assert_eq!(host.statuses()[0].lifecycle, ProviderLifecycleState::Failed);
+        assert!(host
+            .collection_session_metric_metadata()
+            .iter()
+            .any(|metric| {
+                metric
+                    .device
+                    .as_ref()
+                    .is_some_and(|device| device.stable_key.ends_with("gpu-b"))
+                    && metric.metric_key == "gpu.utilization_percent"
+                    && metric.support_status == MetricRuntimeSupportStatus::Failed
+            }));
+        assert_eq!(stats.lock().unwrap().init_count, 2);
+
+        // The provider owns no retry loop: recovery is held until the Host backoff expires.
+        assert!(host
+            .sample_due(
+                Instant::now() + Duration::from_secs(1),
+                3_000,
+                &HashSet::new(),
+            )
+            .is_empty());
+        assert_eq!(stats.lock().unwrap().init_count, 2);
+
+        let recovered_samples = gpu_samples(host.sample_due(
+            Instant::now() + Duration::from_secs(6),
+            8_000,
+            &HashSet::new(),
+        ));
+        assert_eq!(recovered_samples.len(), 2);
+        assert_eq!(stats.lock().unwrap().init_count, 3);
     }
 
     #[test]
