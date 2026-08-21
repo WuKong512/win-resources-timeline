@@ -1,6 +1,6 @@
 import { create } from "zustand";
 
-type Page = "today" | "timeline" | "resources" | "apps" | "settings";
+export type Page = "timeline" | "usage" | "crashes" | "settings";
 export type ThemeMode = "system" | "light" | "dark";
 
 type UiStore = {
@@ -28,7 +28,7 @@ const initialResolvedTheme = initialTheme === "system"
   : initialTheme;
 
 export const useUiStore = create<UiStore>((set) => ({
-  page: "today",
+  page: "timeline",
   selectedDate: today,
   showHiddenApps: false,
   sidebarCollapsed: storedSidebarState,

@@ -109,7 +109,7 @@ export function TodayPage() {
             </div>
             <div className="border-t border-border/70">
               <QuickLink icon={<CalendarDays size={16} />} label={t("navTimeline")} onClick={() => setPage("timeline")} />
-              <QuickLink icon={<BarChart3 size={16} />} label={t("resourceCharts")} onClick={() => setPage("resources")} />
+              <QuickLink icon={<BarChart3 size={16} />} label={t("resourceCharts")} onClick={() => setPage("timeline")} />
             </div>
           </CardContent>
         </Card>

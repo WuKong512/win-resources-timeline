@@ -2,7 +2,7 @@ use crate::{
     collector::system_metrics::now_ms,
     db::{query, writer},
     error::{AppError, CommandError},
-    models::{AppIdentity, CollectionSettings, CollectorStatus},
+    models::{AppIdentity, CollectionSettings, CollectorStatus, StorageUsage},
     AppState,
 };
 use tauri::{AppHandle, State};
@@ -28,6 +28,11 @@ pub fn set_app_hidden(
 #[tauri::command]
 pub fn get_collector_status(state: State<'_, AppState>) -> CollectorStatus {
     state.collector.status(state.db.size_bytes())
+}
+
+#[tauri::command]
+pub fn get_storage_usage(state: State<'_, AppState>) -> StorageUsage {
+    state.db.storage_usage()
 }
 
 #[tauri::command]

@@ -289,6 +289,27 @@ pub struct DailyUsageSummary {
     pub is_hidden: bool,
 }
 
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ComputerStateInterval {
+    pub state: String,
+    pub start_time_ms: i64,
+    pub end_time_ms: i64,
+    pub duration_ms: i64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UsageSummary {
+    pub start_ms: i64,
+    pub end_ms: i64,
+    pub observed_until_ms: Option<i64>,
+    pub coverage: f64,
+    pub computer_active_seconds: i64,
+    pub state_intervals: Vec<ComputerStateInterval>,
+    pub apps: Vec<AppUsageSummary>,
+}
+
 #[derive(Debug, Clone, Serialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct GpuSample {
@@ -331,6 +352,25 @@ pub struct SystemSample {
     #[serde(default)]
     pub gpus: Vec<GpuSample>,
     pub has_app_snapshot: bool,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct TimelineGap {
+    pub start_ms: i64,
+    pub end_ms: i64,
+    pub duration_ms: i64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SystemTimeline {
+    pub start_ms: i64,
+    pub end_ms: i64,
+    pub observed_ms: i64,
+    pub coverage: f64,
+    pub samples: Vec<SystemSample>,
+    pub gaps: Vec<TimelineGap>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -422,6 +462,15 @@ pub struct CollectorStatus {
     pub database_size_bytes: u64,
     pub database_path: String,
     pub provider_status: Vec<ProviderStatus>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct StorageUsage {
+    pub main_bytes: u64,
+    pub wal_bytes: u64,
+    pub shm_bytes: u64,
+    pub total_bytes: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

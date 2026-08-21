@@ -95,6 +95,10 @@ impl Database {
     pub fn size_bytes(&self) -> u64 {
         schema::database_size_bytes(&self.path)
     }
+
+    pub fn storage_usage(&self) -> crate::models::StorageUsage {
+        schema::storage_usage(&self.path)
+    }
 }
 
 fn now_ms() -> i64 {
@@ -126,7 +130,7 @@ mod tests {
             ActivityState, AppResourceSample, BootIdentity, CollectionSessionMetricMetadata,
             CollectionSettings, ComputerState, ForegroundApp, GpuSample, MetricCategory,
             MetricRuntimeSupportStatus, ResourceSnapshot, RuntimeDeviceMetadata, SystemSample,
-            GPU_BOARD_POWER_SCOPE,
+            TimelineGap, GPU_BOARD_POWER_SCOPE,
         },
     };
     use rusqlite::params;
@@ -3145,5 +3149,235 @@ mod tests {
         );
         drop(db);
         cleanup_test_files(&path);
+    }
+
+    #[test]
+    fn timeline_query_gap_contract_survives_downsampling_jitter_and_window_edges() {
+        fn insert_frames(conn: &Connection, timestamps: &[i64]) -> rusqlite::Result<()> {
+            let collection_id: i64 = conn.query_row(
+                "SELECT CAST(value AS INTEGER) FROM settings WHERE key = 'runtime_collection_session_id'",
+                [],
+                |row| row.get(0),
+            )?;
+            let tx = conn.unchecked_transaction()?;
+            for (sequence, timestamp_ms) in timestamps.iter().enumerate() {
+                tx.execute(
+                    "INSERT INTO sample_frame(collection_session_id, ts, sequence, duration_ms, writer_delay_ms, process_snapshot_present) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                    params![collection_id, timestamp_ms, sequence as i64 + 1, 5_000_i64, 0_i64, 0_i64],
+                )?;
+            }
+            tx.commit()
+        }
+
+        let gap_path = test_path("timeline-real-gap-downsample");
+        cleanup_test_files(&gap_path);
+        let gap_db = Database::open(gap_path.clone()).unwrap();
+        let start_ms = 1_000_000_i64;
+        let source_interval_ms = 5_000_i64;
+        let gap_after_index = 1_000_usize;
+        let gap_duration_ms = 50_000_i64;
+        let gap_timestamps: Vec<i64> = (0..3_000)
+            .map(|index| {
+                start_ms
+                    + index as i64 * source_interval_ms
+                    + if index > gap_after_index {
+                        gap_duration_ms
+                    } else {
+                        0
+                    }
+            })
+            .collect();
+        gap_db
+            .with_writer(|conn| insert_frames(conn, &gap_timestamps))
+            .unwrap();
+        let end_ms = gap_timestamps.last().copied().unwrap() + source_interval_ms;
+        let gap_timeline = gap_db
+            .read(|conn| query::system_timeline(conn, start_ms, end_ms, 500))
+            .unwrap();
+        assert!(gap_timeline.samples.len() <= 500);
+        assert!(gap_timeline.coverage > 0.0 && gap_timeline.coverage < 1.0);
+        let expected_gap = TimelineGap {
+            start_ms: gap_timestamps[gap_after_index] + source_interval_ms,
+            end_ms: gap_timestamps[gap_after_index + 1],
+            duration_ms: gap_duration_ms,
+        };
+        assert_eq!(gap_timeline.gaps, vec![expected_gap.clone()]);
+        assert_eq!(
+            gap_timeline.observed_ms,
+            end_ms - start_ms - gap_duration_ms
+        );
+        assert_eq!(gap_timeline.gaps[0].start_ms, expected_gap.start_ms);
+        assert!(!gap_timeline
+            .samples
+            .iter()
+            .any(|sample| sample.timestamp_ms == gap_timestamps[gap_after_index + 1]));
+
+        let continuous_path = test_path("timeline-continuous-downsample");
+        cleanup_test_files(&continuous_path);
+        let continuous_db = Database::open(continuous_path.clone()).unwrap();
+        let continuous_start_ms = 2_000_000_i64;
+        let continuous_timestamps: Vec<i64> = (0..3_000)
+            .map(|index| continuous_start_ms + index as i64 * source_interval_ms)
+            .collect();
+        continuous_db
+            .with_writer(|conn| insert_frames(conn, &continuous_timestamps))
+            .unwrap();
+        let continuous_end_ms = continuous_timestamps.last().copied().unwrap() + source_interval_ms;
+        let continuous = continuous_db
+            .read(|conn| query::system_timeline(conn, continuous_start_ms, continuous_end_ms, 500))
+            .unwrap();
+        assert!(continuous.samples.len() <= 500);
+        assert_eq!(continuous.gaps, Vec::<TimelineGap>::new());
+        assert_eq!(continuous.end_ms, continuous_end_ms);
+        assert_eq!(
+            continuous.observed_ms,
+            continuous_end_ms - continuous_start_ms
+        );
+        assert_eq!(continuous.coverage, 1.0);
+
+        let jitter_path = test_path("timeline-jitter-tolerance");
+        cleanup_test_files(&jitter_path);
+        let jitter_db = Database::open(jitter_path.clone()).unwrap();
+        let jitter_start_ms = 3_000_000_i64;
+        let jitter_timestamps = vec![
+            jitter_start_ms,
+            jitter_start_ms + 5_007,
+            jitter_start_ms + 10_003,
+            jitter_start_ms + 15_011,
+            jitter_start_ms + 20_002,
+        ];
+        jitter_db
+            .with_writer(|conn| insert_frames(conn, &jitter_timestamps))
+            .unwrap();
+        let jitter_end_ms = jitter_timestamps.last().copied().unwrap() + source_interval_ms;
+        let jitter = jitter_db
+            .read(|conn| query::system_timeline(conn, jitter_start_ms, jitter_end_ms, 500))
+            .unwrap();
+        assert!(
+            jitter.gaps.is_empty(),
+            "ordinary scheduler jitter must remain continuous"
+        );
+        assert_eq!(jitter.coverage, 1.0);
+
+        let delayed_path = test_path("timeline-genuine-delay");
+        cleanup_test_files(&delayed_path);
+        let delayed_db = Database::open(delayed_path.clone()).unwrap();
+        let delayed_start_ms = 4_000_000_i64;
+        let delayed_timestamps = vec![
+            delayed_start_ms,
+            delayed_start_ms + 5_000,
+            delayed_start_ms + 15_000,
+        ];
+        delayed_db
+            .with_writer(|conn| insert_frames(conn, &delayed_timestamps))
+            .unwrap();
+        let delayed_end_ms = delayed_timestamps.last().copied().unwrap() + source_interval_ms;
+        let delayed = delayed_db
+            .read(|conn| query::system_timeline(conn, delayed_start_ms, delayed_end_ms, 500))
+            .unwrap();
+        assert_eq!(
+            delayed.gaps,
+            vec![TimelineGap {
+                start_ms: delayed_start_ms + 10_000,
+                end_ms: delayed_start_ms + 15_000,
+                duration_ms: 5_000,
+            }]
+        );
+        assert!(delayed.coverage < 1.0);
+
+        let live_tail_path = test_path("timeline-live-tail-tolerance");
+        cleanup_test_files(&live_tail_path);
+        let live_tail_db = Database::open(live_tail_path.clone()).unwrap();
+        let live_tail_start_ms = 5_000_000_i64;
+        let live_tail_timestamps = vec![live_tail_start_ms, live_tail_start_ms + 5_000];
+        live_tail_db
+            .with_writer(|conn| insert_frames(conn, &live_tail_timestamps))
+            .unwrap();
+        let effective_end_ms = live_tail_start_ms + 10_007;
+        let live_tail = live_tail_db
+            .read(|conn| query::system_timeline(conn, live_tail_start_ms, effective_end_ms, 500))
+            .unwrap();
+        assert_eq!(live_tail.end_ms, effective_end_ms);
+        assert_eq!(live_tail.coverage, 1.0);
+        assert!(live_tail.gaps.is_empty());
+        assert!(live_tail
+            .gaps
+            .iter()
+            .all(|gap| gap.end_ms <= effective_end_ms));
+
+        let stale_end_ms = live_tail_start_ms + 15_000;
+        let stale_live_tail = live_tail_db
+            .read(|conn| query::system_timeline(conn, live_tail_start_ms, stale_end_ms, 500))
+            .unwrap();
+        assert_eq!(stale_live_tail.end_ms, stale_end_ms);
+        assert_eq!(
+            stale_live_tail.gaps,
+            vec![TimelineGap {
+                start_ms: live_tail_start_ms + 10_000,
+                end_ms: stale_end_ms,
+                duration_ms: 5_000,
+            }]
+        );
+        assert!(stale_live_tail.coverage < 1.0);
+
+        let clipping_path = test_path("timeline-gap-window-clipping");
+        cleanup_test_files(&clipping_path);
+        let clipping_db = Database::open(clipping_path.clone()).unwrap();
+        let clipping_start_ms = 5_000_000_i64;
+        let clipping_end_ms = clipping_start_ms + 60_000;
+        let clipping_timestamps = vec![
+            clipping_start_ms - 100_000,
+            clipping_start_ms + 50_000,
+            clipping_start_ms + 55_000,
+        ];
+        clipping_db
+            .with_writer(|conn| insert_frames(conn, &clipping_timestamps))
+            .unwrap();
+        let clipping = clipping_db
+            .read(|conn| query::system_timeline(conn, clipping_start_ms, clipping_end_ms, 500))
+            .unwrap();
+        assert_eq!(
+            clipping.gaps.first(),
+            Some(&TimelineGap {
+                start_ms: clipping_start_ms,
+                end_ms: clipping_start_ms + 50_000,
+                duration_ms: 50_000,
+            })
+        );
+        assert!(clipping
+            .gaps
+            .iter()
+            .all(|gap| gap.start_ms >= clipping_start_ms
+                && gap.end_ms <= clipping_end_ms
+                && gap.end_ms > gap.start_ms));
+
+        let empty = clipping_db
+            .read(|conn| {
+                query::system_timeline(conn, clipping_end_ms, clipping_end_ms + 100_000, 500)
+            })
+            .unwrap();
+        assert!(empty.samples.is_empty());
+        assert_eq!(empty.observed_ms, 0);
+        assert_eq!(empty.coverage, 0.0);
+        assert_eq!(
+            empty.gaps,
+            vec![TimelineGap {
+                start_ms: clipping_end_ms,
+                end_ms: clipping_end_ms + 100_000,
+                duration_ms: 100_000,
+            }]
+        );
+        drop(clipping_db);
+        cleanup_test_files(&clipping_path);
+        drop(delayed_db);
+        cleanup_test_files(&delayed_path);
+        drop(live_tail_db);
+        cleanup_test_files(&live_tail_path);
+        drop(jitter_db);
+        cleanup_test_files(&jitter_path);
+        drop(continuous_db);
+        cleanup_test_files(&continuous_path);
+        drop(gap_db);
+        cleanup_test_files(&gap_path);
     }
 }

@@ -5,8 +5,8 @@ use crate::{
     },
     models::{
         AppIdentity, AppResourceHistoryPoint, AppResourceSample, AppUsageSummary,
-        DailyUsageSummary, ForegroundInterval, GpuSample, GpuSamplePoint, ResourceApp,
-        SystemSample, TodayOverview,
+        ComputerStateInterval, DailyUsageSummary, ForegroundInterval, GpuSample, GpuSamplePoint,
+        ResourceApp, SystemSample, SystemTimeline, TimelineGap, TodayOverview, UsageSummary,
     },
 };
 use rusqlite::{params, Connection, OptionalExtension};
@@ -344,12 +344,114 @@ pub fn daily_usage_summary(
     rows
 }
 
+pub fn usage_overview(
+    conn: &Connection,
+    start_ms: i64,
+    end_ms: i64,
+    include_hidden: bool,
+) -> rusqlite::Result<UsageSummary> {
+    valid_range(start_ms, end_ms)?;
+    let states = load_state_ranges(conn, start_ms, end_ms)?;
+    let state_intervals = states
+        .iter()
+        .map(|state| ComputerStateInterval {
+            state: state.state.clone(),
+            start_time_ms: state.range.start_ms,
+            end_time_ms: state.range.end_ms,
+            duration_ms: state.range.end_ms.saturating_sub(state.range.start_ms),
+        })
+        .collect();
+    let covered_ms = union_duration(&states, start_ms, end_ms);
+    let total_ms = end_ms.saturating_sub(start_ms).max(1);
+    let observed_until_ms =
+        usage_checkpoint(conn)?.map(|checkpoint| checkpoint.clamp(start_ms, end_ms));
+    Ok(UsageSummary {
+        start_ms,
+        end_ms,
+        observed_until_ms,
+        coverage: (covered_ms as f64 / total_ms as f64).clamp(0.0, 1.0),
+        computer_active_seconds: computer_active_duration(&states, start_ms, end_ms) / 1000,
+        state_intervals,
+        apps: usage_summary(conn, start_ms, end_ms, include_hidden)?,
+    })
+}
+
+fn union_duration(states: &[StateRange], start_ms: i64, end_ms: i64) -> i64 {
+    let mut ranges: Vec<_> = states
+        .iter()
+        .filter_map(|state| state.range.clipped(start_ms, end_ms))
+        .map(|range| (range.start_ms, range.end_ms))
+        .filter(|(start, end)| end > start)
+        .collect();
+    ranges.sort_unstable();
+    let mut covered_ms = 0i64;
+    let mut current: Option<(i64, i64)> = None;
+    for (start, end) in ranges {
+        match current {
+            Some((current_start, current_end)) if start <= current_end => {
+                current = Some((current_start, current_end.max(end)));
+            }
+            Some((current_start, current_end)) => {
+                covered_ms = covered_ms.saturating_add(current_end - current_start);
+                current = Some((start, end));
+            }
+            None => current = Some((start, end)),
+        }
+    }
+    if let Some((start, end)) = current {
+        covered_ms.saturating_add(end - start)
+    } else {
+        0
+    }
+}
+
 pub fn system_samples(
     conn: &Connection,
     start_ms: i64,
     end_ms: i64,
     max_points: usize,
 ) -> rusqlite::Result<Vec<SystemSample>> {
+    Ok(system_sample_rows(conn, start_ms, end_ms, max_points)?
+        .into_iter()
+        .map(|(_, sample)| sample)
+        .collect())
+}
+
+pub fn system_timeline(
+    conn: &Connection,
+    start_ms: i64,
+    end_ms: i64,
+    max_points: usize,
+) -> rusqlite::Result<SystemTimeline> {
+    valid_range(start_ms, end_ms)?;
+    let rows = system_sample_rows(conn, start_ms, end_ms, max_points)?;
+    let gaps = timeline_gaps(conn, start_ms, end_ms)?;
+    let total_ms = end_ms.saturating_sub(start_ms);
+    let unobserved_ms = gaps
+        .iter()
+        .fold(0i64, |total, gap| total.saturating_add(gap.duration_ms));
+    let observed_ms = total_ms.saturating_sub(unobserved_ms);
+    let coverage = if total_ms > 0 {
+        (observed_ms as f64 / total_ms as f64).clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    Ok(SystemTimeline {
+        start_ms,
+        end_ms,
+        observed_ms,
+        coverage,
+        samples: rows.into_iter().map(|(_, sample)| sample).collect(),
+        gaps,
+    })
+}
+
+fn system_sample_rows(
+    conn: &Connection,
+    start_ms: i64,
+    end_ms: i64,
+    max_points: usize,
+) -> rusqlite::Result<Vec<(i64, SystemSample)>> {
     valid_range(start_ms, end_ms)?;
     let max_points = max_points.max(1) as i64;
     let mut stmt = conn.prepare(
@@ -369,7 +471,7 @@ pub fn system_samples(
                FROM disk_sample GROUP BY frame_id
              ) disk ON disk.frame_id = f.id
              WHERE f.ts >= ?1 AND f.ts < ?2
-           )
+             )
            SELECT id, ts, duration_ms, usage_pct, memory_percent, used_bytes,
                   memory_total_bytes, read_bps, write_bps, process_snapshot_present
            FROM ranked_frames
@@ -401,9 +503,144 @@ pub fn system_samples(
         .into_iter()
         .map(|(frame_id, mut sample)| {
             sample.gpus = gpus_by_frame.get(&frame_id).cloned().unwrap_or_default();
-            sample
+            (frame_id, sample)
         })
         .collect())
+}
+
+/// The collector's configured system interval is the lower bound for a normal frame cadence.
+/// A 5% allowance absorbs ordinary timer/thread scheduling jitter while still scaling with
+/// longer configured intervals; the 250 ms floor is exactly 5% of the minimum 5 s interval.
+const TIMELINE_JITTER_FLOOR_MS: i64 = 250;
+
+fn timeline_gaps(
+    conn: &Connection,
+    start_ms: i64,
+    end_ms: i64,
+) -> rusqlite::Result<Vec<TimelineGap>> {
+    valid_range(start_ms, end_ms)?;
+    let mut stmt = conn.prepare(
+        r#"WITH prior_frame AS (
+             SELECT f.id, f.collection_session_id, f.ts, f.sequence, f.duration_ms
+             FROM sample_frame f
+             WHERE f.ts < ?1
+             ORDER BY f.ts DESC, f.id DESC
+             LIMIT 1
+           ),
+           source_frames AS (
+             SELECT id, collection_session_id, ts, sequence, duration_ms
+             FROM prior_frame
+             UNION ALL
+             SELECT f.id, f.collection_session_id, f.ts, f.sequence, f.duration_ms
+             FROM sample_frame f
+             WHERE f.ts >= ?1 AND f.ts < ?2
+           ),
+           ordered AS (
+             SELECT source_frames.*,
+                    LAG(collection_session_id) OVER (ORDER BY ts, id) AS previous_session_id,
+                    LAG(sequence) OVER (ORDER BY ts, id) AS previous_sequence,
+                    LAG(duration_ms) OVER (ORDER BY ts, id) AS previous_duration_ms,
+                    LAG(ts + duration_ms) OVER (ORDER BY ts, id) AS previous_end_ms
+             FROM source_frames
+           ),
+           classified AS (
+             SELECT ordered.*,
+                    CASE
+                      WHEN previous_end_ms IS NULL THEN 1
+                      WHEN previous_session_id IS NULL OR previous_session_id != collection_session_id THEN 1
+                      WHEN previous_sequence IS NULL OR sequence != previous_sequence + 1 THEN 1
+                      WHEN ts > previous_end_ms + MAX(
+                        ?3,
+                        CAST(MAX(duration_ms, COALESCE(previous_duration_ms, duration_ms)) / 20 AS INTEGER)
+                      ) THEN 1
+                      ELSE 0
+                    END AS is_discontinuity
+             FROM ordered
+           ),
+           windowed AS (
+             SELECT classified.*,
+                    CASE
+                      WHEN is_discontinuity = 1
+                       AND ts > MAX(?1, COALESCE(previous_end_ms, ?1))
+                      THEN MAX(?1, COALESCE(previous_end_ms, ?1))
+                    END AS gap_start_ms,
+                    CASE
+                      WHEN is_discontinuity = 1
+                       AND ts > MAX(?1, COALESCE(previous_end_ms, ?1))
+                      THEN MIN(?2, ts)
+                    END AS gap_end_ms
+             FROM classified
+             WHERE ts >= ?1 AND ts < ?2
+           ),
+           last_frame AS (
+             SELECT ts, duration_ms
+             FROM windowed
+             ORDER BY ts DESC, id DESC
+             LIMIT 1
+           ),
+           candidates AS (
+             SELECT gap_start_ms AS start_ms, gap_end_ms AS end_ms
+             FROM windowed
+             WHERE gap_start_ms IS NOT NULL AND gap_end_ms IS NOT NULL
+             UNION ALL
+             SELECT ?1, ?2
+             WHERE NOT EXISTS (SELECT 1 FROM windowed)
+             UNION ALL
+             SELECT MAX(?1, ts + duration_ms), ?2
+             FROM last_frame
+             WHERE ?2 > ts + duration_ms + MAX(
+               ?3,
+               CAST(duration_ms / 20 AS INTEGER)
+             )
+           )
+           SELECT start_ms, end_ms
+           FROM candidates
+           WHERE end_ms > start_ms
+           ORDER BY start_ms, end_ms"#,
+    )?;
+    let raw_gaps = stmt
+        .query_map(params![start_ms, end_ms, TIMELINE_JITTER_FLOOR_MS], |row| {
+            Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(normalize_timeline_gaps(start_ms, end_ms, raw_gaps))
+}
+
+fn normalize_timeline_gaps(
+    start_ms: i64,
+    end_ms: i64,
+    mut raw_gaps: Vec<(i64, i64)>,
+) -> Vec<TimelineGap> {
+    raw_gaps = raw_gaps
+        .into_iter()
+        .map(|(start, end)| {
+            (
+                start.max(start_ms).min(end_ms),
+                end.max(start_ms).min(end_ms),
+            )
+        })
+        .filter(|(start, end)| end > start)
+        .collect();
+    raw_gaps.sort_unstable();
+
+    let mut merged: Vec<(i64, i64)> = Vec::new();
+    for (start, end) in raw_gaps {
+        if let Some((_, current_end)) = merged.last_mut() {
+            if start <= *current_end {
+                *current_end = (*current_end).max(end);
+                continue;
+            }
+        }
+        merged.push((start, end));
+    }
+    merged
+        .into_iter()
+        .map(|(start, end)| TimelineGap {
+            start_ms: start,
+            end_ms: end,
+            duration_ms: end.saturating_sub(start),
+        })
+        .collect()
 }
 
 fn gpu_samples_by_selected_frames(

@@ -7,11 +7,26 @@ export function localDateString(date = new Date()): string {
   return `${year}-${month}-${day}`;
 }
 
+export function shiftLocalDate(date: string, deltaDays: number): string {
+  const [year, month, day] = date.split("-").map(Number);
+  return localDateString(new Date(year, month - 1, day + deltaDays, 12));
+}
+
 export function localDayRange(date: string): { startMs: number; endMs: number } {
   const [year, month, day] = date.split("-").map(Number);
   const start = new Date(year, month - 1, day);
   const end = new Date(year, month - 1, day + 1);
   return { startMs: start.getTime(), endMs: end.getTime() };
+}
+
+export function timelineWindowRange(
+  selectedDate: string,
+  preset: 1 | 7 | 30,
+  nowMs = Date.now()
+): { startMs: number; endMs: number } {
+  const calendarEndMs = localDayRange(selectedDate).endMs;
+  const startMs = localDayRange(shiftLocalDate(selectedDate, -(preset - 1))).startMs;
+  return { startMs, endMs: Math.min(calendarEndMs, nowMs) };
 }
 
 export function clipInterval(
