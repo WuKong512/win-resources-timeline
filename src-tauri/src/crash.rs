@@ -2335,7 +2335,15 @@ unsafe fn render_native_event(
     let event_time_ms = filetime_to_unix_ms(
         variant_u64(values.get(EvtSystemTimeCreated.0 as usize).ok_or(())?).ok_or(())?,
     );
-    let payload = render_event_payload_facts(event, &provider, &event_id);
+    let provider_lower = provider.to_ascii_lowercase();
+    let payload = if (provider_lower.contains("systemerrorreporting") && event_id == "1001")
+        || (provider_lower.contains("kernel-power") && event_id == "41")
+        || (provider_lower == "eventlog" && event_id == "6008")
+    {
+        render_event_payload_facts(event, &provider, &event_id)
+    } else {
+        EventPayloadFacts::default()
+    };
     Some(NormalizedSystemEvent::from_fields(
         channel,
         Some(provider),

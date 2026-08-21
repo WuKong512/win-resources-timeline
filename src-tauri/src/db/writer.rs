@@ -1946,9 +1946,9 @@ pub fn clear_collected_data(conn: &Connection) -> rusqlite::Result<()> {
     )?;
     if active_holds > 0 {
         return Err(rusqlite::Error::ToSqlConversionFailure(Box::new(
-            io::Error::other(
-                "clear collected data refused: active crash retention holds protect evidence; release holds first",
-            ),
+            io::Error::other(format!(
+                "clear collected data refused: {active_holds} active crash retention hold(s) protect evidence; release holds first"
+            )),
         )));
     }
     let tx = conn.unchecked_transaction()?;
