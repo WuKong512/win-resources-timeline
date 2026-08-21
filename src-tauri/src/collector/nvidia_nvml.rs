@@ -1942,10 +1942,20 @@ mod tests {
             &gpu_settings(),
         );
 
+        let before_failure = host
+            .test_failure_state(NVIDIA_NVML_PROVIDER_ID)
+            .expect("NVIDIA provider runtime");
         let first = gpu_samples(host.sample_due(Instant::now(), 2_000, &HashSet::new()));
         assert_eq!(first.len(), 1);
         assert_eq!(first[0].device_key, "gpu:nvidia:uuid:gpu-a");
         assert_eq!(host.statuses()[0].lifecycle, ProviderLifecycleState::Failed);
+        let after_failure = host
+            .test_failure_state(NVIDIA_NVML_PROVIDER_ID)
+            .expect("NVIDIA provider runtime");
+        assert_eq!(after_failure.0, before_failure.0 + 1);
+        assert_eq!(after_failure.1, before_failure.1 + 1);
+        assert!(after_failure.2, "device loss must schedule reconfigure");
+        assert_eq!(after_failure.3, Some(ProviderErrorCode::RuntimeFailed));
         assert!(host
             .collection_session_metric_metadata()
             .iter()

@@ -726,6 +726,9 @@ struct ProviderRuntime {
     provider_health: ProviderHealthObservation,
     probe_failed: bool,
     stop_failure: Option<ProviderErrorSummary>,
+    /// Identifies a timed-out executor call whose failure has already been recorded by the Host.
+    /// The eventual cancelled completion must not count that same operation a second time.
+    accounted_pending_failure: Option<(ProviderOperation, u64)>,
     generation: u64,
     probe_generation: u64,
 }
@@ -771,6 +774,7 @@ impl ProviderHost {
                             provider_health: ProviderHealthObservation::default(),
                             probe_failed: false,
                             stop_failure: None,
+                            accounted_pending_failure: None,
                             generation: 0,
                             probe_generation: 0,
                         },
@@ -844,12 +848,13 @@ impl ProviderHost {
                             observation,
                         } = call;
                         let mut capability_changed = install_observation(runtime, &observation);
+                        let provider_counted_failure =
+                            update_health(runtime, observation.health.clone());
                         match result {
                             Ok(capabilities) => {
                                 capability_changed |=
                                     runtime.descriptor.capabilities != capabilities;
                                 runtime.descriptor.capabilities = capabilities;
-                                runtime.provider_health = observation.health;
                                 runtime.probe_failed = false;
                                 runtime.consecutive_failures = 0;
                                 runtime.last_error = None;
@@ -858,7 +863,11 @@ impl ProviderHost {
                                 }
                             }
                             Err(error) => {
-                                record_probe_failure(runtime, error);
+                                record_probe_failure_with_accounting(
+                                    runtime,
+                                    error,
+                                    provider_counted_failure,
+                                );
                                 capability_changed = true;
                             }
                         }
@@ -949,12 +958,13 @@ impl ProviderHost {
                             observation,
                         } => {
                             capability_changed |= install_observation(runtime, &observation);
+                            let provider_counted_failure =
+                                update_health(runtime, observation.health.clone());
                             match result {
                                 Ok(capabilities) => {
                                     capability_changed |=
                                         runtime.descriptor.capabilities != capabilities;
                                     runtime.descriptor.capabilities = capabilities;
-                                    runtime.provider_health = observation.health;
                                     runtime.probe_failed = false;
                                     runtime.consecutive_failures = 0;
                                     runtime.last_error = None;
@@ -963,7 +973,11 @@ impl ProviderHost {
                                     }
                                 }
                                 Err(error) => {
-                                    record_probe_failure(runtime, error);
+                                    record_probe_failure_with_accounting(
+                                        runtime,
+                                        error,
+                                        provider_counted_failure,
+                                    );
                                     capability_changed = true;
                                 }
                             }
@@ -986,14 +1000,26 @@ impl ProviderHost {
                     // Its observations are accepted only when it still belongs to the current
                     // lifecycle generation and active intent.
                     if completion.generation != runtime.generation {
+                        if runtime.accounted_pending_failure
+                            == Some((ProviderOperation::Sample, completion.generation))
+                        {
+                            runtime.accounted_pending_failure = None;
+                        }
                         cleanup = !desired_active && runtime.started;
                     } else {
+                        let accounted_timeout = runtime.accounted_pending_failure
+                            == Some((ProviderOperation::Sample, completion.generation));
+                        if accounted_timeout {
+                            runtime.accounted_pending_failure = None;
+                        }
                         match completion.reply {
                             ProviderReply::Sample {
                                 result,
                                 observation,
                             } if desired_active => {
                                 capability_changed |= install_observation(runtime, &observation);
+                                let provider_counted_failure =
+                                    update_health(runtime, observation.health.clone());
                                 let runtime_failure = observation
                                     .health
                                     .last_error
@@ -1002,9 +1028,12 @@ impl ProviderHost {
                                     .cloned();
                                 match result {
                                     Ok(_sample) => {
-                                        update_health(runtime, observation.health);
                                         if let Some(summary) = runtime_failure {
-                                            record_failure(runtime, provider_error(summary));
+                                            record_failure_from_observation(
+                                                runtime,
+                                                provider_error(summary),
+                                                provider_counted_failure,
+                                            );
                                             let interval_ms = runtime
                                                 .plan
                                                 .as_ref()
@@ -1028,9 +1057,18 @@ impl ProviderHost {
                                         }
                                     }
                                     Err(error) => {
+                                        let error_code = error.code;
                                         let runtime_failure =
-                                            error.code == ProviderErrorCode::RuntimeFailed;
-                                        record_failure(runtime, error);
+                                            error_code == ProviderErrorCode::RuntimeFailed;
+                                        if !(accounted_timeout
+                                            && error_code == ProviderErrorCode::Timeout)
+                                        {
+                                            record_failure_from_observation(
+                                                runtime,
+                                                error,
+                                                provider_counted_failure,
+                                            );
+                                        }
                                         let interval_ms = runtime
                                             .plan
                                             .as_ref()
@@ -1040,7 +1078,11 @@ impl ProviderHost {
                                             interval_ms,
                                             runtime.consecutive_failures,
                                         );
-                                        runtime.next_sample_at = Some(now + backoff);
+                                        if !(accounted_timeout
+                                            && error_code == ProviderErrorCode::Timeout)
+                                        {
+                                            runtime.next_sample_at = Some(now + backoff);
+                                        }
                                         if runtime_failure {
                                             runtime.started = false;
                                             runtime.retry_action =
@@ -1072,6 +1114,11 @@ impl ProviderHost {
                         _ => unreachable!(),
                     };
                     let current = completion.generation == runtime.generation;
+                    let accounted_timeout = runtime.accounted_pending_failure
+                        == Some((completion.operation, completion.generation));
+                    if accounted_timeout {
+                        runtime.accounted_pending_failure = None;
+                    }
                     let call = match completion.reply {
                         ProviderReply::Lifecycle {
                             result,
@@ -1095,6 +1142,11 @@ impl ProviderHost {
                     if current {
                         capability_changed |= install_observation(runtime, &observation);
                     }
+                    let provider_counted_failure = if current {
+                        update_health(runtime, observation.health.clone())
+                    } else {
+                        false
+                    };
                     match result {
                         Ok(outcome) => {
                             runtime.started = true;
@@ -1104,7 +1156,6 @@ impl ProviderHost {
                                         runtime.descriptor.capabilities != capabilities;
                                     runtime.descriptor.capabilities = capabilities;
                                 }
-                                update_health(runtime, observation.health);
                                 runtime.lifecycle = ProviderLifecycleState::Running;
                                 runtime.last_error = runtime.provider_health.last_error.clone();
                                 runtime.stop_failure = None;
@@ -1127,19 +1178,29 @@ impl ProviderHost {
                         Err(error) => {
                             runtime.started = false;
                             if current && desired_active {
-                                record_failure(runtime, error);
+                                let duplicate_timeout =
+                                    accounted_timeout && error.code == ProviderErrorCode::Timeout;
+                                if !duplicate_timeout {
+                                    record_failure_from_observation(
+                                        runtime,
+                                        error,
+                                        provider_counted_failure,
+                                    );
+                                }
                                 runtime.retry_action = Some(action);
                                 let interval_ms = runtime
                                     .plan
                                     .as_ref()
                                     .map(|plan| plan.interval_ms)
                                     .unwrap_or(1);
-                                runtime.retry_at = Some(
-                                    now + failure_backoff(
-                                        interval_ms,
-                                        runtime.consecutive_failures,
-                                    ),
-                                );
+                                if !duplicate_timeout {
+                                    runtime.retry_at = Some(
+                                        now + failure_backoff(
+                                            interval_ms,
+                                            runtime.consecutive_failures,
+                                        ),
+                                    );
+                                }
                                 runtime.next_sample_at = None;
                             } else if desired_active {
                                 // A stale failure must not replace the newer plan's intent, but
@@ -1175,11 +1236,13 @@ impl ProviderHost {
                             ProviderHealthObservation::default(),
                         ),
                     };
+                    let provider_counted_failure = if current {
+                        update_health(runtime, health.clone())
+                    } else {
+                        false
+                    };
                     match result {
                         Ok(()) => {
-                            if current {
-                                update_health(runtime, health);
-                            }
                             runtime.started = false;
                             runtime.stop_failure = None;
                             runtime.last_error = None;
@@ -1198,7 +1261,15 @@ impl ProviderHost {
                             }
                         }
                         Err(error) => {
-                            record_failure(runtime, error.clone());
+                            if current {
+                                record_failure_from_observation(
+                                    runtime,
+                                    error.clone(),
+                                    provider_counted_failure,
+                                );
+                            } else {
+                                record_failure(runtime, error.clone());
+                            }
                             runtime.started = false;
                             runtime.stop_failure = runtime.last_error.clone();
                             runtime.lifecycle = ProviderLifecycleState::Failed;
@@ -1524,6 +1595,8 @@ impl ProviderHost {
                         observation,
                     } = call;
                     capability_changed |= install_observation(runtime, &observation);
+                    let provider_counted_failure =
+                        update_health(runtime, observation.health.clone());
                     let runtime_failure = observation
                         .health
                         .last_error
@@ -1532,12 +1605,15 @@ impl ProviderHost {
                         .cloned();
                     match result {
                         Ok(sample) => {
-                            update_health(runtime, observation.health);
                             if sample.is_some() {
                                 runtime.last_success_at_ms = Some(timestamp_ms);
                             }
                             if let Some(summary) = runtime_failure {
-                                record_failure(runtime, provider_error(summary));
+                                record_failure_from_observation(
+                                    runtime,
+                                    provider_error(summary),
+                                    provider_counted_failure,
+                                );
                                 let backoff =
                                     failure_backoff(plan.interval_ms, runtime.consecutive_failures);
                                 runtime.started = false;
@@ -1555,7 +1631,11 @@ impl ProviderHost {
                         }
                         Err(error) => {
                             let runtime_failure = error.code == ProviderErrorCode::RuntimeFailed;
-                            record_failure(runtime, error);
+                            record_failure_from_observation(
+                                runtime,
+                                error,
+                                provider_counted_failure,
+                            );
                             let backoff =
                                 failure_backoff(plan.interval_ms, runtime.consecutive_failures);
                             runtime.next_sample_at = Some(now + backoff);
@@ -1572,7 +1652,12 @@ impl ProviderHost {
                 }
                 Err(error) => {
                     let runtime_failure = error.code == ProviderErrorCode::RuntimeFailed;
+                    let pending_failure = runtime.executor.pending();
                     record_failure(runtime, error);
+                    if pending_failure {
+                        runtime.accounted_pending_failure =
+                            Some((ProviderOperation::Sample, runtime.generation));
+                    }
                     let backoff = failure_backoff(plan.interval_ms, runtime.consecutive_failures);
                     runtime.next_sample_at = Some(now + backoff);
                     if runtime_failure {
@@ -1657,6 +1742,21 @@ impl ProviderHost {
             }
         }
         first_error.map_or(Ok(()), Err)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_failure_state(
+        &self,
+        provider_id: &str,
+    ) -> Option<(u64, u32, bool, Option<ProviderErrorCode>)> {
+        self.providers.get(provider_id).map(|runtime| {
+            (
+                runtime.failure_count,
+                runtime.consecutive_failures,
+                runtime.retry_action == Some(ProviderRetryAction::Reconfigure),
+                runtime.last_error.as_ref().map(|error| error.code),
+            )
+        })
     }
 
     pub fn statuses(&self) -> Vec<ProviderStatus> {
@@ -1824,10 +1924,17 @@ fn metric_failure_status(error: Option<&ProviderErrorSummary>) -> MetricRuntimeS
     }
 }
 
-fn update_health(runtime: &mut ProviderRuntime, health: ProviderHealthObservation) {
+/// Installs provider-owned health and reports whether its cumulative failure count advanced.
+///
+/// The returned bit is the accounting hand-off between a provider observation and the Host:
+/// when a provider has already recorded the failure in its health snapshot, the Host must still
+/// reconcile lifecycle/backoff state but must not count the same event again.
+fn update_health(runtime: &mut ProviderRuntime, health: ProviderHealthObservation) -> bool {
     runtime.last_success_at_ms = health.last_success_at_ms.or(runtime.last_success_at_ms);
+    let provider_counted_failure = health.failure_count > runtime.failure_count;
     runtime.failure_count = runtime.failure_count.max(health.failure_count);
     runtime.provider_health = health;
+    provider_counted_failure
 }
 
 fn install_observation(runtime: &mut ProviderRuntime, observation: &ProviderObservation) -> bool {
@@ -1843,7 +1950,15 @@ fn clear_retry(runtime: &mut ProviderRuntime) {
 }
 
 fn record_probe_failure(runtime: &mut ProviderRuntime, error: ProviderError) {
-    record_failure(runtime, error.clone());
+    record_probe_failure_with_accounting(runtime, error, false);
+}
+
+fn record_probe_failure_with_accounting(
+    runtime: &mut ProviderRuntime,
+    error: ProviderError,
+    provider_counted_failure: bool,
+) {
+    record_failure_from_observation(runtime, error.clone(), provider_counted_failure);
     runtime.probe_failed = true;
     runtime.descriptor.capabilities = runtime
         .descriptor
@@ -1887,8 +2002,26 @@ fn normal_control_deadline() -> Instant {
 }
 
 fn record_failure(runtime: &mut ProviderRuntime, error: ProviderError) {
+    record_failure_with_accounting(runtime, error, true);
+}
+
+fn record_failure_from_observation(
+    runtime: &mut ProviderRuntime,
+    error: ProviderError,
+    provider_counted_failure: bool,
+) {
+    record_failure_with_accounting(runtime, error, !provider_counted_failure);
+}
+
+fn record_failure_with_accounting(
+    runtime: &mut ProviderRuntime,
+    error: ProviderError,
+    increment_failure_count: bool,
+) {
     runtime.lifecycle = ProviderLifecycleState::Failed;
-    runtime.failure_count = runtime.failure_count.saturating_add(1);
+    if increment_failure_count {
+        runtime.failure_count = runtime.failure_count.saturating_add(1);
+    }
     runtime.consecutive_failures = runtime.consecutive_failures.saturating_add(1);
     let summary = error_summary(error);
     runtime.last_error = Some(summary.clone());
@@ -1907,6 +2040,10 @@ fn attempt_start(
     now: Instant,
     deadline: Instant,
 ) -> bool {
+    let operation = match action {
+        ProviderRetryAction::Start => ProviderOperation::Start,
+        ProviderRetryAction::Reconfigure => ProviderOperation::Reconfigure,
+    };
     let result = match action {
         ProviderRetryAction::Start => runtime.executor.start(generation, plan, deadline),
         ProviderRetryAction::Reconfigure => {
@@ -1933,8 +2070,10 @@ fn attempt_start(
             }
             Err(error) => {
                 install_observation(runtime, &call.observation);
+                let provider_counted_failure =
+                    update_health(runtime, call.observation.health.clone());
                 runtime.started = false;
-                record_failure(runtime, error);
+                record_failure_from_observation(runtime, error, provider_counted_failure);
                 runtime.retry_action = Some(action);
                 runtime.retry_at =
                     Some(now + failure_backoff(plan.interval_ms, runtime.consecutive_failures));
@@ -1943,8 +2082,12 @@ fn attempt_start(
             }
         },
         Err(error) => {
+            let pending_failure = runtime.executor.pending_operation() == Some(operation);
             runtime.started = false;
             record_failure(runtime, error);
+            if pending_failure {
+                runtime.accounted_pending_failure = Some((operation, generation));
+            }
             runtime.retry_action = Some(action);
             runtime.retry_at =
                 Some(now + failure_backoff(plan.interval_ms, runtime.consecutive_failures));
@@ -2003,7 +2146,9 @@ fn stop_runtime(
                 Ok(())
             }
             Err(error) => {
-                record_failure(runtime, error.clone());
+                let provider_counted_failure =
+                    update_health(runtime, call.observation.health.clone());
+                record_failure_from_observation(runtime, error.clone(), provider_counted_failure);
                 runtime.stop_failure = runtime.last_error.clone();
                 runtime.lifecycle = ProviderLifecycleState::Failed;
                 Err(error)
@@ -2305,6 +2450,7 @@ mod tests {
         start_failures_remaining: Arc<Mutex<u32>>,
         reconfigure_failures_remaining: Arc<Mutex<u32>>,
         sample_failures_remaining: Arc<Mutex<u32>>,
+        sample_failure_reports_health: bool,
         sample_delay: Option<Duration>,
         start_delay: Option<Duration>,
         probe_delay: Option<Duration>,
@@ -2343,6 +2489,7 @@ mod tests {
                     start_failures_remaining: Arc::new(Mutex::new(0)),
                     reconfigure_failures_remaining: Arc::new(Mutex::new(0)),
                     sample_failures_remaining: Arc::new(Mutex::new(0)),
+                    sample_failure_reports_health: false,
                     sample_delay: None,
                     start_delay: None,
                     probe_delay: None,
@@ -2381,6 +2528,11 @@ mod tests {
 
         fn sample_failures(self, count: u32) -> Self {
             *self.sample_failures_remaining.lock().unwrap() = count;
+            self
+        }
+
+        fn sample_failures_reported_in_health(mut self) -> Self {
+            self.sample_failure_reports_health = true;
             self
         }
 
@@ -2580,6 +2732,13 @@ mod tests {
                 should_fail
             };
             if should_fail {
+                if self.sample_failure_reports_health {
+                    self.health.failure_count = self.health.failure_count.saturating_add(1);
+                    self.health.last_error = Some(ProviderErrorSummary {
+                        code: ProviderErrorCode::SampleFailed,
+                        message: Some("deterministic sample failure".to_string()),
+                    });
+                }
                 return Err(ProviderError::new(
                     ProviderErrorCode::SampleFailed,
                     "deterministic sample failure",
@@ -3884,6 +4043,56 @@ mod tests {
     }
 
     #[test]
+    fn provider_reported_failure_is_counted_once() {
+        let (provider, _) = FakeProvider::new(
+            "provider-reported-failure",
+            vec![ProviderCapabilitySpec::supported(MetricCategory::Cpu)],
+            ProviderSchedule::Fixed(10),
+        );
+        let provider = provider
+            .sample_failures(1)
+            .sample_failures_reported_in_health();
+        let mut host = ProviderHost::new(vec![Box::new(provider)]);
+        let now = Instant::now();
+        let settings = settings_with(vec![MetricCategory::Cpu]);
+        host.apply_plan(plan_for(&host, &settings), now);
+
+        assert!(sample_at(&mut host, now, 1).is_empty());
+        let status = &host.statuses()[0];
+        assert_eq!(status.failure_count, 1);
+        assert_eq!(
+            status.last_error.as_ref().unwrap().code,
+            ProviderErrorCode::SampleFailed
+        );
+        let runtime = host.providers.get("provider-reported-failure").unwrap();
+        assert_eq!(runtime.consecutive_failures, 1);
+    }
+
+    #[test]
+    fn host_recorded_failure_without_provider_health_counts_once() {
+        let (provider, _) = FakeProvider::new(
+            "host-recorded-failure",
+            vec![ProviderCapabilitySpec::supported(MetricCategory::Cpu)],
+            ProviderSchedule::Fixed(10),
+        );
+        let provider = provider.sample_failures(1);
+        let mut host = ProviderHost::new(vec![Box::new(provider)]);
+        let now = Instant::now();
+        let settings = settings_with(vec![MetricCategory::Cpu]);
+        host.apply_plan(plan_for(&host, &settings), now);
+
+        assert!(sample_at(&mut host, now, 1).is_empty());
+        let status = &host.statuses()[0];
+        assert_eq!(status.failure_count, 1);
+        assert_eq!(
+            status.last_error.as_ref().unwrap().code,
+            ProviderErrorCode::SampleFailed
+        );
+        let runtime = host.providers.get("host-recorded-failure").unwrap();
+        assert_eq!(runtime.consecutive_failures, 1);
+    }
+
+    #[test]
     fn sample_timeout_isolated_from_healthy_provider() {
         let (slow, slow_counters) = FakeProvider::new(
             "a-slow",
@@ -3914,6 +4123,44 @@ mod tests {
             slow_status.last_error.unwrap().code,
             ProviderErrorCode::Timeout
         );
+    }
+
+    #[test]
+    fn host_timeout_is_counted_once_after_cancelled_completion() {
+        let (provider, _) = FakeProvider::new(
+            "timeout-accounting",
+            vec![ProviderCapabilitySpec::supported(MetricCategory::Cpu)],
+            ProviderSchedule::Fixed(10),
+        );
+        let provider = provider.sample_delay(Duration::from_secs(2));
+        let mut host = ProviderHost::new(vec![Box::new(provider)]);
+        let start = Instant::now();
+        let settings = settings_with(vec![MetricCategory::Cpu]);
+        host.apply_plan(plan_for(&host, &settings), start);
+
+        assert!(sample_at(&mut host, start, 1).is_empty());
+        let after_timeout = host.test_failure_state("timeout-accounting").unwrap();
+        assert_eq!(after_timeout.0, 1);
+        assert_eq!(after_timeout.1, 1);
+
+        let poll_at = start + Duration::from_millis(1);
+        for _ in 0..200 {
+            let _ = sample_at(&mut host, poll_at, 2);
+            if !host
+                .providers
+                .get("timeout-accounting")
+                .unwrap()
+                .executor
+                .pending()
+            {
+                break;
+            }
+            thread::sleep(Duration::from_millis(2));
+        }
+
+        let after_completion = host.test_failure_state("timeout-accounting").unwrap();
+        assert_eq!(after_completion.0, 1);
+        assert_eq!(after_completion.1, 1);
     }
 
     #[test]
