@@ -588,7 +588,10 @@ fn timeline_gaps(
              UNION ALL
              SELECT MAX(?1, ts + duration_ms), ?2
              FROM last_frame
-             WHERE ?2 > ts + duration_ms
+             WHERE ?2 > ts + duration_ms + MAX(
+               ?3,
+               CAST(duration_ms / 20 AS INTEGER)
+             )
            )
            SELECT start_ms, end_ms
            FROM candidates

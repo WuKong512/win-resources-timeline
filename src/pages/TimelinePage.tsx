@@ -15,7 +15,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "../components/ui/Card"
 import { useI18n } from "../i18n";
 import { useUiStore } from "../stores/uiStore";
 import type { AppResourceSample, CapabilityState, CollectionSettings, CollectorStatus, GpuSample, ProviderStatus, SystemSample, TimelineQueryResult } from "../types/resource";
-import { formatBytes, formatClock, localDateString, localDayRange, shiftLocalDate } from "../utils/time";
+import { formatBytes, formatClock, localDateString, timelineWindowRange } from "../utils/time";
 import { aggregateCategoryCapability, gpuDevices, metricDataState, timelineCoverageState, timelineRefreshIntervalMs } from "../utils/uiSemantics";
 
 type WindowPreset = 1 | 7 | 30;
@@ -40,11 +40,12 @@ export function TimelinePage() {
   const timelineRef = useRef<TimelineQueryResult | null>(null);
   const requestIdRef = useRef(0);
 
-  const range = useMemo(() => windowRange(selectedDate, preset), [preset, selectedDate]);
+  const [range, setRange] = useState(() => timelineWindowRange(selectedDate, preset));
   const loadTimeline = useCallback((background = false) => {
     let cancelled = false;
     const requestId = requestIdRef.current + 1;
     requestIdRef.current = requestId;
+    const nextRange = timelineWindowRange(selectedDate, preset, Date.now());
     if (background) {
       setRefreshing(true);
       setRefreshError("");
@@ -56,12 +57,13 @@ export function TimelinePage() {
       setRefreshError("");
     }
     Promise.all([
-      getSystemTimeline(range.startMs, range.endMs, 2_500),
+      getSystemTimeline(nextRange.startMs, nextRange.endMs, 2_500),
       getCollectorStatus(),
       getCollectionSettings()
     ])
       .then(([nextTimeline, nextStatus, nextSettings]) => {
         if (cancelled || requestId !== requestIdRef.current) return;
+        setRange(nextRange);
         timelineRef.current = nextTimeline;
         setTimeline(nextTimeline);
         setStatus(nextStatus);
@@ -79,7 +81,7 @@ export function TimelinePage() {
         else setLoading(false);
       });
     return () => { cancelled = true; };
-  }, [range.endMs, range.startMs, t]);
+  }, [preset, selectedDate, t]);
 
   useEffect(() => {
     let cancelled = false;
@@ -180,12 +182,6 @@ export function TimelinePage() {
       <ProcessEvidencePanel sample={selected} items={processEvidence} loading={processLoading} language={language} />
     </>}
   </div>;
-}
-
-function windowRange(date: string, preset: WindowPreset) {
-  const end = localDayRange(date).endMs;
-  const start = localDayRange(shiftLocalDate(date, -(preset - 1))).startMs;
-  return { startMs: start, endMs: end };
 }
 
 function SignalCard({ icon, label, value, capability, unit }: { icon: React.ReactNode; label: string; value: number | null | undefined; capability: CapabilityState | "incomplete" | undefined; unit: "percent" | "rate" | "coverage" }) {

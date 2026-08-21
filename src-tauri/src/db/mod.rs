@@ -3228,6 +3228,7 @@ mod tests {
             .unwrap();
         assert!(continuous.samples.len() <= 500);
         assert_eq!(continuous.gaps, Vec::<TimelineGap>::new());
+        assert_eq!(continuous.end_ms, continuous_end_ms);
         assert_eq!(
             continuous.observed_ms,
             continuous_end_ms - continuous_start_ms
@@ -3284,6 +3285,41 @@ mod tests {
         );
         assert!(delayed.coverage < 1.0);
 
+        let live_tail_path = test_path("timeline-live-tail-tolerance");
+        cleanup_test_files(&live_tail_path);
+        let live_tail_db = Database::open(live_tail_path.clone()).unwrap();
+        let live_tail_start_ms = 5_000_000_i64;
+        let live_tail_timestamps = vec![live_tail_start_ms, live_tail_start_ms + 5_000];
+        live_tail_db
+            .with_writer(|conn| insert_frames(conn, &live_tail_timestamps))
+            .unwrap();
+        let effective_end_ms = live_tail_start_ms + 10_007;
+        let live_tail = live_tail_db
+            .read(|conn| query::system_timeline(conn, live_tail_start_ms, effective_end_ms, 500))
+            .unwrap();
+        assert_eq!(live_tail.end_ms, effective_end_ms);
+        assert_eq!(live_tail.coverage, 1.0);
+        assert!(live_tail.gaps.is_empty());
+        assert!(live_tail
+            .gaps
+            .iter()
+            .all(|gap| gap.end_ms <= effective_end_ms));
+
+        let stale_end_ms = live_tail_start_ms + 15_000;
+        let stale_live_tail = live_tail_db
+            .read(|conn| query::system_timeline(conn, live_tail_start_ms, stale_end_ms, 500))
+            .unwrap();
+        assert_eq!(stale_live_tail.end_ms, stale_end_ms);
+        assert_eq!(
+            stale_live_tail.gaps,
+            vec![TimelineGap {
+                start_ms: live_tail_start_ms + 10_000,
+                end_ms: stale_end_ms,
+                duration_ms: 5_000,
+            }]
+        );
+        assert!(stale_live_tail.coverage < 1.0);
+
         let clipping_path = test_path("timeline-gap-window-clipping");
         cleanup_test_files(&clipping_path);
         let clipping_db = Database::open(clipping_path.clone()).unwrap();
@@ -3335,6 +3371,8 @@ mod tests {
         cleanup_test_files(&clipping_path);
         drop(delayed_db);
         cleanup_test_files(&delayed_path);
+        drop(live_tail_db);
+        cleanup_test_files(&live_tail_path);
         drop(jitter_db);
         cleanup_test_files(&jitter_path);
         drop(continuous_db);

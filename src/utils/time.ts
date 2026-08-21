@@ -19,6 +19,16 @@ export function localDayRange(date: string): { startMs: number; endMs: number } 
   return { startMs: start.getTime(), endMs: end.getTime() };
 }
 
+export function timelineWindowRange(
+  selectedDate: string,
+  preset: 1 | 7 | 30,
+  nowMs = Date.now()
+): { startMs: number; endMs: number } {
+  const calendarEndMs = localDayRange(selectedDate).endMs;
+  const startMs = localDayRange(shiftLocalDate(selectedDate, -(preset - 1))).startMs;
+  return { startMs, endMs: Math.min(calendarEndMs, nowMs) };
+}
+
 export function clipInterval(
   startMs: number,
   endMs: number,
