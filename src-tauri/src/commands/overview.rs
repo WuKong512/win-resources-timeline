@@ -3,7 +3,7 @@ use crate::{
     error::CommandError,
     models::{
         AppResourceHistoryPoint, AppResourceSample, DailyUsageSummary, GpuSamplePoint, ResourceApp,
-        SystemSample, TodayOverview,
+        SystemSample, TodayOverview, UsageSummary,
     },
     AppState,
 };
@@ -46,6 +46,19 @@ pub fn get_daily_usage_summary(
     state
         .db
         .read(|conn| query::daily_usage_summary(conn, &local_date, include_hidden))
+        .map_err(Into::into)
+}
+
+#[tauri::command]
+pub fn get_usage_summary(
+    state: State<'_, AppState>,
+    start_ms: i64,
+    end_ms: i64,
+    include_hidden: bool,
+) -> Result<UsageSummary, CommandError> {
+    state
+        .db
+        .read(|conn| query::usage_overview(conn, start_ms, end_ms, include_hidden))
         .map_err(Into::into)
 }
 

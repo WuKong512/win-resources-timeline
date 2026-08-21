@@ -1665,10 +1665,22 @@ fn file_size(path: &Path) -> u64 {
     fs::metadata(path).map(|m| m.len()).unwrap_or(0)
 }
 
+pub fn storage_usage(path: &Path) -> crate::models::StorageUsage {
+    let main_bytes = file_size(path);
+    let wal_bytes = file_size(&sidecar(path, "-wal"));
+    let shm_bytes = file_size(&sidecar(path, "-shm"));
+    crate::models::StorageUsage {
+        main_bytes,
+        wal_bytes,
+        shm_bytes,
+        total_bytes: main_bytes
+            .saturating_add(wal_bytes)
+            .saturating_add(shm_bytes),
+    }
+}
+
 pub fn database_size_bytes(path: &Path) -> u64 {
-    file_size(path)
-        .saturating_add(file_size(&sidecar(path, "-wal")))
-        .saturating_add(file_size(&sidecar(path, "-shm")))
+    storage_usage(path).total_bytes
 }
 
 fn required_migration_space(database_bytes: u64, wal_bytes: u64, shm_bytes: u64) -> u64 {

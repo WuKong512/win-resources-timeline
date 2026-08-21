@@ -49,6 +49,40 @@ export interface DailyUsageSummary {
   isHidden: boolean;
 }
 
+export interface ComputerStateInterval {
+  state: "active" | "idle" | "locked" | "sleep" | "disconnected" | "unknown" | string;
+  startTimeMs: number;
+  endTimeMs: number;
+  durationMs: number;
+}
+
+export interface UsageSummary {
+  startMs: number;
+  endMs: number;
+  observedUntilMs: number | null;
+  coverage: number;
+  computerActiveSeconds: number;
+  stateIntervals: ComputerStateInterval[];
+  apps: AppUsageSummary[];
+}
+
+export interface GpuSample {
+  deviceKey: string;
+  vendor: string | null;
+  model: string | null;
+  capacityBytes: number | null;
+  utilizationPercent: number | null;
+  memoryControllerUtilizationPercent: number | null;
+  temperatureCelsius: number | null;
+  powerWatts: number | null;
+  graphicsClockMhz: number | null;
+  memoryClockMhz: number | null;
+  vramUsedBytes: number | null;
+  vramTotalBytes: number | null;
+  powerScope: string | null;
+  qualityMask: number;
+}
+
 export interface SystemSample {
   timestampMs: number;
   sampleDurationMs: number;
@@ -58,6 +92,7 @@ export interface SystemSample {
   memoryTotalBytes: number | null;
   diskReadBytesPerSec: number | null;
   diskWriteBytesPerSec: number | null;
+  gpus: GpuSample[];
   hasAppSnapshot: boolean;
 }
 
@@ -70,6 +105,20 @@ export interface AppResourceSample {
   memoryUsedBytes: number;
   ioReadBytesPerSec: number;
   ioWriteBytesPerSec: number;
+  processIdentityKey: string | null;
+  pid: number | null;
+  processCreationTimeMs: number | null;
+  privateBytes: number | null;
+  cpuTimeDeltaUs: number | null;
+  gpuPercent: number | null;
+  vramBytes: number | null;
+  networkBytesPerSec: number | null;
+  selectionReason: number;
+  qualityMask: number;
+  measuredCpuPercent: number | null;
+  measuredWorkingSetBytes: number | null;
+  measuredReadBytesPerSec: number | null;
+  measuredWriteBytesPerSec: number | null;
 }
 
 export interface ResourceApp {
@@ -155,9 +204,105 @@ export interface CollectorStatus {
   lastForegroundSampleAtMs: number | null;
   lastSystemSampleAtMs: number | null;
   droppedSystemSamples: number;
+  usageWriteFailures: number;
+  usageWriteRetries: number;
+  lastUsageWriteError: string | null;
   databaseSizeBytes: number;
   databasePath: string;
   providerStatus: ProviderStatus[];
+}
+
+export interface StorageUsage {
+  mainBytes: number;
+  walBytes: number;
+  shmBytes: number;
+  totalBytes: number;
+}
+
+export type CrashClassification = "bsod" | "unexpected_shutdown" | "abnormal_restart" | "insufficient_evidence" | string;
+export type CrashEvidenceWindow = "pre_1m" | "pre_5m" | "pre_30m" | "post_5m";
+
+export interface CrashDetectorStatus {
+  state: "idle" | "scanning" | "ready" | "permission_denied" | "failed" | string;
+  lastSuccessfulScanAtMs: number | null;
+  lastError: string | null;
+}
+
+export interface CrashCaseSummary {
+  id: number;
+  stableKey: string;
+  anchorTimeMs: number;
+  classification: CrashClassification;
+  windowStartMs: number;
+  windowEndMs: number;
+  evidenceStatus: "pending" | "post_pending" | "partial" | "complete" | "failed" | string;
+  processingVersion: string;
+  hasActiveHold: boolean;
+  summaryCount: number;
+}
+
+export interface CrashSystemEvent {
+  id: number;
+  channel: string;
+  provider: string | null;
+  eventId: string;
+  recordId: string;
+  eventTimeMs: number;
+  kind: string;
+  bugcheckCode: string | null;
+  bootId: string | null;
+  previousShutdownTimeMs: number | null;
+  cleanShutdown: boolean | null;
+  restartBoundary: boolean | null;
+  dumpAvailable: boolean | null;
+  dumpSizeBytes: number | null;
+}
+
+export interface CrashEvidenceMetric {
+  metricKey: string;
+  metric: string;
+  window: CrashEvidenceWindow;
+  deviceKey: string | null;
+  processIdentityKey: string | null;
+  windowStartMs: number;
+  windowEndMs: number;
+  avg: number | null;
+  min: number | null;
+  max: number | null;
+  delta: number | null;
+  peakTimeMs: number | null;
+  sampleCount: number;
+  coverage: number;
+  evidenceRef: string | null;
+}
+
+export interface CrashEvidenceProcessEntry {
+  window: CrashEvidenceWindow;
+  processIdentityKey: string;
+  appKey: string;
+  processName: string;
+  pid: number | null;
+  processCreationTimeMs: number | null;
+  cpuAvgPercent: number | null;
+  cpuPeakPercent: number | null;
+  cpuDeltaPercent: number | null;
+  memoryPeakBytes: number | null;
+  memoryDeltaBytes: number | null;
+  readBytes: number;
+  writeBytes: number;
+  selectionReasonMask: number;
+  coverage: number;
+  sampleCount: number;
+  cpuRank: number | null;
+  memoryRank: number | null;
+  ioRank: number | null;
+}
+
+export interface CrashEvidenceDetail {
+  case: CrashCaseSummary;
+  events: CrashSystemEvent[];
+  metrics: CrashEvidenceMetric[];
+  processes: CrashEvidenceProcessEntry[];
 }
 
 export interface CollectionSettings {

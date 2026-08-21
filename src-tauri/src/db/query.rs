@@ -5,8 +5,8 @@ use crate::{
     },
     models::{
         AppIdentity, AppResourceHistoryPoint, AppResourceSample, AppUsageSummary,
-        DailyUsageSummary, ForegroundInterval, GpuSample, GpuSamplePoint, ResourceApp,
-        SystemSample, TodayOverview,
+        ComputerStateInterval, DailyUsageSummary, ForegroundInterval, GpuSample, GpuSamplePoint,
+        ResourceApp, SystemSample, TodayOverview, UsageSummary,
     },
 };
 use rusqlite::{params, Connection, OptionalExtension};
@@ -342,6 +342,67 @@ pub fn daily_usage_summary(
         })?
         .collect();
     rows
+}
+
+pub fn usage_overview(
+    conn: &Connection,
+    start_ms: i64,
+    end_ms: i64,
+    include_hidden: bool,
+) -> rusqlite::Result<UsageSummary> {
+    valid_range(start_ms, end_ms)?;
+    let states = load_state_ranges(conn, start_ms, end_ms)?;
+    let state_intervals = states
+        .iter()
+        .map(|state| ComputerStateInterval {
+            state: state.state.clone(),
+            start_time_ms: state.range.start_ms,
+            end_time_ms: state.range.end_ms,
+            duration_ms: state.range.end_ms.saturating_sub(state.range.start_ms),
+        })
+        .collect();
+    let covered_ms = union_duration(&states, start_ms, end_ms);
+    let total_ms = end_ms.saturating_sub(start_ms).max(1);
+    let observed_until_ms =
+        usage_checkpoint(conn)?.map(|checkpoint| checkpoint.clamp(start_ms, end_ms));
+    Ok(UsageSummary {
+        start_ms,
+        end_ms,
+        observed_until_ms,
+        coverage: (covered_ms as f64 / total_ms as f64).clamp(0.0, 1.0),
+        computer_active_seconds: computer_active_duration(&states, start_ms, end_ms) / 1000,
+        state_intervals,
+        apps: usage_summary(conn, start_ms, end_ms, include_hidden)?,
+    })
+}
+
+fn union_duration(states: &[StateRange], start_ms: i64, end_ms: i64) -> i64 {
+    let mut ranges: Vec<_> = states
+        .iter()
+        .filter_map(|state| state.range.clipped(start_ms, end_ms))
+        .map(|range| (range.start_ms, range.end_ms))
+        .filter(|(start, end)| end > start)
+        .collect();
+    ranges.sort_unstable();
+    let mut covered_ms = 0i64;
+    let mut current: Option<(i64, i64)> = None;
+    for (start, end) in ranges {
+        match current {
+            Some((current_start, current_end)) if start <= current_end => {
+                current = Some((current_start, current_end.max(end)));
+            }
+            Some((current_start, current_end)) => {
+                covered_ms = covered_ms.saturating_add(current_end - current_start);
+                current = Some((start, end));
+            }
+            None => current = Some((start, end)),
+        }
+    }
+    if let Some((start, end)) = current {
+        covered_ms.saturating_add(end - start)
+    } else {
+        0
+    }
 }
 
 pub fn system_samples(

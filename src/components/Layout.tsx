@@ -1,17 +1,10 @@
 import { getVersion } from "@tauri-apps/api/app";
-import { Activity, AppWindow, BarChart3, CalendarDays, Database, Monitor, Moon, PanelLeftClose, PanelLeftOpen, Settings, Sun } from "lucide-react";
+import { Activity, Database, Monitor, Moon, PanelLeftClose, PanelLeftOpen, Sun } from "lucide-react";
 import { useEffect, useState } from "react";
 import { useI18n, type TranslationKey } from "../i18n";
+import { mainNavigation } from "../navigation";
 import { useUiStore } from "../stores/uiStore";
 import { Button } from "./ui/Button";
-
-const nav = [
-  { id: "today", label: "navToday", icon: Activity },
-  { id: "timeline", label: "navTimeline", icon: CalendarDays },
-  { id: "resources", label: "navResources", icon: BarChart3 },
-  { id: "apps", label: "navAppResources", icon: AppWindow },
-  { id: "settings", label: "navSettings", icon: Settings }
-] as const;
 
 export function Layout({ children }: { children: React.ReactNode }) {
   const page = useUiStore((state) => state.page);
@@ -42,6 +35,7 @@ export function Layout({ children }: { children: React.ReactNode }) {
   const themeLabel = t(themeMode === "dark" ? "themeDark" : themeMode === "light" ? "themeLight" : "themeSystem");
   return (
     <div className="app-shell flex min-h-screen bg-background">
+      <a className="skip-link" href="#main-content">{t("skipToContent")}</a>
       <aside className={`sticky top-0 flex h-screen shrink-0 flex-col border-r border-border/70 bg-[hsl(var(--sidebar))] p-3 text-[hsl(var(--sidebar-foreground))] transition-[width] duration-200 ease-out ${sidebarCollapsed ? "w-[68px]" : "w-60"}`}>
         <div className={`mb-5 grid h-10 items-center ${sidebarCollapsed ? "grid-cols-1 justify-items-center" : "grid-cols-[36px_minmax(0,1fr)_32px] gap-3 px-1"}`}>
           <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg border border-border bg-[hsl(var(--sidebar-raised))] text-[hsl(var(--sidebar-foreground))] shadow-sm">
@@ -65,7 +59,7 @@ export function Layout({ children }: { children: React.ReactNode }) {
         </div>
         {sidebarCollapsed && <Button type="button" variant="ghost" size="icon" className="mb-3 h-9 w-full text-[hsl(var(--sidebar-muted))] hover:bg-muted hover:text-[hsl(var(--sidebar-foreground))]" onClick={toggleSidebar} aria-label={t("expandNavigation")} title={t("expandNavigation")}><PanelLeftOpen size={16} /></Button>}
         <nav className="space-y-1">
-          {nav.map((item) => {
+          {mainNavigation.map((item) => {
             const Icon = item.icon;
             const active = page === item.id;
             const label = t(item.label as TranslationKey);
@@ -87,12 +81,12 @@ export function Layout({ children }: { children: React.ReactNode }) {
           </div>
           {!sidebarCollapsed && <div className="mt-2 flex items-center gap-2 text-[10px] uppercase text-[hsl(var(--sidebar-muted))]">
             <span className="h-1.5 w-1.5 rounded-full bg-[hsl(var(--success))]" />
-            Local only
+            {t("localOnly")}
           </div>}
           </div>
         </div>
       </aside>
-      <main className="workspace-surface min-w-0 flex-1 overflow-auto p-4 xl:p-5">
+      <main id="main-content" tabIndex={-1} className="workspace-surface min-w-0 flex-1 overflow-auto p-4 outline-none xl:p-5">
         <div className="page-shell">{children}</div>
       </main>
     </div>

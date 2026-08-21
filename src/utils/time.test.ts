@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { clipInterval, formatBytes, formatDuration, localDayRange, timelinePercent } from "./time";
+import { clipInterval, formatBytes, formatDuration, localDayRange, shiftLocalDate, timelinePercent } from "./time";
 
 describe("time and formatting helpers", () => {
   it("creates a local half-open day range", () => {
@@ -18,6 +18,11 @@ describe("time and formatting helpers", () => {
   it("clips intervals to a half-open range", () => {
     expect(clipInterval(500, 2_000, 1_000, 3_000)).toEqual({ startMs: 1_000, endMs: 2_000 });
     expect(clipInterval(0, 1_000, 1_000, 2_000)).toBeNull();
+  });
+
+  it("shifts dates by local calendar days", () => {
+    expect(shiftLocalDate("2026-08-21", -1)).toBe("2026-08-20");
+    expect(shiftLocalDate("2026-08-21", 9)).toBe("2026-08-30");
   });
 
   it("maps timestamps to bounded timeline percentages", () => {

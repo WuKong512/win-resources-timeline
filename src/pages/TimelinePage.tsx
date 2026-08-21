@@ -1,57 +1,290 @@
-import { useEffect, useState } from "react";
-import { getAppUsageTimeline, getCollectionSettings, getTimelineAvailableDates } from "../api/tauriApi";
-import { AppTimeline } from "../components/AppTimeline";
+import { useCallback, useEffect, useMemo, useState } from "react";
+import { Activity, AlertTriangle, CircleHelp, Cpu, Database, HardDrive, MemoryStick, MonitorCog } from "lucide-react";
+import {
+  getAppResourceSamples,
+  getCollectionSettings,
+  getCollectorStatus,
+  getResourceAvailableDates,
+  getSystemSamples
+} from "../api/tauriApi";
 import { DateRangePicker } from "../components/DateRangePicker";
-import { Switch } from "../components/ui/Switch";
+import { ResourceTimelineChart } from "../components/ResourceTimelineChart";
+import { Badge } from "../components/ui/Badge";
+import { Button } from "../components/ui/Button";
+import { Card, CardContent, CardHeader, CardTitle } from "../components/ui/Card";
 import { useI18n } from "../i18n";
 import { useUiStore } from "../stores/uiStore";
-import type { ForegroundInterval } from "../types/resource";
-import { formatDuration, localDateString, localDayRange } from "../utils/time";
+import type { AppResourceSample, CapabilityState, CollectionSettings, CollectorStatus, GpuSample, MetricCategory, ProviderStatus, SystemSample } from "../types/resource";
+import { formatBytes, formatClock, localDateString, localDayRange, shiftLocalDate } from "../utils/time";
+import { gpuDevices, metricDataState } from "../utils/uiSemantics";
+
+type WindowPreset = 1 | 7 | 30;
 
 export function TimelinePage() {
   const { language, t } = useI18n();
-  const selectedDate = useUiStore((s) => s.selectedDate); const setSelectedDate = useUiStore((s) => s.setSelectedDate);
-  const showHidden = useUiStore((s) => s.showHiddenApps); const setShowHidden = useUiStore((s) => s.setShowHiddenApps);
-  const [showIdle, setShowIdle] = useState(true); const [intervals, setIntervals] = useState<ForegroundInterval[]>([]); const [error, setError] = useState(""); const [loading, setLoading] = useState(true);
-  const [availableDates, setAvailableDates] = useState<string[]>([]); const [datesLoading, setDatesLoading] = useState(true);
-  const [idleThresholdSeconds, setIdleThresholdSeconds] = useState(300);
-  useEffect(() => {
-    let cancelled = false; setDatesLoading(true);
-    getTimelineAvailableDates().then((dates) => {
-      if (cancelled) return;
-      setAvailableDates(dates);
-      if (dates.length && !dates.includes(selectedDate)) setSelectedDate(dates[dates.length - 1]);
-    }).catch((e) => setError(String(e))).finally(() => { if (!cancelled) setDatesLoading(false); });
+  const selectedDate = useUiStore((state) => state.selectedDate);
+  const setSelectedDate = useUiStore((state) => state.setSelectedDate);
+  const [preset, setPreset] = useState<WindowPreset>(1);
+  const [availableDates, setAvailableDates] = useState<string[]>([]);
+  const [datesLoading, setDatesLoading] = useState(true);
+  const [samples, setSamples] = useState<SystemSample[]>([]);
+  const [status, setStatus] = useState<CollectorStatus | null>(null);
+  const [settings, setSettings] = useState<CollectionSettings | null>(null);
+  const [selected, setSelected] = useState<SystemSample | null>(null);
+  const [processEvidence, setProcessEvidence] = useState<AppResourceSample[]>([]);
+  const [processLoading, setProcessLoading] = useState(false);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState("");
+
+  const range = useMemo(() => windowRange(selectedDate, preset), [preset, selectedDate]);
+  const loadTimeline = useCallback(() => {
+    let cancelled = false;
+    setLoading(true);
+    setError("");
+    Promise.all([
+      getSystemSamples(range.startMs, range.endMs, 2_500),
+      getCollectorStatus(),
+      getCollectionSettings()
+    ])
+      .then(([nextSamples, nextStatus, nextSettings]) => {
+        if (cancelled) return;
+        setSamples(nextSamples);
+        setStatus(nextStatus);
+        setSettings(nextSettings);
+        setSelected((current) => current && nextSamples.some((sample) => sample.timestampMs === current.timestampMs) ? current : null);
+      })
+      .catch(() => {
+        if (!cancelled) setError(t("timelineErrorMessage"));
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false);
+      });
     return () => { cancelled = true; };
-  }, [selectedDate, setSelectedDate]);
+  }, [range.endMs, range.startMs, t]);
+
   useEffect(() => {
-    let cancelled = false; const range = localDayRange(selectedDate); setLoading(true); setError("");
-    const load = () => getAppUsageTimeline(range.startMs, range.endMs, showHidden, true).then((data) => { if (!cancelled) setIntervals(data); }).catch((e) => { if (!cancelled) setError(String(e)); }).finally(() => { if (!cancelled) setLoading(false); });
-    void load();
-    const timer = selectedDate === localDateString() ? window.setInterval(load, 5_000) : undefined;
-    return () => { cancelled = true; if (timer != null) window.clearInterval(timer); };
-  }, [selectedDate, showHidden]);
-  useEffect(() => { getCollectionSettings().then((settings) => setIdleThresholdSeconds(settings.idleThresholdSeconds)).catch(() => undefined); }, []);
-  const idleIntervals = intervals.filter((interval) => interval.activityState === "idle");
-  const idleSeconds = idleIntervals.reduce((total, interval) => total + interval.durationMs, 0) / 1000;
-  const visibleIntervals = showIdle ? intervals : intervals.filter((interval) => interval.activityState !== "idle");
+    let cancelled = false;
+    setDatesLoading(true);
+    getResourceAvailableDates()
+      .then((dates) => {
+        if (cancelled) return;
+        setAvailableDates(dates);
+        if (dates.length && !dates.includes(selectedDate)) setSelectedDate(dates[dates.length - 1]);
+      })
+      .catch(() => {
+        if (!cancelled) setError(t("timelineErrorMessage"));
+      })
+      .finally(() => {
+        if (!cancelled) setDatesLoading(false);
+      });
+    return () => { cancelled = true; };
+  }, [selectedDate, setSelectedDate, t]);
+
+  useEffect(() => loadTimeline(), [loadTimeline]);
+
+  useEffect(() => {
+    const timer = selectedDate === localDateString() ? window.setInterval(() => loadTimeline(), 5_000) : undefined;
+    return () => { if (timer != null) window.clearInterval(timer); };
+  }, [loadTimeline, selectedDate]);
+
+  useEffect(() => {
+    if (!selected?.hasAppSnapshot) {
+      setProcessEvidence([]);
+      setProcessLoading(false);
+      return;
+    }
+    let cancelled = false;
+    setProcessLoading(true);
+    getAppResourceSamples(selected.timestampMs)
+      .then((items) => { if (!cancelled) setProcessEvidence(items); })
+      .catch(() => { if (!cancelled) setProcessEvidence([]); })
+      .finally(() => { if (!cancelled) setProcessLoading(false); });
+    return () => { cancelled = true; };
+  }, [selected]);
+
+  const latest = selected ?? samples[samples.length - 1] ?? null;
+  const devices = useMemo(() => gpuDevices(samples), [samples]);
+  const coverage = sampleCoverage(samples, range.startMs, range.endMs);
+  const selectedTime = selected ? formatClock(selected.timestampMs, language) : null;
+
   return <div className="space-y-5">
-    <div className="flex flex-wrap items-start justify-between gap-4">
-      <div><h1 className="page-title text-[26px] font-semibold">{t("timelineTitle")}</h1><p className="mt-1 text-sm text-muted-foreground">{t("timelineSubtitle")}</p></div>
-      <DateRangePicker value={selectedDate} onChange={setSelectedDate} availableDates={availableDates} loading={datesLoading} />
-    </div>
-    <div className="surface-shadow flex flex-wrap items-center gap-5 rounded-lg border border-border/80 bg-card px-4 py-3 text-sm">
-      <label className="flex items-center gap-2.5" title={idleIntervals.length ? t("idleRecorded", { duration: formatDuration(idleSeconds, language) }) : t("noIdleForDate", { threshold: formatDuration(idleThresholdSeconds, language) })}>
-        <Switch checked={showIdle} onCheckedChange={setShowIdle} ariaLabel={t("showIdle")} />
-        <span>{t("showIdle")}</span>
-        <span className="rounded-full border border-border bg-muted/70 px-2 py-0.5 text-[11px] tabular-nums text-muted-foreground">{formatDuration(idleSeconds, language)}</span>
-      </label>
-      <span className="hidden h-5 w-px bg-border sm:block" />
-      <label className="flex items-center gap-2.5">
-        <Switch checked={showHidden} onCheckedChange={setShowHidden} ariaLabel={t("showHidden")} />
-        <span>{t("showHidden")}</span>
-      </label>
-    </div>
-    {error ? <div className="error-surface rounded-lg border p-4 text-sm">{error}</div> : loading ? <div className="surface-shadow rounded-lg border border-border bg-card px-5 py-10 text-sm text-muted-foreground">{t("loadingTimeline")}</div> : <AppTimeline intervals={visibleIntervals} date={selectedDate} />}
+    <header className="flex flex-wrap items-end justify-between gap-4">
+      <div>
+        <div className="eyebrow">{t("timelineWindow")}</div>
+        <h1 className="page-title mt-1 text-[28px] font-semibold tracking-[-0.02em]">{t("timelinePageTitle")}</h1>
+        <p className="mt-1 max-w-2xl text-sm text-muted-foreground">{t("timelinePageSubtitle")}</p>
+      </div>
+      <div className="flex flex-wrap items-center gap-2">
+        <div className="segmented-control" aria-label={t("timelineWindow")}>
+          {([1, 7, 30] as WindowPreset[]).map((days) => <button key={days} type="button" className={preset === days ? "segmented-control-active" : "segmented-control-item"} onClick={() => setPreset(days)}>{t(days === 1 ? "rangeDay" : days === 7 ? "range7Days" : "range30Days")}</button>)}
+        </div>
+        <DateRangePicker value={selectedDate} onChange={setSelectedDate} availableDates={availableDates} loading={datesLoading} />
+      </div>
+    </header>
+
+    {error ? <InlineError message={error} onRetry={loadTimeline} title={t("timelineErrorTitle")} /> : loading ? <TimelineLoading /> : <>
+      <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+        <SignalCard icon={<Cpu size={16} />} label={t("metricCpu")} value={latest?.cpuPercent} capability={categoryCapability(status, settings, "cpu")} unit="percent" />
+        <SignalCard icon={<MemoryStick size={16} />} label={t("metricMemory")} value={latest?.memoryPercent} capability={categoryCapability(status, settings, "memory")} unit="percent" />
+        <SignalCard icon={<HardDrive size={16} />} label={t("metricDiskRead")} value={latest?.diskReadBytesPerSec} capability={categoryCapability(status, settings, "disk")} unit="rate" />
+        <SignalCard icon={<Database size={16} />} label={t("timelineCoverage")} value={coverage} capability={coverage < 0.99 ? "degraded" : "supportedEnabled"} unit="coverage" />
+      </div>
+
+      <Card className="overflow-hidden">
+        <CardHeader className="border-b border-border/70 bg-card/90">
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <div>
+              <CardTitle>{t("systemSample")}</CardTitle>
+              <p className="mt-1 text-xs font-normal text-muted-foreground">{selectedTime ? t("selectedTimestamp", { time: selectedTime }) : t("clickTimelineHint")}</p>
+            </div>
+            <div className="flex items-center gap-2 text-xs text-muted-foreground"><Activity size={14} className="text-[hsl(var(--signal-cyan))]" />{t("observedCoverage", { percent: Math.round(coverage * 100) })}</div>
+          </div>
+        </CardHeader>
+        <CardContent className="pt-4">
+          {samples.length ? <ResourceTimelineChart samples={samples} selectedTimestampMs={selected?.timestampMs ?? null} onSampleSelect={setSelected} ariaLabel={t("timelinePageTitle")} /> : <EmptyState title={t("timelineEmpty")} hint={t("timelineEmptyHint")} />}
+          <div className="mt-2 flex flex-wrap items-center gap-x-5 gap-y-2 border-t border-border/70 pt-3 text-[11px] text-muted-foreground">
+            <span className="font-medium text-foreground">{t("timelineLegend")}</span><span>— {t("legendZero")}</span><span>╱ {t("legendMissing")}</span><span>□ {t("legendDisabled")}</span><span>! {t("legendFailed")}</span>
+          </div>
+        </CardContent>
+      </Card>
+
+      <div className="grid gap-3 xl:grid-cols-[minmax(0,1.25fr)_minmax(320px,0.75fr)]">
+        <GpuPanel devices={devices} samples={samples} sample={latest} status={status} settings={settings} language={language} />
+        <CollectionStatusPanel providers={status?.providerStatus ?? []} />
+      </div>
+
+      <ProcessEvidencePanel sample={selected} items={processEvidence} loading={processLoading} language={language} />
+    </>}
   </div>;
+}
+
+function windowRange(date: string, preset: WindowPreset) {
+  const end = localDayRange(date).endMs;
+  const start = localDayRange(shiftLocalDate(date, -(preset - 1))).startMs;
+  return { startMs: start, endMs: end };
+}
+
+function sampleCoverage(samples: SystemSample[], rangeStartMs: number, rangeEndMs: number) {
+  if (!samples.length || rangeEndMs <= rangeStartMs) return 0;
+  let coveredMs = 0;
+  let currentStart = 0;
+  let currentEnd = 0;
+  for (const sample of samples) {
+    const start = Math.max(rangeStartMs, sample.timestampMs);
+    const end = Math.min(rangeEndMs, sample.timestampMs + Math.max(0, sample.sampleDurationMs));
+    if (end <= start) continue;
+    if (currentEnd <= currentStart) {
+      currentStart = start;
+      currentEnd = end;
+    } else if (start <= currentEnd) {
+      currentEnd = Math.max(currentEnd, end);
+    } else {
+      coveredMs += currentEnd - currentStart;
+      currentStart = start;
+      currentEnd = end;
+    }
+  }
+  if (currentEnd > currentStart) coveredMs += currentEnd - currentStart;
+  return Math.min(1, coveredMs / (rangeEndMs - rangeStartMs));
+}
+
+function categoryCapability(status: CollectorStatus | null, settings: CollectionSettings | null, category: MetricCategory): CapabilityState | undefined {
+  const capabilities = status?.providerStatus.flatMap((provider) => provider.capabilities.filter((item) => item.category === category)) ?? [];
+  if (capabilities.some((item) => item.state === "failed")) return "failed";
+  if (capabilities.some((item) => item.state === "unsupported")) return "unsupported";
+  if (capabilities.some((item) => item.state === "supportedDisabled")) return "supportedDisabled";
+  if (capabilities.some((item) => item.state === "supportedEnabled")) return "supportedEnabled";
+  if (settings && !settings.enabledCategories.includes(category)) return "supportedDisabled";
+  return undefined;
+}
+
+function SignalCard({ icon, label, value, capability, unit }: { icon: React.ReactNode; label: string; value: number | null | undefined; capability: CapabilityState | "degraded" | undefined; unit: "percent" | "rate" | "coverage" }) {
+  const { language, t } = useI18n();
+  const state = unit === "coverage" ? capability === "degraded" ? "failed" : "value" : metricDataState(value, capability as CapabilityState | undefined);
+  const formatted = state === "disabled" ? t("disabledByUser")
+    : state === "unsupported" ? t("stateUnsupported")
+      : state === "failed" ? t("stateFailed")
+        : state === "missing" ? t("missingData")
+          : value == null ? t("missingData")
+            : unit === "coverage" ? `${Math.round(value * 100)}%`
+              : unit === "percent" ? `${value.toFixed(1)}%${state === "zero" ? ` · ${t("realZero")}` : ""}`
+                : `${formatBytes(value, language)}${state === "zero" ? ` · ${t("measuredZero")}` : ""}/s`;
+  return <Card className="relative overflow-hidden"><div className={`absolute inset-x-0 top-0 h-0.5 ${state === "failed" ? "bg-[hsl(var(--danger))]" : state === "disabled" || state === "unsupported" ? "bg-[hsl(var(--muted-foreground)/0.35)]" : "bg-[hsl(var(--signal-cyan))]"}`} /><CardContent className="pt-4"><div className="flex items-center justify-between gap-3"><span className="text-xs font-medium text-muted-foreground">{label}</span><span className="flex h-7 w-7 items-center justify-center rounded-lg bg-muted text-[hsl(var(--signal-cyan))]">{icon}</span></div><div className="metric-value mt-3 truncate text-[21px] font-semibold">{formatted}</div></CardContent></Card>;
+}
+
+function GpuPanel({ devices, samples, sample, status, settings, language }: { devices: GpuSample[]; samples: SystemSample[]; sample: SystemSample | null; status: CollectorStatus | null; settings: CollectionSettings | null; language: "en" | "zh-CN" }) {
+  const { t } = useI18n();
+  const capability = categoryCapability(status, settings, "gpu");
+  return <Card className="overflow-hidden"><CardHeader className="border-b border-border/70"><div className="flex items-center justify-between gap-3"><CardTitle>{t("gpuDevices")}</CardTitle><CapabilityBadge state={capability} /></div></CardHeader><CardContent className="pt-4">{!devices.length ? <div className="flex items-start gap-3 rounded-lg border border-dashed border-border px-4 py-5 text-sm text-muted-foreground"><CircleHelp size={17} className="mt-0.5 shrink-0" /><span>{capability === "supportedDisabled" ? t("disabledByUser") : capability === "unsupported" ? t("stateUnsupported") : capability === "failed" ? t("stateFailed") : t("noGpuDevices")}</span></div> : <div className="grid gap-3 md:grid-cols-2">{devices.map((device) => {
+    const current = sample?.gpus.find((item) => item.deviceKey === device.deviceKey);
+    const deviceSamples = samples.flatMap((item) => item.gpus.filter((gpu) => gpu.deviceKey === device.deviceKey));
+    const hasMetric = (read: (gpu: GpuSample) => number | null) => deviceSamples.some((gpu) => read(gpu) != null);
+    return <div key={device.deviceKey} className="rounded-lg border border-border/80 bg-muted/20 p-3"><div className="flex items-start justify-between gap-3"><div className="min-w-0"><div className="truncate text-sm font-semibold" title={device.deviceKey}>{[device.vendor, device.model].filter(Boolean).join(" ") || device.deviceKey}</div><div className="mt-1 truncate font-mono text-[10px] text-muted-foreground">{device.deviceKey}</div></div><Badge className="shrink-0 border-border bg-card text-muted-foreground">{current ? formatClock(sample?.timestampMs ?? 0, language) : t("gpuNoSamples")}</Badge></div><div className="mt-3 grid grid-cols-2 gap-x-4 gap-y-3 text-xs">{hasMetric((gpu) => gpu.utilizationPercent) && <GpuMetric label={t("metricGpuUsage")} value={current?.utilizationPercent ?? null} unit="percent" />}{hasMetric((gpu) => gpu.temperatureCelsius) && <GpuMetric label={t("metricGpuTemp")} value={current?.temperatureCelsius ?? null} unit="temperature" />}{hasMetric((gpu) => gpu.powerWatts) && <GpuMetric label={t("metricGpuPower")} value={current?.powerWatts ?? null} unit="power" />}{hasMetric((gpu) => gpu.vramUsedBytes) && <GpuMetric label={t("metricGpuVram")} value={current?.vramUsedBytes ?? null} unit="bytes" language={language} />}</div></div>;
+  })}</div>}</CardContent></Card>;
+}
+
+function GpuMetric({ label, value, unit, language }: { label: string; value: number | null; unit: "percent" | "temperature" | "power" | "bytes"; language?: "en" | "zh-CN" }) {
+  const { t } = useI18n();
+  const state = metricDataState(value, undefined);
+  const formatted = value == null ? t("missingData") : unit === "percent" ? `${value.toFixed(1)}%${state === "zero" ? ` · ${t("realZero")}` : ""}` : unit === "temperature" ? `${value.toFixed(1)} °C` : unit === "power" ? `${value.toFixed(1)} W` : formatBytes(value, language);
+  return <div><div className="text-[11px] text-muted-foreground">{label}</div><div className={`mt-1 font-mono text-xs font-medium ${state === "missing" ? "text-muted-foreground" : "text-foreground"}`}>{formatted}</div></div>;
+}
+
+function CollectionStatusPanel({ providers }: { providers: ProviderStatus[] }) {
+  const { t, language } = useI18n();
+  return <Card className="overflow-hidden"><CardHeader className="border-b border-border/70"><CardTitle>{t("resourceStatus")}</CardTitle><p className="text-xs font-normal text-muted-foreground">{t("resourceStatusDescription")}</p></CardHeader><CardContent className="pt-4">{providers.length ? <div className="space-y-3">{providers.map((provider) => <div key={provider.providerId} className="rounded-lg border border-border/80 bg-muted/15 p-3"><div className="flex items-start justify-between gap-3"><div><div className="text-sm font-semibold">{provider.displayName}</div><div className="mt-1 font-mono text-[10px] text-muted-foreground">{provider.providerId}</div></div><CapabilityBadge lifecycle={provider.lifecycle} supported={provider.supported} /></div><div className="mt-3 flex flex-wrap gap-1.5">{provider.capabilities.map((capability) => <span key={`${provider.providerId}-${capability.category}`} className="rounded-full border border-border bg-card px-2 py-1 text-[10px] text-muted-foreground">{capability.category} · {capabilityLabel(capability.state, t)}</span>)}</div>{provider.lastError && <div className="mt-3 flex items-start gap-2 text-xs text-[hsl(var(--danger))]"><AlertTriangle size={13} className="mt-0.5 shrink-0" /><span>{provider.lastError.message ?? provider.lastError.code}{provider.failureCount ? ` · ${t("failureCount", { count: provider.failureCount })}` : ""}</span></div>}{provider.lastSuccessAtMs && <div className="mt-3 text-[10px] text-muted-foreground">{t("lastSuccess")}: {new Date(provider.lastSuccessAtMs).toLocaleString(language)}</div>}</div>)}</div> : <div className="rounded-lg border border-dashed border-border px-4 py-5 text-sm text-muted-foreground">{t("notReported")}</div>}</CardContent></Card>;
+}
+
+function ProcessEvidencePanel({ sample, items, loading, language }: { sample: SystemSample | null; items: AppResourceSample[]; loading: boolean; language: "en" | "zh-CN" }) {
+  const { t } = useI18n();
+  return <Card className="overflow-hidden"><CardHeader className="border-b border-border/70"><div className="flex flex-wrap items-center justify-between gap-3"><div><CardTitle>{t("processEvidence")}</CardTitle><p className="mt-1 text-xs font-normal text-muted-foreground">{t("processEvidenceScope")}</p></div><Badge className="border-border bg-card text-muted-foreground">{sample ? t("selectedTimestamp", { time: formatClock(sample.timestampMs, language) }) : t("noTimeSelected")}</Badge></div></CardHeader><CardContent className="px-0 pb-0">{!sample ? <div className="px-5 py-8 text-sm text-muted-foreground">{t("selectTime")}</div> : !sample.hasAppSnapshot ? <div className="flex items-start gap-3 px-5 py-8 text-sm text-muted-foreground"><CircleHelp size={17} className="mt-0.5 shrink-0" />{t("processCaptureUnavailable")}</div> : loading ? <div className="px-5 py-8 text-sm text-muted-foreground">{t("loadingProcessEvidence")}</div> : !items.length ? <div className="px-5 py-8 text-sm text-muted-foreground">{t("noProcessEvidence")}</div> : <div className="overflow-x-auto"><table className="w-full border-collapse text-sm"><caption className="sr-only">{t("processEvidence")}</caption><thead><tr><th scope="col" className="table-head pl-5">{t("processIdentity")}</th><th scope="col" className="table-head text-right">{t("metricCpu")}</th><th scope="col" className="table-head text-right">{t("metricMemory")}</th><th scope="col" className="table-head text-right">{t("metricDiskRead")}</th><th scope="col" className="table-head pr-5 text-right">{t("selectionReason")}</th></tr></thead><tbody>{items.map((item) => <tr key={`${item.processIdentityKey ?? item.appKey}-${item.pid ?? "none"}`} className="border-b border-border/60 last:border-b-0"><td className="table-cell pl-5"><div className="font-medium">{item.processName}</div><div className="mt-1 font-mono text-[10px] text-muted-foreground">{item.pid == null ? item.appKey : `PID ${item.pid}`}</div></td><td className="table-cell text-right font-mono">{nullableValue(item.measuredCpuPercent, "%", t)}</td><td className="table-cell text-right font-mono">{nullableBytes(item.measuredWorkingSetBytes, language, t)}</td><td className="table-cell text-right font-mono">{nullableRate(item.measuredReadBytesPerSec, language, t)}</td><td className="table-cell pr-5 text-right font-mono text-xs text-muted-foreground">0x{item.selectionReason.toString(16)}</td></tr>)}</tbody></table></div>}</CardContent></Card>;
+}
+
+function nullableValue(value: number | null, suffix: string, t: ReturnType<typeof useI18n>["t"]) {
+  return value == null ? t("missingData") : `${value.toFixed(1)}${suffix}`;
+}
+
+function nullableBytes(value: number | null, language: "en" | "zh-CN", t: ReturnType<typeof useI18n>["t"]) {
+  return value == null ? t("missingData") : formatBytes(value, language);
+}
+
+function nullableRate(value: number | null, language: "en" | "zh-CN", t: ReturnType<typeof useI18n>["t"]) {
+  return value == null ? t("missingData") : `${formatBytes(value, language)}/s`;
+}
+
+function CapabilityBadge({ state, lifecycle, supported }: { state?: CapabilityState | "degraded"; lifecycle?: ProviderStatus["lifecycle"]; supported?: boolean }) {
+  const { t } = useI18n();
+  const label = state ? capabilityLabel(state, t) : lifecycle ? lifecycleLabel(lifecycle, t) : supported === false ? t("stateUnsupported") : t("stateEnabled");
+  const failed = state === "failed" || lifecycle === "failed";
+  const muted = state === "unsupported" || state === "supportedDisabled" || supported === false || lifecycle === "stopped";
+  return <Badge className={failed ? "border-[hsl(var(--danger)/0.35)] bg-[hsl(var(--danger-surface))] text-[hsl(var(--danger))]" : muted ? "border-border bg-muted text-muted-foreground" : "border-[hsl(var(--success)/0.3)] bg-[hsl(var(--success-surface))] text-[hsl(var(--success))]"}>{label}</Badge>;
+}
+
+function capabilityLabel(state: CapabilityState | "degraded", t: ReturnType<typeof useI18n>["t"]) {
+  if (state === "supportedDisabled") return t("disabledByUser");
+  if (state === "unsupported") return t("stateUnsupported");
+  if (state === "failed") return t("stateFailed");
+  if (state === "degraded") return t("stateDegraded");
+  return t("stateEnabled");
+}
+
+function lifecycleLabel(state: ProviderStatus["lifecycle"], t: ReturnType<typeof useI18n>["t"]) {
+  if (state === "running") return t("providerRunning");
+  if (state === "paused") return t("providerPaused");
+  if (state === "failed") return t("providerFailed");
+  return t("providerStopped");
+}
+
+function InlineError({ title, message, onRetry }: { title: string; message: string; onRetry: () => void }) {
+  const { t } = useI18n();
+  return <div role="alert" className="error-surface flex flex-wrap items-center justify-between gap-3 rounded-lg border px-4 py-3 text-sm"><div><div className="font-semibold">{title}</div><div className="mt-1 break-all text-xs opacity-80">{message}</div></div><Button variant="outline" onClick={onRetry}>{t("retry")}</Button></div>;
+}
+
+function EmptyState({ title, hint }: { title: string; hint: string }) {
+  return <div className="empty-state"><MonitorCog size={22} className="text-muted-foreground" /><div className="font-semibold text-foreground">{title}</div><div className="max-w-md text-sm text-muted-foreground">{hint}</div></div>;
+}
+
+function TimelineLoading() {
+  const { t } = useI18n();
+  return <div className="space-y-3" aria-busy="true" aria-label={t("timelineLoading")}><div className="skeleton-line h-24 rounded-lg" /><div className="skeleton-line h-[430px] rounded-lg" /><div className="grid gap-3 md:grid-cols-2"><div className="skeleton-line h-52 rounded-lg" /><div className="skeleton-line h-52 rounded-lg" /></div></div>;
 }

@@ -7,6 +7,11 @@ export function localDateString(date = new Date()): string {
   return `${year}-${month}-${day}`;
 }
 
+export function shiftLocalDate(date: string, deltaDays: number): string {
+  const [year, month, day] = date.split("-").map(Number);
+  return localDateString(new Date(year, month - 1, day + deltaDays, 12));
+}
+
 export function localDayRange(date: string): { startMs: number; endMs: number } {
   const [year, month, day] = date.split("-").map(Number);
   const start = new Date(year, month - 1, day);

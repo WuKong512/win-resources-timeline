@@ -95,6 +95,10 @@ impl Database {
     pub fn size_bytes(&self) -> u64 {
         schema::database_size_bytes(&self.path)
     }
+
+    pub fn storage_usage(&self) -> crate::models::StorageUsage {
+        schema::storage_usage(&self.path)
+    }
 }
 
 fn now_ms() -> i64 {
