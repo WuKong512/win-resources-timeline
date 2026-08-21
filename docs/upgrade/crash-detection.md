@@ -34,6 +34,12 @@
 
 `crash_case.processing_version` 与每个 summary 的版本固化统计口径。处理逻辑升级可从受保护证据重新生成摘要，原子替换并记录时间；任何版本都不得引入诊断结论。
 
+当前 PR-05 实现使用 native Windows Event Log API（Rust `windows` bindings），扫描在 collector/database 启动后独立线程异步执行；permission denied/API failure 只将 crash detector 标记为 `permission_denied`/`failed`，不阻塞 FrameWriter、Provider 或 Usage Tracker。事件默认只保留归一化字段和小型 payload facts，不保存 Event XML。
+
+证据窗口固定为 `pre_1m`、`pre_5m`、`pre_30m`、`post_5m`。由于 v8 的唯一约束是 `(crash_case_id, metric_key)`，summary key 使用稳定的 `window:<window>:metric:<metric>` 前缀，GPU 追加 `:device:<stable_key>`，进程追加 `:process:<process_instance_key>`；DTO 仍单独暴露 window、metric、device/process identity。coverage 按实际可用 frame duration 计算，跨大间隔不填充；delta 定义为窗口内最后一个有效值减第一个有效值。
+
+Crash evidence contains objective observations and statistics only; it does not infer root cause, severity, probability, blame, or remediation.
+
 ## 测试策略
 
 - 单元测试：事件组合分类、窗口裁剪、去重、统计值、排序和 coverage。
@@ -47,3 +53,5 @@
 - 发现案例后，保留任务无法删除其证据窗。
 - 没有系统事件读取权限时，应用仍正常运行并给出可操作状态。
 - 每个摘要可追溯到指标、时间范围或系统事件，且不包含原因判断、建议或严重度。
+
+PR-06 负责 UI 呈现和 user-facing retention settings；dump analysis、root-cause analysis、severity scoring 和 recommendation engine 不是本产品的 crash evidence 目标。

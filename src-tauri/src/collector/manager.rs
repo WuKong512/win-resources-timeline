@@ -1,11 +1,12 @@
 use super::{
     interval_engine::{IntervalAction, IntervalEngine, UsageEvent},
     nvidia_nvml::NvidiaNvmlProvider,
+    process_selector::foreground_process_key,
     provider::{CollectionPlan, ProviderHost, ProviderSample, WindowsBaselineProvider},
     system_metrics::now_ms,
 };
 use crate::{
-    db::{writer, Database},
+    db::{rollup, writer, Database},
     models::{
         CollectionSessionMetricMetadata, CollectionSettings, CollectorStatus, ComputerState,
         ForegroundApp, ResourceSnapshot, SystemSample,
@@ -58,6 +59,7 @@ const DAILY_ROLLUP_MIN_INTERVAL: Duration = Duration::from_secs(60);
 const PLATFORM_PENDING_CAPACITY: usize = 128;
 const CONTROL_PENDING_CAPACITY: usize = 32;
 const PLATFORM_RETRY_BACKOFF: Duration = Duration::from_millis(50);
+const PROCESS_ROLLUP_INTERVAL: Duration = Duration::from_secs(5);
 
 #[derive(Debug, Default)]
 struct DailyRollupScheduler {
@@ -509,6 +511,7 @@ fn run_collector(
     let mut last_heartbeat = Instant::now() - USAGE_HEARTBEAT_INTERVAL;
     let mut last_observation_ms = None;
     let mut last_system_flush = Instant::now();
+    let mut last_process_rollup = Instant::now() - PROCESS_ROLLUP_INTERVAL;
     let mut frame_writer = writer::FrameWriter::new(64, 5);
     let mut last_prune = Instant::now() - Duration::from_secs(86_400);
     let mut shutdown_completion: Option<ShutdownCompletion> = None;
@@ -841,12 +844,23 @@ fn run_collector(
                     .map(|_| ())
                     .map_err(|error| format!("final frame flush failed: {error}"));
                 sync_writer_status(&status, &frame_writer.health());
-                let shutdown_kind =
-                    if action_result.is_ok() && rollup_result.is_ok() && flush_result.is_ok() {
-                        "clean"
-                    } else {
-                        "unknown"
-                    };
+                let process_rollup_result = if flush_result.is_ok() {
+                    with_writer_deadline(&db, Some(deadline), |conn| {
+                        rollup::run_process_rollups(conn, shutdown_at, 32).map(|_| ())
+                    })
+                    .map_err(|error| format!("final process rollup failed: {error}"))
+                } else {
+                    Ok(())
+                };
+                let shutdown_kind = if action_result.is_ok()
+                    && rollup_result.is_ok()
+                    && flush_result.is_ok()
+                    && process_rollup_result.is_ok()
+                {
+                    "clean"
+                } else {
+                    "unknown"
+                };
                 let session_result = if Instant::now() >= deadline {
                     Err("shutdown deadline expired before final collection session close".into())
                 } else {
@@ -862,6 +876,7 @@ fn run_collector(
                     action_result.err(),
                     rollup_result.err(),
                     flush_result.err(),
+                    process_rollup_result.err(),
                     session_result.err(),
                 ]
                 .into_iter()
@@ -967,6 +982,14 @@ fn run_collector(
                 sync_writer_status(&status, &frame_writer.health());
                 if let Err(error) = result {
                     eprintln!("collector frame flush failed: {error}");
+                }
+            }
+            if last_process_rollup.elapsed() >= PROCESS_ROLLUP_INTERVAL {
+                last_process_rollup = Instant::now();
+                if let Err(error) =
+                    db.with_writer(|conn| rollup::run_process_rollups(conn, now, 16))
+                {
+                    eprintln!("collector process rollup maintenance failed: {error}");
                 }
             }
         }
@@ -1294,6 +1317,10 @@ fn resolve_app_with_deadline(
     tracked_app_keys.insert(app.identity_key.clone());
     if let Some(path) = app.exe_path.as_deref() {
         tracked_app_keys.insert(format!("path:{}", normalize_path(path)));
+    }
+    if let (Some(pid), Some(create_time_ms)) = (app.pid, app.process_creation_time_ms) {
+        tracked_app_keys.retain(|key| !key.starts_with("foreground:"));
+        tracked_app_keys.insert(foreground_process_key(pid, create_time_ms));
     }
     with_writer_deadline(db, deadline, |conn| {
         writer::resolve_foreground_app(conn, app, now)

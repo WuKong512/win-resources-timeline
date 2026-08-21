@@ -344,6 +344,23 @@ pub struct AppResourceSample {
     pub memory_used_bytes: i64,
     pub io_read_bytes_per_sec: i64,
     pub io_write_bytes_per_sec: i64,
+    /// Raw process identity. Logical-app aggregation remains a query/rollup concern.
+    pub process_identity_key: Option<String>,
+    pub pid: Option<u32>,
+    pub process_creation_time_ms: Option<i64>,
+    pub private_bytes: Option<i64>,
+    pub cpu_time_delta_us: Option<i64>,
+    pub gpu_percent: Option<f64>,
+    pub vram_bytes: Option<i64>,
+    pub network_bytes_per_sec: Option<i64>,
+    pub selection_reason: i64,
+    pub quality_mask: i64,
+    /// These preserve SQL NULL semantics for raw process metrics while the legacy numeric fields
+    /// keep the existing resource-page DTO compatible until PR-06 replaces it.
+    pub measured_cpu_percent: Option<f64>,
+    pub measured_working_set_bytes: Option<i64>,
+    pub measured_read_bytes_per_sec: Option<i64>,
+    pub measured_write_bytes_per_sec: Option<i64>,
 }
 
 #[derive(Debug, Clone, Serialize)]

@@ -71,6 +71,8 @@ erDiagram
 
 类别关闭或能力探测不到设备时不生成对应类别行。单项关闭时列为 NULL，且 `collection_session_metric.enabled = false`；读取失败同样为 NULL，但 quality/status 指明失败。`selection_reason` 为位掩码：CPU Top-N、memory Top-N、I/O Top-N、foreground、watched、anomaly，可同时命中。
 
+PR-05 的生产 selector 固定使用每个维度 Top-N=5；前三个位来自 raw process instance 排名，foreground 位来自当前可解析 PID+creation-time。watched/anomaly 位只保留协议空间，不在本 PR 创建设置或检测逻辑。`process_instance.stable_key` 同时包含 PID、creation time 和 executable identity（可用时），因此 PID reuse 不会复用旧实例身份。
+
 多 GPU/磁盘/网卡按 device_id 独立保存。GPU 利用率不相加；磁盘和物理网络总量由查询层派生，网络汇总默认排除 loopback 和重复虚拟接口。未探测到电池时不创建 battery row。
 
 ## PR-04A v8 GPU contract
@@ -121,6 +123,8 @@ v7 已有的 `gpu_sample` 表能够承载部分 GPU 指标，但不能无损表�
 | `crash_evidence_summary` | 指标、统计窗口、avg/min/max/delta、峰值时间、Top-N、coverage 和证据引用 |
 
 `system_event` 对 `(channel, record_id)` 建唯一约束，启动扫描必须幂等。`crash_case` 也需要稳定去重键，重复启动不重复建案。schema 不保存 cause、recommendation、severity ranking 或自然语言诊断字段。
+
+PR-05 使用现有 schema v8，不新增 migration。进程 rollup processing version 为 `process-rollup-v1`，crash evidence processing version 为 `crash-evidence-v1`。summary 的 window/metric/device/process 维度写入稳定 `metric_key` namespace 并在 `evidence_ref` 中保留紧凑来源元数据；不保存原始 Event XML、命令行、窗口/文档标题或浏览器 URL。
 
 ## 空间统计与删除
 

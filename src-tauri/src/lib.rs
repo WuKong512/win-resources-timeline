@@ -1,12 +1,14 @@
 mod app_lifecycle;
 mod collector;
 mod commands;
+mod crash;
 mod db;
 mod error;
 mod models;
 mod platform;
 
 use collector::manager::CollectorManager;
+use crash::CrashDetectorHandle;
 #[cfg(not(debug_assertions))]
 use db::writer;
 use db::Database;
@@ -22,6 +24,7 @@ use tauri_plugin_autostart::ManagerExt;
 pub struct AppState {
     pub db: Arc<Database>,
     pub collector: CollectorManager,
+    pub crash_detector: CrashDetectorHandle,
     _instance_guard: platform::InstanceGuard,
 }
 
@@ -55,9 +58,11 @@ pub fn run() {
                 let _ = platform::refresh_autostart_command();
             }
             let collector = CollectorManager::start(db.clone(), app.handle().clone());
+            let crash_detector = CrashDetectorHandle::start(db.clone());
             app.manage(AppState {
                 db,
                 collector,
+                crash_detector,
                 _instance_guard: instance_guard,
             });
             app_lifecycle::install_tray(app.handle(), exiting.clone())?;
@@ -71,6 +76,11 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            commands::crash::get_crash_detector_status,
+            commands::crash::list_crash_cases,
+            commands::crash::get_crash_case_detail,
+            commands::crash::rebuild_crash_case,
+            commands::crash::release_crash_case_hold,
             commands::overview::get_today_overview,
             commands::overview::get_daily_usage_summary,
             commands::overview::get_overview_available_dates,

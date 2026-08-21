@@ -534,7 +534,9 @@ pub fn app_resource_samples(
     let mut stmt = conn.prepare(
         r#"SELECT a.stable_key, a.process_name,
                   CASE WHEN e.normalized_path LIKE 'path:%' THEN substr(e.normalized_path, 6) END,
-                  p.process_count, p.cpu_pct, p.working_set_bytes, p.read_bps, p.write_bps
+                  p.process_count, p.cpu_pct, p.working_set_bytes, p.read_bps, p.write_bps,
+                  i.stable_key, i.pid, i.create_time_ms, p.private_bytes, p.cpu_time_delta_us,
+                  p.gpu_pct, p.vram_bytes, p.network_bps, p.selection_reason, p.quality_mask
            FROM process_sample p
            JOIN sample_frame f ON f.id = p.frame_id
            JOIN process_instance i ON i.id = p.process_instance_id
@@ -544,15 +546,36 @@ pub fn app_resource_samples(
            ORDER BY p.cpu_pct DESC, p.working_set_bytes DESC"#,
     )?;
     let rows = stmt.query_map([timestamp_ms], |r| {
+        let cpu_percent: Option<f64> = r.get(4)?;
+        let working_set_bytes: Option<i64> = r.get(5)?;
+        let read_bytes_per_sec: Option<i64> = r.get(6)?;
+        let write_bytes_per_sec: Option<i64> = r.get(7)?;
+        let pid = r
+            .get::<_, Option<i64>>(9)?
+            .and_then(|value| u32::try_from(value).ok());
         Ok(AppResourceSample {
             app_key: r.get(0)?,
             process_name: r.get(1)?,
             exe_path: r.get(2)?,
             process_count: r.get(3)?,
-            cpu_percent: r.get(4)?,
-            memory_used_bytes: r.get(5)?,
-            io_read_bytes_per_sec: r.get(6)?,
-            io_write_bytes_per_sec: r.get(7)?,
+            cpu_percent: cpu_percent.unwrap_or(0.0),
+            memory_used_bytes: working_set_bytes.unwrap_or(0),
+            io_read_bytes_per_sec: read_bytes_per_sec.unwrap_or(0),
+            io_write_bytes_per_sec: write_bytes_per_sec.unwrap_or(0),
+            process_identity_key: r.get(8)?,
+            pid,
+            process_creation_time_ms: r.get(10)?,
+            private_bytes: r.get(11)?,
+            cpu_time_delta_us: r.get(12)?,
+            gpu_percent: r.get(13)?,
+            vram_bytes: r.get(14)?,
+            network_bytes_per_sec: r.get(15)?,
+            selection_reason: r.get(16)?,
+            quality_mask: r.get(17)?,
+            measured_cpu_percent: cpu_percent,
+            measured_working_set_bytes: working_set_bytes,
+            measured_read_bytes_per_sec: read_bytes_per_sec,
+            measured_write_bytes_per_sec: write_bytes_per_sec,
         })
     })?;
     rows.collect()
