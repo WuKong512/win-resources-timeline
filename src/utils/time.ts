@@ -7,6 +7,14 @@ export function localDateString(date = new Date()): string {
   return `${year}-${month}-${day}`;
 }
 
+export function effectiveTimelineDate(
+  selectedDate: string,
+  followsCurrentDate: boolean,
+  nowMs = Date.now()
+): string {
+  return followsCurrentDate ? localDateString(new Date(nowMs)) : selectedDate;
+}
+
 export function shiftLocalDate(date: string, deltaDays: number): string {
   const [year, month, day] = date.split("-").map(Number);
   return localDateString(new Date(year, month - 1, day + deltaDays, 12));
@@ -17,6 +25,11 @@ export function localDayRange(date: string): { startMs: number; endMs: number } 
   const start = new Date(year, month - 1, day);
   const end = new Date(year, month - 1, day + 1);
   return { startMs: start.getTime(), endMs: end.getTime() };
+}
+
+export function millisecondsUntilLocalMidnight(nowMs = Date.now()): number {
+  const today = localDateString(new Date(nowMs));
+  return Math.max(1, localDayRange(today).endMs - nowMs);
 }
 
 export function timelineWindowRange(

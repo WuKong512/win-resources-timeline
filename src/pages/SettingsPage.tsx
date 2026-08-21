@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Database, Languages, Pause, Play, Save, Search, ShieldCheck, Trash2 } from "lucide-react";
 import {
   clearCollectedData,
@@ -48,16 +48,29 @@ export function SettingsPage() {
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
   const [error, setError] = useState("");
+  const mountedRef = useRef(false);
+  const refreshRequestRef = useRef(0);
+  const savedTimerRef = useRef<number | null>(null);
 
   const refresh = useCallback(async () => {
-    const [nextSettings, nextStatus, nextStorage, nextAutostart, nextApps, nextCases] = await Promise.all([
-      getCollectionSettings(),
-      getCollectorStatus(),
-      getStorageUsage(),
-      getAutostartEnabled(),
-      listApps(),
-      listCrashCases()
-    ]);
+    const requestId = refreshRequestRef.current + 1;
+    refreshRequestRef.current = requestId;
+    let result: [CollectionSettings, CollectorStatus, StorageUsage, boolean, AppIdentity[], Awaited<ReturnType<typeof listCrashCases>>];
+    try {
+      result = await Promise.all([
+        getCollectionSettings(),
+        getCollectorStatus(),
+        getStorageUsage(),
+        getAutostartEnabled(),
+        listApps(),
+        listCrashCases()
+      ]);
+    } catch (error) {
+      if (!mountedRef.current || requestId !== refreshRequestRef.current) return;
+      throw error;
+    }
+    if (!mountedRef.current || requestId !== refreshRequestRef.current) return;
+    const [nextSettings, nextStatus, nextStorage, nextAutostart, nextApps, nextCases] = result;
     setSettings(nextSettings);
     setStatus(nextStatus);
     setProviders(nextStatus.providerStatus);
@@ -69,12 +82,30 @@ export function SettingsPage() {
 
   useEffect(() => {
     let cancelled = false;
+    mountedRef.current = true;
     setLoading(true);
     refresh().catch(() => { if (!cancelled) setError(t("settingsErrorMessage")); }).finally(() => { if (!cancelled) setLoading(false); });
     const interval = window.setInterval(() => {
-      Promise.all([getCollectorStatus(), getStorageUsage()]).then(([nextStatus, nextStorage]) => { if (!cancelled) { setStatus(nextStatus); setProviders(nextStatus.providerStatus); setStorage(nextStorage); } }).catch(() => undefined);
+      const requestId = refreshRequestRef.current + 1;
+      refreshRequestRef.current = requestId;
+      Promise.all([getCollectorStatus(), getStorageUsage()]).then(([nextStatus, nextStorage]) => {
+        if (!cancelled && mountedRef.current && requestId === refreshRequestRef.current) {
+          setStatus(nextStatus);
+          setProviders(nextStatus.providerStatus);
+          setStorage(nextStorage);
+        }
+      }).catch(() => undefined);
     }, 5_000);
-    return () => { cancelled = true; window.clearInterval(interval); };
+    return () => {
+      cancelled = true;
+      mountedRef.current = false;
+      refreshRequestRef.current += 1;
+      window.clearInterval(interval);
+      if (savedTimerRef.current != null) {
+        window.clearTimeout(savedTimerRef.current);
+        savedTimerRef.current = null;
+      }
+    };
   }, [refresh]);
 
   const filteredApps = useMemo(() => apps.filter((app) => `${app.displayName} ${app.processName} ${app.exePath ?? ""}`.toLowerCase().includes(search.toLowerCase())), [apps, search]);
@@ -88,7 +119,11 @@ export function SettingsPage() {
       await setCollectionSettings(settings);
       await refresh();
       setSaved(true);
-      window.setTimeout(() => setSaved(false), 2_500);
+      if (savedTimerRef.current != null) window.clearTimeout(savedTimerRef.current);
+      savedTimerRef.current = window.setTimeout(() => {
+        savedTimerRef.current = null;
+        setSaved(false);
+      }, 2_500);
     } catch {
       setError(t("settingsActionError"));
     } finally {

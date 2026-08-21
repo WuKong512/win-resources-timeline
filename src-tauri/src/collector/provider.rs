@@ -4013,6 +4013,46 @@ mod tests {
     }
 
     #[test]
+    fn repeated_pause_resume_keeps_one_provider_and_one_sample_per_cycle() {
+        let (provider, counters) = FakeProvider::new(
+            "repeated-pause-resume",
+            vec![ProviderCapabilitySpec::supported(MetricCategory::Cpu)],
+            ProviderSchedule::Fixed(10),
+        );
+        let mut host = ProviderHost::new(vec![Box::new(provider)]);
+        let settings = settings_with(vec![MetricCategory::Cpu]);
+        host.apply_plan(plan_for(&host, &settings), Instant::now());
+
+        const CYCLES: u32 = 32;
+        for cycle in 0..CYCLES {
+            host.pause().unwrap();
+            assert_eq!(host.statuses()[0].lifecycle, ProviderLifecycleState::Paused);
+            assert!(sample_at(&mut host, Instant::now(), i64::from(cycle)).is_empty());
+
+            host.resume(Instant::now());
+            assert_eq!(
+                host.statuses()[0].lifecycle,
+                ProviderLifecycleState::Running
+            );
+            assert_eq!(
+                sample_at(&mut host, Instant::now(), i64::from(cycle) + 1).len(),
+                1
+            );
+        }
+
+        let counts = *counters.lock().unwrap();
+        assert_eq!(counts.start_count, CYCLES + 1);
+        assert_eq!(counts.stop_count, CYCLES);
+        assert_eq!(counts.sample_count, CYCLES);
+
+        host.stop_all(Instant::now() + Duration::from_secs(2))
+            .unwrap();
+        host.stop_all(Instant::now() + Duration::from_secs(2))
+            .unwrap();
+        assert_eq!(counters.lock().unwrap().stop_count, CYCLES + 1);
+    }
+
+    #[test]
     fn sample_failure_does_not_stop_healthy_provider_and_can_recover() {
         let (healthy, healthy_counters) = FakeProvider::new(
             "healthy",

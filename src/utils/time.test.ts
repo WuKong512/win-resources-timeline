@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { clipInterval, formatBytes, formatDuration, localDayRange, shiftLocalDate, timelinePercent, timelineWindowRange } from "./time";
+import { clipInterval, effectiveTimelineDate, formatBytes, formatDuration, localDayRange, millisecondsUntilLocalMidnight, shiftLocalDate, timelinePercent, timelineWindowRange } from "./time";
 
 describe("time and formatting helpers", () => {
   it("creates a local half-open day range", () => {
@@ -69,5 +69,37 @@ describe("time and formatting helpers", () => {
     const nowMs = localDayRange(selectedDate).startMs + 12 * 60 * 60 * 1_000;
     const range = timelineWindowRange(selectedDate, 1, nowMs);
     expect(range.endMs).toBeLessThanOrEqual(nowMs);
+  });
+
+  it("rolls a live timeline date across local midnight", () => {
+    const before = new Date(2026, 7, 21, 23, 59, 59).getTime();
+    const after = new Date(2026, 7, 22, 0, 0, 1).getTime();
+    expect(effectiveTimelineDate("2026-08-21", true, before)).toBe("2026-08-21");
+    expect(effectiveTimelineDate("2026-08-21", true, after)).toBe("2026-08-22");
+    expect(timelineWindowRange(effectiveTimelineDate("2026-08-21", true, after), 1, after)).toEqual({
+      startMs: localDayRange("2026-08-22").startMs,
+      endMs: after
+    });
+  });
+
+  it("advances current seven-day and thirty-day windows by local calendar days", () => {
+    const after = new Date(2026, 7, 22, 0, 0, 1).getTime();
+    const currentDate = effectiveTimelineDate("2026-08-21", true, after);
+    expect(timelineWindowRange(currentDate, 7, after).startMs)
+      .toBe(localDayRange(shiftLocalDate("2026-08-22", -6)).startMs);
+    expect(timelineWindowRange(currentDate, 30, after).startMs)
+      .toBe(localDayRange(shiftLocalDate("2026-08-22", -29)).startMs);
+  });
+
+  it("keeps a deliberate historical selection fixed across current midnight", () => {
+    const after = new Date(2026, 7, 22, 0, 0, 1).getTime();
+    expect(effectiveTimelineDate("2026-08-20", false, after)).toBe("2026-08-20");
+    expect(timelineWindowRange("2026-08-20", 1, after)).toEqual(localDayRange("2026-08-20"));
+  });
+
+  it("uses local calendar boundaries for the rollover timer", () => {
+    const before = new Date(2026, 7, 21, 23, 59, 59).getTime();
+    expect(millisecondsUntilLocalMidnight(before)).toBe(localDayRange("2026-08-21").endMs - before);
+    expect(shiftLocalDate("2024-02-29", 1)).toBe("2024-03-01");
   });
 });
