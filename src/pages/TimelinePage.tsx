@@ -15,7 +15,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "../components/ui/Card"
 import { useI18n } from "../i18n";
 import { useUiStore } from "../stores/uiStore";
 import type { AppResourceSample, CapabilityState, CollectionSettings, CollectorStatus, GpuSample, ProviderStatus, SystemSample, TimelineQueryResult } from "../types/resource";
-import { formatBytes, formatClock, localDateString, timelineWindowRange } from "../utils/time";
+import { effectiveTimelineDate, formatBytes, formatClock, localDateString, millisecondsUntilLocalMidnight, timelineWindowRange } from "../utils/time";
 import { aggregateCategoryCapability, gpuDevices, metricDataState, timelineCoverageState, timelineRefreshIntervalMs } from "../utils/uiSemantics";
 
 type WindowPreset = 1 | 7 | 30;
@@ -39,13 +39,35 @@ export function TimelinePage() {
   const [refreshError, setRefreshError] = useState("");
   const timelineRef = useRef<TimelineQueryResult | null>(null);
   const requestIdRef = useRef(0);
+  const mountedRef = useRef(false);
+  // Deliberate historical selections stay fixed; only a view selected as today follows local midnight.
+  const [followsCurrentDate, setFollowsCurrentDate] = useState(() => selectedDate === localDateString());
 
-  const [range, setRange] = useState(() => timelineWindowRange(selectedDate, preset));
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+      requestIdRef.current += 1;
+    };
+  }, []);
+
+  const handleDateChange = useCallback((date: string) => {
+    setFollowsCurrentDate(date === localDateString());
+    setSelectedDate(date);
+  }, [setSelectedDate]);
+
+  const [range, setRange] = useState(() => timelineWindowRange(
+    effectiveTimelineDate(selectedDate, selectedDate === localDateString()),
+    preset
+  ));
   const loadTimeline = useCallback((background = false) => {
     let cancelled = false;
     const requestId = requestIdRef.current + 1;
     requestIdRef.current = requestId;
-    const nextRange = timelineWindowRange(selectedDate, preset, Date.now());
+    const nowMs = Date.now();
+    const nextDate = effectiveTimelineDate(selectedDate, followsCurrentDate, nowMs);
+    const nextRange = timelineWindowRange(nextDate, preset, nowMs);
+    if (nextDate !== selectedDate) setSelectedDate(nextDate);
     if (background) {
       setRefreshing(true);
       setRefreshError("");
@@ -62,7 +84,7 @@ export function TimelinePage() {
       getCollectionSettings()
     ])
       .then(([nextTimeline, nextStatus, nextSettings]) => {
-        if (cancelled || requestId !== requestIdRef.current) return;
+        if (!mountedRef.current || cancelled || requestId !== requestIdRef.current) return;
         setRange(nextRange);
         timelineRef.current = nextTimeline;
         setTimeline(nextTimeline);
@@ -71,17 +93,17 @@ export function TimelinePage() {
         setSelected((current) => current && nextTimeline.samples.some((sample) => sample.timestampMs === current.timestampMs) ? current : null);
       })
       .catch(() => {
-        if (cancelled || requestId !== requestIdRef.current) return;
+        if (!mountedRef.current || cancelled || requestId !== requestIdRef.current) return;
         if (background && timelineRef.current) setRefreshError(t("timelineRefreshFailed"));
         else setError(t("timelineErrorMessage"));
       })
       .finally(() => {
-        if (cancelled || requestId !== requestIdRef.current) return;
+        if (!mountedRef.current || cancelled || requestId !== requestIdRef.current) return;
         if (background) setRefreshing(false);
         else setLoading(false);
       });
     return () => { cancelled = true; };
-  }, [preset, selectedDate, t]);
+  }, [followsCurrentDate, preset, selectedDate, setSelectedDate, t]);
 
   useEffect(() => {
     let cancelled = false;
@@ -90,7 +112,7 @@ export function TimelinePage() {
       .then((dates) => {
         if (cancelled) return;
         setAvailableDates(dates);
-        if (dates.length && !dates.includes(selectedDate)) setSelectedDate(dates[dates.length - 1]);
+        if (dates.length && !dates.includes(selectedDate) && !followsCurrentDate) setSelectedDate(dates[dates.length - 1]);
       })
       .catch(() => {
         if (!cancelled) setError(t("timelineErrorMessage"));
@@ -99,17 +121,41 @@ export function TimelinePage() {
         if (!cancelled) setDatesLoading(false);
       });
     return () => { cancelled = true; };
-  }, [selectedDate, setSelectedDate, t]);
+  }, [followsCurrentDate, selectedDate, setSelectedDate, t]);
 
   useEffect(() => loadTimeline(), [loadTimeline]);
 
   useEffect(() => {
-    const refreshIntervalMs = timelineRefreshIntervalMs(preset, selectedDate === localDateString());
+    if (!followsCurrentDate) return;
+    const currentDate = localDateString();
+    if (selectedDate !== currentDate) {
+      setSelectedDate(currentDate);
+      return;
+    }
+    const rolloverTimer = window.setTimeout(() => {
+      const nextDate = localDateString();
+      if (nextDate !== selectedDate) setSelectedDate(nextDate);
+    }, millisecondsUntilLocalMidnight());
+    return () => window.clearTimeout(rolloverTimer);
+  }, [followsCurrentDate, selectedDate, setSelectedDate]);
+
+  useEffect(() => {
+    const refreshIntervalMs = timelineRefreshIntervalMs(preset, followsCurrentDate);
     const timer = refreshIntervalMs != null
-      ? window.setInterval(() => loadTimeline(true), refreshIntervalMs)
+      ? window.setInterval(() => {
+        const nextDate = effectiveTimelineDate(selectedDate, followsCurrentDate);
+        if (nextDate !== selectedDate) {
+          setSelectedDate(nextDate);
+          return;
+        }
+        loadTimeline(true);
+      }, refreshIntervalMs)
       : undefined;
-    return () => { if (timer != null) window.clearInterval(timer); };
-  }, [loadTimeline, preset, selectedDate]);
+    return () => {
+      if (timer != null) window.clearInterval(timer);
+      requestIdRef.current += 1;
+    };
+  }, [followsCurrentDate, loadTimeline, preset, selectedDate, setSelectedDate]);
 
   useEffect(() => {
     if (!selected?.hasAppSnapshot) {
@@ -143,7 +189,7 @@ export function TimelinePage() {
         <div className="segmented-control" aria-label={t("timelineWindow")}>
           {([1, 7, 30] as WindowPreset[]).map((days) => <button key={days} type="button" className={preset === days ? "segmented-control-active" : "segmented-control-item"} onClick={() => setPreset(days)}>{t(days === 1 ? "rangeDay" : days === 7 ? "range7Days" : "range30Days")}</button>)}
         </div>
-        <DateRangePicker value={selectedDate} onChange={setSelectedDate} availableDates={availableDates} loading={datesLoading} />
+        <DateRangePicker value={selectedDate} onChange={handleDateChange} availableDates={availableDates} loading={datesLoading} />
       </div>
     </header>
 
