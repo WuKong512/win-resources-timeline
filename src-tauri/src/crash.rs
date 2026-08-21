@@ -18,6 +18,14 @@ const EVENT_CURSOR_KEY: &str = "crash_event_cursor_v1";
 const EVENT_CURSOR_LOOKBACK_MS: i64 = 5 * 60 * 1_000;
 const CRASH_REBOOT_MATCH_MS: i64 = 30 * 60 * 1_000;
 const CRASH_INCIDENT_CORRELATION_MS: i64 = 30 * 60 * 1_000;
+// 6008 positional timestamps are second-granular on some Windows builds; this is physical-time
+// precision tolerance, deliberately far smaller than the broad context search window above.
+const CRASH_PHYSICAL_ANCHOR_TOLERANCE_MS: i64 = 5_000;
+// The system sampler normally publishes a frame every five seconds. Keep partial post-window
+// cases retryable for three such cadences so a frame that races the first finalization is still
+// observed, while old historical partial cases settle permanently.
+const CRASH_POST_FINALIZATION_STABILIZATION_MS: i64 = 3 * CRASH_DETECTOR_POLL_MS as i64;
+const CRASH_MAX_EVENT_ANCHOR_DELAY_MS: i64 = 24 * 60 * 60 * 1_000;
 const CRASH_DETECTOR_POLL_MS: u64 = 5_000;
 const CRASH_SCAN_YIELD_PAGES: usize = 64;
 
@@ -218,6 +226,9 @@ fn classify_event_signal(
         return SystemEventKind::BugCheck;
     }
     if provider.contains("kernel-power") && event_id == "41" {
+        if has_nonzero_bugcheck_code(payload) {
+            return SystemEventKind::BugCheck;
+        }
         return if payload.clean_shutdown == Some(true) {
             SystemEventKind::NormalShutdown
         } else {
@@ -455,19 +466,8 @@ fn classify_events_with_context(
             continue;
         }
         let classification = if boundary.kind == SystemEventKind::BugCheck
-            || ordered.iter().any(|event| {
-                event.kind == SystemEventKind::BugCheck
-                    && (within_time(
-                        event.event_time_ms,
-                        boundary.event_time_ms,
-                        CRASH_INCIDENT_CORRELATION_MS,
-                    ) || event
-                        .payload
-                        .previous_shutdown_time_ms
-                        .is_some_and(|value| {
-                            within_time(value, anchor_time_ms, CRASH_INCIDENT_CORRELATION_MS)
-                        }))
-            }) {
+            || has_nonzero_bugcheck_code(&boundary.payload)
+        {
             CrashClassification::Bsod
         } else if boundary.kind == SystemEventKind::UnexpectedShutdown {
             CrashClassification::UnexpectedShutdown
@@ -483,7 +483,7 @@ fn classify_events_with_context(
             within_time(
                 existing.anchor_time_ms,
                 candidate.anchor_time_ms,
-                CRASH_INCIDENT_CORRELATION_MS,
+                CRASH_PHYSICAL_ANCHOR_TOLERANCE_MS,
             )
         }) {
             let existing = &candidates[index];
@@ -508,22 +508,126 @@ fn incident_anchor_for_boundary(
         .iter()
         .filter_map(|event| event.payload.previous_shutdown_time_ms)
         .filter(|anchor| {
+            *anchor <= boundary.event_time_ms
+                && boundary.event_time_ms.saturating_sub(*anchor) <= CRASH_MAX_EVENT_ANCHOR_DELAY_MS
+        })
+        .collect::<Vec<_>>();
+    if let Some(anchor) = boundary.payload.previous_shutdown_time_ms.filter(|anchor| {
+        *anchor <= boundary.event_time_ms
+            && boundary.event_time_ms.saturating_sub(*anchor) <= CRASH_MAX_EVENT_ANCHOR_DELAY_MS
+    }) {
+        return Some(anchor);
+    }
+
+    // A later WER record often has no physical timestamp of its own. Associate it with the
+    // reboot boundary that starts/ends the same episode, but never reuse an older anchor whose
+    // first boot already belongs to an earlier episode.
+    if let Some(boot) = episode_boot_for_boundary(ordered, boundary) {
+        if let Some(anchor) = explicit
+            .iter()
+            .copied()
+            .filter(|anchor| {
+                first_boot_after_anchor(ordered, *anchor)
+                    .is_some_and(|candidate| same_event_identity(candidate, boot))
+            })
+            .min_by_key(|anchor| time_distance(*anchor, boundary.event_time_ms))
+        {
+            return Some(anchor);
+        }
+        if let Some(anchor) = fallback_anchor_time_ms.filter(|anchor| {
             within_time(
                 *anchor,
                 boundary.event_time_ms,
                 CRASH_INCIDENT_CORRELATION_MS,
             )
+        }) {
+            return Some(anchor);
+        }
+        // The boot marker is an objective, bounded fallback when 6008 is unparseable and the
+        // collector has not yet persisted a session boundary. It prevents two reboot episodes
+        // from being merged merely because they share a broad search window.
+        return Some(boot.event_time_ms);
+    }
+
+    explicit
+        .into_iter()
+        .min_by_key(|anchor| time_distance(*anchor, boundary.event_time_ms))
+        .or_else(|| {
+            fallback_anchor_time_ms.filter(|anchor| {
+                within_time(
+                    *anchor,
+                    boundary.event_time_ms,
+                    CRASH_INCIDENT_CORRELATION_MS,
+                )
+            })
         })
-        .min_by_key(|anchor| time_distance(*anchor, boundary.event_time_ms));
-    explicit.or_else(|| {
-        fallback_anchor_time_ms.filter(|anchor| {
-            within_time(
-                *anchor,
-                boundary.event_time_ms,
-                CRASH_INCIDENT_CORRELATION_MS,
-            )
+}
+
+fn episode_boot_for_boundary<'a>(
+    ordered: &'a [NormalizedSystemEvent],
+    boundary: &NormalizedSystemEvent,
+) -> Option<&'a NormalizedSystemEvent> {
+    let past = ordered
+        .iter()
+        .filter(|event| {
+            event.kind == SystemEventKind::NormalBoot
+                && event.event_time_ms <= boundary.event_time_ms
         })
+        .max_by_key(|event| (event.event_time_ms, event.record_id.as_str()));
+    let future = ordered
+        .iter()
+        .filter(|event| {
+            event.kind == SystemEventKind::NormalBoot
+                && event.event_time_ms > boundary.event_time_ms
+                && within_time(
+                    event.event_time_ms,
+                    boundary.event_time_ms,
+                    CRASH_REBOOT_MATCH_MS,
+                )
+        })
+        .min_by_key(|event| (event.event_time_ms, event.record_id.as_str()));
+    [past, future].into_iter().flatten().min_by_key(|event| {
+        (
+            time_distance(event.event_time_ms, boundary.event_time_ms),
+            event.record_id.as_str(),
+        )
     })
+}
+
+fn first_boot_after_anchor(
+    ordered: &[NormalizedSystemEvent],
+    anchor_time_ms: i64,
+) -> Option<&NormalizedSystemEvent> {
+    ordered
+        .iter()
+        .filter(|event| {
+            event.kind == SystemEventKind::NormalBoot
+                && event.event_time_ms >= anchor_time_ms
+                && within_time(event.event_time_ms, anchor_time_ms, CRASH_REBOOT_MATCH_MS)
+        })
+        .min_by_key(|event| {
+            (
+                time_distance(event.event_time_ms, anchor_time_ms),
+                event.record_id.as_str(),
+            )
+        })
+}
+
+fn same_event_identity(left: &NormalizedSystemEvent, right: &NormalizedSystemEvent) -> bool {
+    left.event_time_ms == right.event_time_ms && left.record_id == right.record_id
+}
+
+fn has_nonzero_bugcheck_code(payload: &EventPayloadFacts) -> bool {
+    let Some(value) = payload.bugcheck_code.as_deref() else {
+        return false;
+    };
+    let value = value.trim();
+    let parsed = value
+        .strip_prefix("0x")
+        .or_else(|| value.strip_prefix("0X"))
+        .map(|value| u64::from_str_radix(value, 16))
+        .unwrap_or_else(|| value.parse::<u64>());
+    parsed.is_ok_and(|value| value != 0)
 }
 
 fn classification_rank(classification: CrashClassification) -> u8 {
@@ -704,11 +808,20 @@ fn rebuild_due_cases(db: &Database, as_of_ms: i64) -> rusqlite::Result<usize> {
         let mut statement = conn.prepare(
             "SELECT id FROM crash_case
              WHERE window_end_ms <= ?1
-               AND evidence_status IN ('pending', 'post_pending')
+               AND (
+                    evidence_status IN ('pending', 'post_pending')
+                    OR (
+                        evidence_status = 'partial'
+                        AND ?1 <= window_end_ms + ?2
+                    )
+               )
              ORDER BY window_end_ms, id",
         )?;
         let ids = statement
-            .query_map([as_of_ms], |row| row.get::<_, i64>(0))?
+            .query_map(
+                params![as_of_ms, CRASH_POST_FINALIZATION_STABILIZATION_MS],
+                |row| row.get::<_, i64>(0),
+            )?
             .collect::<rusqlite::Result<Vec<_>>>();
         ids
     })?;
@@ -858,7 +971,16 @@ fn load_events_in_range(
 ) -> rusqlite::Result<Vec<NormalizedSystemEvent>> {
     let mut statement = conn.prepare(
         "SELECT channel, provider, event_id, record_id, event_time_ms, payload_summary
-         FROM system_event WHERE event_time_ms >= ?1 AND event_time_ms <= ?2
+         FROM system_event
+         WHERE event_time_ms >= ?1 AND event_time_ms <= ?2
+           AND (
+                event_id IN ('41', '6008', '1001', '6005', '6006')
+                OR LOWER(payload_summary) LIKE '%bugcheck%'
+                OR LOWER(payload_summary) LIKE '%unexpected_shutdown%'
+                OR LOWER(payload_summary) LIKE '%abnormal_restart%'
+                OR LOWER(payload_summary) LIKE '%normal_boot%'
+                OR LOWER(payload_summary) LIKE '%normal_shutdown%'
+           )
          ORDER BY event_time_ms, record_id
          LIMIT ?3",
     )?;
@@ -917,10 +1039,15 @@ fn create_case_and_hold_tx(
         .query_row(
             "SELECT id, stable_key, anchor_time_ms, classification
              FROM crash_case
-             WHERE ABS(anchor_time_ms - ?1) <= ?2
-             ORDER BY ABS(anchor_time_ms - ?1), id
+             WHERE stable_key = ?1 OR ABS(anchor_time_ms - ?2) <= ?3
+             ORDER BY CASE WHEN stable_key = ?1 THEN 0 ELSE 1 END,
+                      ABS(anchor_time_ms - ?2), id
              LIMIT 1",
-            params![candidate.anchor_time_ms, CRASH_INCIDENT_CORRELATION_MS],
+            params![
+                stable_crash_key(candidate),
+                candidate.anchor_time_ms,
+                CRASH_PHYSICAL_ANCHOR_TOLERANCE_MS,
+            ],
             |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
         )
         .optional()?;
@@ -1990,6 +2117,7 @@ fn load_case_events(
          FROM system_event
          WHERE (event_time_ms >= ?1 AND event_time_ms <= ?2)
             OR ABS(event_time_ms - ?3) <= ?4
+            OR payload_summary LIKE '%\"previous_shutdown_time_ms\":' || CAST(?3 AS TEXT) || '%'
          ORDER BY event_time_ms, id",
     )?;
     let rows = statement.query_map(
@@ -2392,41 +2520,39 @@ unsafe fn render_event_payload_facts(
         return EventPayloadFacts::default();
     }
     let xml = String::from_utf16_lossy(&buffer);
-    let provider = provider.to_ascii_lowercase();
-    let bugcheck_code = if provider.contains("systemerrorreporting") && event_id == "1001" {
-        extract_named_event_data(&xml, "BugcheckCode")
-            .or_else(|| extract_named_event_data(&xml, "BugCheckCode"))
-    } else {
-        None
-    };
-    let previous_shutdown_time_ms = if (provider == "eventlog" && event_id == "6008")
-        || (provider.contains("kernel-power") && event_id == "41")
-    {
-        [
+    let mut facts = parse_event_payload_facts_from_xml(&xml, provider, event_id);
+    if provider.trim().eq_ignore_ascii_case("EventLog") && event_id.trim() == "6008" {
+        let fields = extract_event_data_fields(&xml);
+        let named_numeric = [
             "PreviousShutdownTime",
             "PreviousShutdownTimeUtc",
             "PreviousTime",
             "LastShutdownTime",
         ]
         .iter()
-        .find_map(|name| extract_named_event_data(&xml, name))
-        .and_then(|value| parse_event_time_value(&value))
-    } else {
-        None
-    };
-    let clean_shutdown = ["CleanShutdown", "cleanShutdown"]
-        .iter()
-        .find_map(|name| extract_named_event_data(&xml, name))
-        .and_then(|value| parse_bool_value(&value));
-    EventPayloadFacts {
-        bugcheck_code,
-        previous_shutdown_time_ms,
-        clean_shutdown,
-        ..EventPayloadFacts::default()
+        .any(|name| {
+            fields
+                .iter()
+                .find(|field| {
+                    field
+                        .name
+                        .as_deref()
+                        .is_some_and(|field_name| field_name.eq_ignore_ascii_case(name))
+                })
+                .and_then(|field| parse_event_time_value(&field.value))
+                .is_some()
+        });
+        if !named_numeric {
+            if let Some((date, time)) = parse_6008_positional_date_time(&fields) {
+                if let Some(timestamp_ms) = local_6008_datetime_to_unix_ms(date, time) {
+                    facts.previous_shutdown_time_ms = Some(timestamp_ms);
+                }
+            }
+        }
     }
+    facts
 }
 
-#[cfg(windows)]
 fn parse_bool_value(value: &str) -> Option<bool> {
     match value.trim().to_ascii_lowercase().as_str() {
         "true" | "1" | "yes" => Some(true),
@@ -2435,7 +2561,6 @@ fn parse_bool_value(value: &str) -> Option<bool> {
     }
 }
 
-#[cfg(windows)]
 fn parse_event_time_value(value: &str) -> Option<i64> {
     let value = value.trim();
     let numeric = value.parse::<u64>().ok()?;
@@ -2451,13 +2576,329 @@ fn parse_event_time_value(value: &str) -> Option<i64> {
     None
 }
 
-#[cfg(windows)]
-fn extract_named_event_data(xml: &str, name: &str) -> Option<String> {
-    let marker = format!("Name=\"{name}\">");
-    let start = xml.find(&marker)?.saturating_add(marker.len());
-    let end = xml.get(start..)?.find("</Data>")?.saturating_add(start);
-    let value = xml.get(start..end)?.trim();
-    (!value.is_empty() && !value.contains('<')).then(|| value.to_string())
+#[derive(Debug, Clone)]
+struct EventDataField {
+    name: Option<String>,
+    value: String,
+}
+
+/// Extract only the small, named/positional EventData values needed for crash classification.
+/// The raw XML is intentionally never persisted.
+fn parse_event_payload_facts_from_xml(
+    xml: &str,
+    provider: &str,
+    event_id: &str,
+) -> EventPayloadFacts {
+    let fields = extract_event_data_fields(xml);
+    let provider_lower = provider.trim().to_ascii_lowercase();
+    let is_wer_1001 = provider_lower.contains("systemerrorreporting") && event_id == "1001";
+    let is_kernel_power_41 = provider_lower.contains("kernel-power") && event_id == "41";
+    let is_eventlog_6008 = provider_lower == "eventlog" && event_id == "6008";
+    let named = |names: &[&str]| {
+        names.iter().find_map(|name| {
+            fields
+                .iter()
+                .find(|field| {
+                    field
+                        .name
+                        .as_deref()
+                        .is_some_and(|field_name| field_name.eq_ignore_ascii_case(name))
+                })
+                .map(|field| field.value.as_str())
+        })
+    };
+    let bugcheck_code = if is_wer_1001 || is_kernel_power_41 {
+        named(&["BugcheckCode", "BugCheckCode", "bugcheckCode"]).map(str::to_string)
+    } else {
+        None
+    };
+    let previous_shutdown_time_ms = if is_kernel_power_41 || is_eventlog_6008 {
+        named(&[
+            "PreviousShutdownTime",
+            "PreviousShutdownTimeUtc",
+            "PreviousTime",
+            "LastShutdownTime",
+        ])
+        .and_then(parse_event_time_value)
+        .or_else(|| is_eventlog_6008.then(|| parse_6008_positional_previous_shutdown(&fields))?)
+    } else {
+        None
+    };
+    let clean_shutdown = named(&["CleanShutdown", "cleanShutdown"]).and_then(parse_bool_value);
+    EventPayloadFacts {
+        bugcheck_code,
+        previous_shutdown_time_ms,
+        clean_shutdown,
+        ..EventPayloadFacts::default()
+    }
+}
+
+fn extract_event_data_fields(xml: &str) -> Vec<EventDataField> {
+    let mut fields = Vec::new();
+    let mut cursor = 0usize;
+    while cursor < xml.len() {
+        let Some(relative_start) = xml[cursor..].find("<Data") else {
+            break;
+        };
+        let start = cursor + relative_start;
+        let after_name = start + "<Data".len();
+        let next = xml[after_name..].chars().next();
+        if !matches!(next, Some(' ' | '\t' | '\r' | '\n' | '>')) {
+            cursor = after_name;
+            continue;
+        }
+        let Some(relative_tag_end) = xml[after_name..].find('>') else {
+            break;
+        };
+        let tag_end = after_name + relative_tag_end;
+        let Some(relative_close_start) = xml[tag_end + 1..].find("</Data>") else {
+            break;
+        };
+        let close_start = tag_end + 1 + relative_close_start;
+        let raw_value = &xml[tag_end + 1..close_start];
+        let value = clean_event_text(raw_value);
+        if !value.is_empty() && !value.contains('<') {
+            fields.push(EventDataField {
+                name: extract_xml_attribute(&xml[start..=tag_end], "Name"),
+                value,
+            });
+        }
+        cursor = close_start + "</Data>".len();
+    }
+    fields
+}
+
+fn extract_xml_attribute(tag: &str, attribute: &str) -> Option<String> {
+    let marker = format!("{attribute}=");
+    let start = tag.find(&marker)?.saturating_add(marker.len());
+    let quote = tag.get(start..)?.chars().next()?;
+    if quote != '\"' && quote != '\'' {
+        return None;
+    }
+    let value_start = start + quote.len_utf8();
+    let end = tag
+        .get(value_start..)?
+        .find(quote)?
+        .saturating_add(value_start);
+    Some(tag.get(value_start..end)?.to_string())
+}
+
+fn clean_event_text(value: &str) -> String {
+    value
+        .chars()
+        .filter(|character| {
+            !matches!(
+                character,
+                '\u{200e}'
+                    | '\u{200f}'
+                    | '\u{202a}'
+                    | '\u{202b}'
+                    | '\u{202c}'
+                    | '\u{202d}'
+                    | '\u{202e}'
+            )
+        })
+        .collect::<String>()
+        .trim()
+        .to_string()
+}
+
+fn parse_6008_positional_previous_shutdown(fields: &[EventDataField]) -> Option<i64> {
+    let (date, time) = parse_6008_positional_date_time(fields)?;
+    date_time_to_unix_ms(date, time)
+}
+
+fn parse_6008_positional_date_time(
+    fields: &[EventDataField],
+) -> Option<(ParsedCalendarDate, ParsedClock)> {
+    let param1 = fields.iter().find(|field| {
+        field
+            .name
+            .as_deref()
+            .is_some_and(|name| name.eq_ignore_ascii_case("param1"))
+    });
+    let param2 = fields.iter().find(|field| {
+        field
+            .name
+            .as_deref()
+            .is_some_and(|name| name.eq_ignore_ascii_case("param2"))
+    });
+    let (first, second) = if let (Some(param1), Some(param2)) = (param1, param2) {
+        (param1.value.as_str(), param2.value.as_str())
+    } else {
+        let positional = fields
+            .iter()
+            .filter(|field| field.name.is_none())
+            .map(|field| field.value.as_str())
+            .take(2)
+            .collect::<Vec<_>>();
+        if positional.len() != 2 {
+            return None;
+        }
+        (positional[0], positional[1])
+    };
+
+    [(first, second), (second, first)]
+        .into_iter()
+        .find_map(|(time, date)| {
+            let time = parse_clock_value(time)?;
+            let date = parse_calendar_date(date)?;
+            Some((date, time))
+        })
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ParsedClock {
+    hour: u32,
+    minute: u32,
+    second: u32,
+    millisecond: u32,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ParsedCalendarDate {
+    year: i64,
+    month: u32,
+    day: u32,
+}
+
+fn parse_clock_value(value: &str) -> Option<ParsedClock> {
+    let value = clean_event_text(value)
+        .to_ascii_uppercase()
+        .replace('.', "");
+    let (value, meridiem) = if let Some(value) = value.strip_suffix("AM") {
+        (value.trim(), Some(false))
+    } else if let Some(value) = value.strip_suffix("PM") {
+        (value.trim(), Some(true))
+    } else {
+        (value.trim(), None)
+    };
+    let components = value.split(':').collect::<Vec<_>>();
+    if components.len() != 3 {
+        return None;
+    }
+    let hour = components[0].parse::<u32>().ok()?;
+    let minute = components[1].parse::<u32>().ok()?;
+    let (second, millisecond) = if let Some((second, fraction)) = components[2].split_once('.') {
+        let second = second.parse::<u32>().ok()?;
+        let fraction = fraction
+            .chars()
+            .take(3)
+            .collect::<String>()
+            .parse::<u32>()
+            .ok()?;
+        let millisecond = fraction.saturating_mul(match components[2].split_once('.')?.1.len() {
+            1 => 100,
+            2 => 10,
+            _ => 1,
+        });
+        (second, millisecond)
+    } else {
+        (components[2].parse::<u32>().ok()?, 0)
+    };
+    if minute >= 60 || second >= 60 || millisecond >= 1_000 {
+        return None;
+    }
+    let hour = match meridiem {
+        Some(is_pm) if (1..=12).contains(&hour) => {
+            if is_pm {
+                if hour == 12 {
+                    12
+                } else {
+                    hour + 12
+                }
+            } else if hour == 12 {
+                0
+            } else {
+                hour
+            }
+        }
+        Some(_) => return None,
+        None if hour < 24 => hour,
+        None => return None,
+    };
+    Some(ParsedClock {
+        hour,
+        minute,
+        second,
+        millisecond,
+    })
+}
+
+fn parse_calendar_date(value: &str) -> Option<ParsedCalendarDate> {
+    let value = clean_event_text(value);
+    let components = value
+        .split(['/', '-', '.'])
+        .filter(|component| !component.is_empty())
+        .collect::<Vec<_>>();
+    if components.len() != 3 {
+        return None;
+    }
+    let numbers = components
+        .iter()
+        .map(|component| component.parse::<u32>().ok())
+        .collect::<Option<Vec<_>>>()?;
+    let (year, month, day) = if components[0].len() == 4 {
+        (numbers[0] as i64, numbers[1], numbers[2])
+    } else if components[2].len() == 4 {
+        let first = numbers[0];
+        let second = numbers[1];
+        let (month, day) = if first > 12 && second <= 12 {
+            (second, first)
+        } else if second > 12 && first <= 12 {
+            (first, second)
+        } else if first == second {
+            // Both locale interpretations produce the same physical date.
+            (first, second)
+        } else {
+            // Do not silently guess between e.g. 03/04 and 04/03.
+            return None;
+        };
+        (numbers[2] as i64, month, day)
+    } else {
+        return None;
+    };
+    if !(1..=12).contains(&month) || day == 0 || day > days_in_month(year, month) {
+        return None;
+    }
+    Some(ParsedCalendarDate { year, month, day })
+}
+
+fn date_time_to_unix_ms(date: ParsedCalendarDate, time: ParsedClock) -> Option<i64> {
+    // Cross-platform fixtures use UTC for deterministic assertions. The native Windows reader
+    // reinterprets positional 6008 values through the machine's timezone before persisting them.
+    let days = days_from_civil(date.year, date.month, date.day)?;
+    days.checked_mul(86_400_000)?
+        .checked_add(i64::from(time.hour) * 3_600_000)
+        .and_then(|value| value.checked_add(i64::from(time.minute) * 60_000))
+        .and_then(|value| value.checked_add(i64::from(time.second) * 1_000))
+        .and_then(|value| value.checked_add(i64::from(time.millisecond)))
+}
+
+fn days_in_month(year: i64, month: u32) -> u32 {
+    match month {
+        2 if is_leap_year(year) => 29,
+        2 => 28,
+        4 | 6 | 9 | 11 => 30,
+        _ => 31,
+    }
+}
+
+fn is_leap_year(year: i64) -> bool {
+    year % 4 == 0 && (year % 100 != 0 || year % 400 == 0)
+}
+
+fn days_from_civil(year: i64, month: u32, day: u32) -> Option<i64> {
+    if !(1..=12).contains(&month) || day == 0 || day > days_in_month(year, month) {
+        return None;
+    }
+    let year = year - i64::from(month <= 2);
+    let era = if year >= 0 { year } else { year - 399 } / 400;
+    let year_of_era = year - era * 400;
+    let month = i64::from(month);
+    let day_of_year = (153 * (month + if month > 2 { -3 } else { 9 }) + 2) / 5 + i64::from(day) - 1;
+    let day_of_era = year_of_era * 365 + year_of_era / 4 - year_of_era / 100 + day_of_year;
+    Some(era * 146_097 + day_of_era - 719_468)
 }
 
 #[cfg(windows)]
@@ -2499,13 +2940,39 @@ unsafe fn variant_u64(value: &windows::Win32::System::EventLog::EVT_VARIANT) -> 
     }
 }
 
-#[cfg(windows)]
 fn filetime_to_unix_ms(filetime: u64) -> i64 {
     filetime
         .saturating_sub(116_444_736_000_000_000)
         .checked_div(10_000)
         .and_then(|value| i64::try_from(value).ok())
         .unwrap_or(0)
+}
+
+#[cfg(windows)]
+fn local_6008_datetime_to_unix_ms(date: ParsedCalendarDate, time: ParsedClock) -> Option<i64> {
+    use windows::Win32::Foundation::{FILETIME, SYSTEMTIME};
+    use windows::Win32::System::Time::{SystemTimeToFileTime, TzSpecificLocalTimeToSystemTimeEx};
+
+    let local = SYSTEMTIME {
+        wYear: u16::try_from(date.year).ok()?,
+        wMonth: u16::try_from(date.month).ok()?,
+        wDay: u16::try_from(date.day).ok()?,
+        wHour: u16::try_from(time.hour).ok()?,
+        wMinute: u16::try_from(time.minute).ok()?,
+        wSecond: u16::try_from(time.second).ok()?,
+        wMilliseconds: u16::try_from(time.millisecond).ok()?,
+        ..SYSTEMTIME::default()
+    };
+    let mut utc = SYSTEMTIME::default();
+    unsafe {
+        TzSpecificLocalTimeToSystemTimeEx(None, &local, &mut utc).ok()?;
+    }
+    let mut filetime = FILETIME::default();
+    unsafe {
+        SystemTimeToFileTime(&utc, &mut filetime).ok()?;
+    }
+    let value = (u64::from(filetime.dwHighDateTime) << 32) | u64::from(filetime.dwLowDateTime);
+    Some(filetime_to_unix_ms(value))
 }
 
 #[cfg(windows)]
@@ -2597,6 +3064,181 @@ mod tests {
         );
         assert_eq!(kernel_power.kind, SystemEventKind::UnexpectedShutdown);
         assert_eq!(eventlog.kind, SystemEventKind::UnexpectedShutdown);
+    }
+
+    #[test]
+    fn event_41_bugcheck_code_controls_bsod_classification() {
+        let anchor = 10_000_i64;
+        let nonzero = NormalizedSystemEvent::from_fields(
+            "System",
+            Some("Microsoft-Windows-Kernel-Power".into()),
+            "41",
+            "41-nonzero",
+            anchor + 1_000,
+            EventPayloadFacts {
+                bugcheck_code: Some("0x0000009f".into()),
+                previous_shutdown_time_ms: Some(anchor),
+                ..EventPayloadFacts::default()
+            },
+        );
+        assert_eq!(
+            classify_events(&[nonzero])[0].classification,
+            CrashClassification::Bsod
+        );
+
+        for (record_id, bugcheck_code) in [("41-zero", Some("0")), ("41-missing", None)] {
+            let event = NormalizedSystemEvent::from_fields(
+                "System",
+                Some("Microsoft-Windows-Kernel-Power".into()),
+                "41",
+                record_id,
+                anchor + 2_000,
+                EventPayloadFacts {
+                    bugcheck_code: bugcheck_code.map(str::to_string),
+                    previous_shutdown_time_ms: Some(anchor),
+                    ..EventPayloadFacts::default()
+                },
+            );
+            assert_eq!(
+                classify_events(&[event])[0].classification,
+                CrashClassification::UnexpectedShutdown
+            );
+        }
+    }
+
+    #[test]
+    fn later_wer_refines_zero_bugcheck_event_41_without_creating_a_case() {
+        let db = db();
+        let anchor = 20_000_i64;
+        let event_41 = NormalizedSystemEvent::from_fields(
+            "System",
+            Some("Microsoft-Windows-Kernel-Power".into()),
+            "41",
+            "41",
+            anchor + 1_000,
+            EventPayloadFacts {
+                bugcheck_code: Some("0".into()),
+                previous_shutdown_time_ms: Some(anchor),
+                ..EventPayloadFacts::default()
+            },
+        );
+        let first_batch = EventReadBatch {
+            events: vec![event_41.clone()],
+            next_cursors: BTreeMap::from([("System".into(), cursor_for(&event_41))]),
+        };
+        let case_id = db
+            .with_writer(|conn| persist_event_batch(conn, &first_batch, anchor + 2_000))
+            .unwrap()[0];
+        let wer = NormalizedSystemEvent::from_fields(
+            "System",
+            Some("Microsoft-Windows-WER-SystemErrorReporting".into()),
+            "1001",
+            "1001",
+            anchor + 60_000,
+            EventPayloadFacts {
+                bugcheck_code: Some("0x0000009f".into()),
+                previous_shutdown_time_ms: Some(anchor),
+                ..EventPayloadFacts::default()
+            },
+        );
+        let second_batch = EventReadBatch {
+            events: vec![wer.clone()],
+            next_cursors: BTreeMap::from([("System".into(), cursor_for(&wer))]),
+        };
+        let ids = db
+            .with_writer(|conn| persist_event_batch(conn, &second_batch, anchor + 61_000))
+            .unwrap();
+        assert_eq!(ids, vec![case_id]);
+        db.read(|conn| {
+            assert_eq!(
+                conn.query_row("SELECT COUNT(*) FROM crash_case", [], |row| row
+                    .get::<_, i64>(0))?,
+                1
+            );
+            assert_eq!(
+                conn.query_row(
+                    "SELECT classification FROM crash_case WHERE id = ?1",
+                    [case_id],
+                    |row| row.get::<_, String>(0),
+                )?,
+                "bsod"
+            );
+            Ok(())
+        })
+        .unwrap();
+    }
+
+    #[test]
+    fn eventlog_6008_parses_named_and_positional_previous_shutdown_times() {
+        let named = parse_event_payload_facts_from_xml(
+            r#"<EventData><Data Name="PreviousShutdownTime">1683287458000</Data></EventData>"#,
+            "EventLog",
+            "6008",
+        );
+        assert_eq!(named.previous_shutdown_time_ms, Some(1_683_287_458_000));
+
+        let positional = parse_event_payload_facts_from_xml(
+            r#"<EventData><Data>11:50:58</Data><Data>05/05/2023</Data></EventData>"#,
+            "EventLog",
+            "6008",
+        );
+        assert_eq!(
+            positional.previous_shutdown_time_ms,
+            Some(1_683_287_458_000)
+        );
+
+        let param_style = parse_event_payload_facts_from_xml(
+            r#"<EventData><Data Name="param1">11:50:58</Data><Data Name="param2">05/05/2023</Data></EventData>"#,
+            "EventLog",
+            "6008",
+        );
+        assert_eq!(
+            param_style.previous_shutdown_time_ms,
+            Some(1_683_287_458_000)
+        );
+
+        let ambiguous = parse_event_payload_facts_from_xml(
+            r#"<EventData><Data>11:50:58</Data><Data>03/04/2023</Data></EventData>"#,
+            "EventLog",
+            "6008",
+        );
+        assert_eq!(ambiguous.previous_shutdown_time_ms, None);
+        let unparseable = parse_event_payload_facts_from_xml(
+            r#"<EventData><Data Name="param1">not-a-time</Data><Data Name="param2">not-a-date</Data></EventData>"#,
+            "EventLog",
+            "6008",
+        );
+        assert_eq!(unparseable.previous_shutdown_time_ms, None);
+    }
+
+    #[test]
+    fn delayed_6008_uses_physical_time_and_collection_boundary_is_fallback() {
+        let anchor = 30_000_i64;
+        let delayed = NormalizedSystemEvent::from_fields(
+            "System",
+            Some("EventLog".into()),
+            "6008",
+            "6008-delayed",
+            anchor + 60 * 60 * 1_000,
+            EventPayloadFacts {
+                previous_shutdown_time_ms: Some(anchor),
+                ..EventPayloadFacts::default()
+            },
+        );
+        let candidate = classify_events(&[delayed]).pop().expect("6008 candidate");
+        assert_eq!(candidate.anchor_time_ms, anchor);
+
+        let unparseable = NormalizedSystemEvent::from_fields(
+            "System",
+            Some("EventLog".into()),
+            "6008",
+            "6008-unparseable",
+            anchor + 2_000,
+            EventPayloadFacts::default(),
+        );
+        let fallback = classify_events_with_context(&[unparseable], Some(anchor));
+        assert_eq!(fallback.len(), 1);
+        assert_eq!(fallback[0].anchor_time_ms, anchor);
     }
 
     #[test]
@@ -2879,10 +3521,18 @@ mod tests {
                     ..EventPayloadFacts::default()
                 },
             ),
+            NormalizedSystemEvent::from_fields(
+                "System",
+                Some("EventLog".into()),
+                "6005",
+                "6005",
+                anchor + 40_000,
+                EventPayloadFacts::default(),
+            ),
         ];
         let batch = EventReadBatch {
             events: events.clone(),
-            next_cursors: BTreeMap::from([("System".into(), cursor_for(&events[2]))]),
+            next_cursors: BTreeMap::from([("System".into(), cursor_for(&events[3]))]),
         };
         let case_ids = db
             .with_writer(|conn| persist_event_batch(conn, &batch, anchor + 40_000))
@@ -2916,6 +3566,137 @@ mod tests {
             Ok(())
         })
         .unwrap();
+    }
+
+    #[test]
+    fn independent_reboot_episodes_ten_minutes_apart_remain_two_cases() {
+        let db = db();
+        let first_anchor = 1_000_000_i64;
+        let second_anchor = first_anchor + 10 * 60 * 1_000;
+        let events = vec![
+            NormalizedSystemEvent::from_fields(
+                "System",
+                Some("Microsoft-Windows-Kernel-Power".into()),
+                "41",
+                "a-41",
+                first_anchor + 10_000,
+                EventPayloadFacts {
+                    previous_shutdown_time_ms: Some(first_anchor),
+                    ..EventPayloadFacts::default()
+                },
+            ),
+            NormalizedSystemEvent::from_fields(
+                "System",
+                Some("EventLog".into()),
+                "6008",
+                "a-6008",
+                first_anchor + 20_000,
+                EventPayloadFacts {
+                    previous_shutdown_time_ms: Some(first_anchor),
+                    ..EventPayloadFacts::default()
+                },
+            ),
+            NormalizedSystemEvent::fixture(
+                SystemEventKind::NormalBoot,
+                "a-boot",
+                first_anchor + 30_000,
+            ),
+            NormalizedSystemEvent::from_fields(
+                "System",
+                Some("Microsoft-Windows-Kernel-Power".into()),
+                "41",
+                "b-41",
+                second_anchor + 10_000,
+                EventPayloadFacts {
+                    previous_shutdown_time_ms: Some(second_anchor),
+                    ..EventPayloadFacts::default()
+                },
+            ),
+            NormalizedSystemEvent::from_fields(
+                "System",
+                Some("EventLog".into()),
+                "6008",
+                "b-6008",
+                second_anchor + 20_000,
+                EventPayloadFacts {
+                    previous_shutdown_time_ms: Some(second_anchor),
+                    ..EventPayloadFacts::default()
+                },
+            ),
+            NormalizedSystemEvent::fixture(
+                SystemEventKind::NormalBoot,
+                "b-boot",
+                second_anchor + 30_000,
+            ),
+        ];
+        let batch = EventReadBatch {
+            next_cursors: BTreeMap::from([("System".into(), cursor_for(&events[5]))]),
+            events,
+        };
+        let case_ids = db
+            .with_writer(|conn| persist_event_batch(conn, &batch, second_anchor + 40_000))
+            .unwrap();
+        assert_eq!(case_ids.len(), 2);
+        db.read(|conn| {
+            let rows = conn
+                .prepare(
+                    "SELECT anchor_time_ms, classification FROM crash_case
+                     ORDER BY anchor_time_ms",
+                )?
+                .query_map([], |row| {
+                    Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+                })?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            assert_eq!(
+                rows,
+                vec![
+                    (first_anchor, "unexpected_shutdown".to_string()),
+                    (second_anchor, "unexpected_shutdown".to_string())
+                ]
+            );
+            assert_eq!(
+                conn.query_row(
+                    "SELECT COUNT(*) FROM retention_hold WHERE released_at_ms IS NULL",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )?,
+                2
+            );
+            Ok(())
+        })
+        .unwrap();
+    }
+
+    #[test]
+    fn independent_reboots_without_physical_payload_use_distinct_boot_boundaries() {
+        let first_event_time = 4_000_000_i64;
+        let second_event_time = first_event_time + 10 * 60 * 1_000;
+        let first_boot_time = first_event_time + 20_000;
+        let second_boot_time = second_event_time + 20_000;
+        let events = vec![
+            NormalizedSystemEvent::from_fields(
+                "System",
+                Some("Microsoft-Windows-Kernel-Power".into()),
+                "41",
+                "a-41-no-payload",
+                first_event_time,
+                EventPayloadFacts::default(),
+            ),
+            NormalizedSystemEvent::fixture(SystemEventKind::NormalBoot, "a-boot", first_boot_time),
+            NormalizedSystemEvent::from_fields(
+                "System",
+                Some("Microsoft-Windows-Kernel-Power".into()),
+                "41",
+                "b-41-no-payload",
+                second_event_time,
+                EventPayloadFacts::default(),
+            ),
+            NormalizedSystemEvent::fixture(SystemEventKind::NormalBoot, "b-boot", second_boot_time),
+        ];
+        let candidates = classify_events(&events);
+        assert_eq!(candidates.len(), 2);
+        assert_eq!(candidates[0].anchor_time_ms, first_boot_time);
+        assert_eq!(candidates[1].anchor_time_ms, second_boot_time);
     }
 
     #[test]
@@ -3494,6 +4275,36 @@ mod tests {
         .unwrap()
     }
 
+    fn insert_complete_pre_window_fixture(db: &Database, anchor_time_ms: i64) -> i64 {
+        let case_id = insert_evidence_fixture(db, anchor_time_ms);
+        db.with_writer(|conn| {
+            let session_id: i64 = conn.query_row(
+                "SELECT id FROM collection_session ORDER BY id DESC LIMIT 1",
+                [],
+                |row| row.get(0),
+            )?;
+            conn.execute(
+                "INSERT INTO sample_frame(
+                    collection_session_id, ts, sequence, duration_ms, writer_delay_ms,
+                    process_snapshot_present
+                 ) VALUES (?1, ?2, 3, ?3, 25, 0)",
+                params![
+                    session_id,
+                    anchor_time_ms - CRASH_CASE_WINDOW_PRE_MS,
+                    CRASH_CASE_WINDOW_PRE_MS - 60_000,
+                ],
+            )?;
+            let frame_id = conn.last_insert_rowid();
+            conn.execute(
+                "INSERT INTO cpu_sample(frame_id, usage_pct) VALUES (?1, 20.0)",
+                [frame_id],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+        case_id
+    }
+
     #[test]
     fn evidence_builder_persists_objective_windowed_math_and_rebuilds_idempotently() {
         let db = db();
@@ -3664,9 +4475,114 @@ mod tests {
         })
         .unwrap();
         assert_eq!(
-            rebuild_due_cases(&db, anchor_time_ms + CRASH_CASE_WINDOW_POST_MS).unwrap(),
+            rebuild_due_cases(
+                &db,
+                anchor_time_ms
+                    + CRASH_CASE_WINDOW_POST_MS
+                    + CRASH_POST_FINALIZATION_STABILIZATION_MS
+                    + 1,
+            )
+            .unwrap(),
             0
         );
+    }
+
+    #[test]
+    fn post_window_late_tail_retries_after_first_partial_finalization_and_completes() {
+        let db = db();
+        let anchor_time_ms = 2_000_000_i64;
+        let case_id = insert_complete_pre_window_fixture(&db, anchor_time_ms);
+        let window_end_ms = anchor_time_ms + CRASH_CASE_WINDOW_POST_MS;
+
+        // This is the race: the first finalization runs at exactly T+5m, before the final frame
+        // is committed.
+        build_case_with_failure_status_at(&db, case_id, window_end_ms).unwrap();
+        db.read(|conn| {
+            assert_eq!(
+                conn.query_row(
+                    "SELECT evidence_status FROM crash_case WHERE id = ?1",
+                    [case_id],
+                    |row| row.get::<_, String>(0),
+                )?,
+                "partial"
+            );
+            Ok(())
+        })
+        .unwrap();
+
+        db.with_writer(|conn| {
+            let session_id: i64 = conn.query_row(
+                "SELECT id FROM collection_session ORDER BY id DESC LIMIT 1",
+                [],
+                |row| row.get(0),
+            )?;
+            conn.execute(
+                "INSERT INTO sample_frame(
+                    collection_session_id, ts, sequence, duration_ms, writer_delay_ms,
+                    process_snapshot_present
+                 ) VALUES (?1, ?2, 4, ?3, 25, 0)",
+                params![session_id, anchor_time_ms, CRASH_CASE_WINDOW_POST_MS],
+            )?;
+            let frame_id = conn.last_insert_rowid();
+            conn.execute(
+                "INSERT INTO cpu_sample(frame_id, usage_pct) VALUES (?1, 40.0)",
+                [frame_id],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+
+        assert_eq!(rebuild_due_cases(&db, window_end_ms + 800).unwrap(), 1);
+        db.read(|conn| {
+            assert_eq!(
+                conn.query_row(
+                    "SELECT evidence_status FROM crash_case WHERE id = ?1",
+                    [case_id],
+                    |row| row.get::<_, String>(0),
+                )?,
+                "complete"
+            );
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(
+            rebuild_due_cases(
+                &db,
+                window_end_ms + CRASH_POST_FINALIZATION_STABILIZATION_MS + 1,
+            )
+            .unwrap(),
+            0
+        );
+    }
+
+    #[test]
+    fn post_window_true_missing_settles_partial_without_infinite_retries() {
+        let db = db();
+        let anchor_time_ms = 3_000_000_i64;
+        let case_id = insert_complete_pre_window_fixture(&db, anchor_time_ms);
+        let window_end_ms = anchor_time_ms + CRASH_CASE_WINDOW_POST_MS;
+        build_case_with_failure_status_at(&db, case_id, window_end_ms).unwrap();
+
+        assert_eq!(
+            rebuild_due_cases(
+                &db,
+                window_end_ms + CRASH_POST_FINALIZATION_STABILIZATION_MS + 1,
+            )
+            .unwrap(),
+            0
+        );
+        db.read(|conn| {
+            assert_eq!(
+                conn.query_row(
+                    "SELECT evidence_status FROM crash_case WHERE id = ?1",
+                    [case_id],
+                    |row| row.get::<_, String>(0),
+                )?,
+                "partial"
+            );
+            Ok(())
+        })
+        .unwrap();
     }
 
     #[test]
