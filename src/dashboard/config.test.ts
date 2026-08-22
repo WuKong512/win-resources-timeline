@@ -1,8 +1,10 @@
 import { describe, expect, it } from "vitest";
 import type { SystemSample } from "../types/resource";
 import {
+  canAddMetricToCard,
   createDefaultDashboardConfig,
   deserializeDashboardConfig,
+  MAX_METRICS_PER_CARD,
   serializeDashboardConfig,
   validateDashboardConfig,
   validateMetricSelection
@@ -57,5 +59,12 @@ describe("dashboard config", () => {
   it("rejects incompatible persisted cards before they can reach the chart", () => {
     const invalid = validateDashboardConfig({ version: 1, cards: [{ id: "mixed", metricIds: ["system.cpu.usage_pct", "system.disk.read_bps"], hiddenMetricIds: [], order: 0, visible: true }] });
     expect(invalid.ok).toBe(false);
+  });
+
+  it("does not offer a ninth metric once the card limit is reached", () => {
+    const metricIds = Array.from({ length: MAX_METRICS_PER_CARD }, (_, index) => `gpu.uuid-${index}.utilization_pct` as const);
+    const card = { id: "full", metricIds, hiddenMetricIds: [], order: 0, visible: true };
+    expect(metricIds).toHaveLength(8);
+    expect(canAddMetricToCard(card, "gpu.uuid-8.utilization_pct")).toBe(false);
   });
 });

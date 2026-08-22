@@ -2,6 +2,7 @@ import { useMemo, useState } from "react";
 import { useI18n } from "../i18n";
 import {
   canAddMetricToCard,
+  MAX_METRICS_PER_CARD,
   reorderDashboardCards,
   validateDashboardConfig,
   type DashboardCardConfig,
@@ -101,7 +102,8 @@ function DashboardEditorCard({
   const { t } = useI18n();
   const firstDescriptor = getMetricDescriptor(card.metricIds[0]);
   const addable = availableDescriptors.filter((descriptor) => canAddMetricToCard(card, descriptor.id));
-  const incompatibleAvailable = availableDescriptors.some((descriptor) => !card.metricIds.includes(descriptor.id) && !canAddMetricToCard(card, descriptor.id));
+  const metricLimitReached = card.metricIds.length >= MAX_METRICS_PER_CARD;
+  const incompatibleAvailable = !metricLimitReached && availableDescriptors.some((descriptor) => !card.metricIds.includes(descriptor.id) && !canAddMetricToCard(card, descriptor.id));
   const title = firstDescriptor ? metricDisplayName(firstDescriptor, t, samples) : card.id;
   return <div className="rounded-lg border border-border/80 bg-muted/15 p-3">
     <div className="flex flex-wrap items-start justify-between gap-3">
@@ -129,7 +131,7 @@ function DashboardEditorCard({
     </div>
     <div className="mt-3 flex flex-wrap items-center gap-2">
       <label className="text-xs text-muted-foreground" htmlFor={`add-metric-${card.id}`}>{t("dashboardAddMetric")}</label>
-      <select id={`add-metric-${card.id}`} value="" className="h-8 max-w-full rounded-md border border-input bg-card px-2 text-xs text-foreground" onChange={(event) => {
+      <select id={`add-metric-${card.id}`} value="" disabled={metricLimitReached || !addable.length} className="h-8 max-w-full rounded-md border border-input bg-card px-2 text-xs text-foreground" onChange={(event) => {
         const metricId = event.target.value as MetricId;
         if (!metricId) return;
         onChange({ ...card, metricIds: [...card.metricIds, metricId] });
@@ -138,6 +140,7 @@ function DashboardEditorCard({
         <option value="">{t("dashboardSelectMetric")}</option>
         {addable.map((descriptor) => <option key={descriptor.id} value={descriptor.id}>{metricDisplayName(descriptor, t, samples)}</option>)}
       </select>
+      {metricLimitReached && <span className="text-[11px] text-muted-foreground">{t("dashboardMetricLimitReached")}</span>}
       {incompatibleAvailable && <span className="text-[11px] text-muted-foreground">{t("dashboardIncompatibleMetric")}</span>}
     </div>
   </div>;

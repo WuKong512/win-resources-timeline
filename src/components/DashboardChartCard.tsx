@@ -11,7 +11,7 @@ import {
   type MetricDescriptor
 } from "../dashboard/metrics";
 import type { DashboardCardConfig } from "../dashboard/config";
-import type { SystemSample } from "../types/resource";
+import type { SystemSample, TimelineGap } from "../types/resource";
 import { formatBytes, formatClock } from "../utils/time";
 import { useUiStore } from "../stores/uiStore";
 import { Badge } from "./ui/Badge";
@@ -22,6 +22,7 @@ import { useStableEcharts } from "./chartLifecycle";
 type DashboardChartCardProps = {
   card: DashboardCardConfig;
   samples: SystemSample[];
+  gaps: TimelineGap[];
   startMs: number;
   endMs: number;
   selectedTimestampMs: number | null;
@@ -35,7 +36,7 @@ export function DashboardChartCard(props: DashboardChartCardProps) {
   </DashboardCardErrorBoundary>;
 }
 
-function DashboardChartCardBody({ card, samples, startMs, endMs, selectedTimestampMs, onSampleSelect }: DashboardChartCardProps) {
+function DashboardChartCardBody({ card, samples, gaps, startMs, endMs, selectedTimestampMs, onSampleSelect }: DashboardChartCardProps) {
   const { language, t } = useI18n();
   const resolvedTheme = useUiStore((state) => state.resolvedTheme);
   const ref = useRef<HTMLDivElement | null>(null);
@@ -79,6 +80,7 @@ function DashboardChartCardBody({ card, samples, startMs, endMs, selectedTimesta
     try {
       lifecycle.update(buildDashboardChartOption({
         samples,
+        gaps,
         metricIds: descriptors.map((descriptor) => descriptor.id),
         startMs,
         endMs,
@@ -93,7 +95,7 @@ function DashboardChartCardBody({ card, samples, startMs, endMs, selectedTimesta
       setChartError(true);
       console.error("[dashboard-card] chart option failed", error);
     }
-  }, [descriptors, endMs, hasVisibleData, language, lifecycle, retryToken, samples, selectedTimestampMs, startMs, t]);
+  }, [descriptors, endMs, gaps, hasVisibleData, language, lifecycle, resolvedTheme, retryToken, samples, selectedTimestampMs, startMs, t]);
 
   const title = dashboardCardTitle(card, descriptors, samples, t);
   const latest = samples[samples.length - 1];
@@ -106,13 +108,15 @@ function DashboardChartCardBody({ card, samples, startMs, endMs, selectedTimesta
       onSampleSelect(samples[samples.length - 1]);
     }
   }} className={`${hasVisibleData && !chartError && visibleMetricIds.length ? "h-[250px]" : "h-0 overflow-hidden"} w-full cursor-crosshair outline-none focus-visible:ring-2 focus-visible:ring-ring/35`} />;
-  const cardMessage = !visibleMetricIds.length || !descriptors.length
-    ? <div className="py-8 text-sm text-muted-foreground">{t("dashboardNoCards")}</div>
-    : !hasVisibleData
-      ? <div className="py-8 text-sm text-muted-foreground">{unavailableDescriptors.map((descriptor) => metricDisplayName(descriptor, t, samples)).join(" · ")}</div>
-      : chartError
-        ? <div className="flex flex-wrap items-center justify-between gap-3 py-8 text-sm text-muted-foreground"><span>{t("dashboardChartError")}</span><Button variant="outline" className="h-8 px-2.5 text-xs" onClick={() => setRetryToken((value) => value + 1)}>{t("dashboardRetry")}</Button></div>
-        : null;
+  const cardMessage = !visibleMetricIds.length
+    ? <div className="py-8 text-sm text-muted-foreground">{t("dashboardNoVisibleMetrics")}</div>
+    : !descriptors.length
+      ? <div className="py-8 text-sm text-muted-foreground">{t("dashboardMetricUnavailable")}</div>
+      : !hasVisibleData
+        ? <div className="py-8 text-sm text-muted-foreground">{unavailableDescriptors.map((descriptor) => metricDisplayName(descriptor, t, samples)).join(" · ")}</div>
+        : chartError
+          ? <div className="flex flex-wrap items-center justify-between gap-3 py-8 text-sm text-muted-foreground"><span>{t("dashboardChartError")}</span><Button variant="outline" className="h-8 px-2.5 text-xs" onClick={() => setRetryToken((value) => value + 1)}>{t("dashboardRetry")}</Button></div>
+          : null;
 
   return <Card className="overflow-hidden">
     <CardHeader className="border-b border-border/70 bg-card/90">

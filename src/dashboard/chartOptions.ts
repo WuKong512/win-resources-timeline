@@ -12,6 +12,7 @@ import {
   type UnitFamily,
   SYSTEM_METRIC_IDS
 } from "./metrics";
+import { timelineChartSamples } from "../utils/uiSemantics";
 
 export type ChartPalette = {
   colors: string[];
@@ -89,6 +90,7 @@ export function formatTooltipItems({
 
 export function buildDashboardChartOption({
   samples,
+  gaps,
   metricIds,
   startMs,
   endMs,
@@ -99,6 +101,7 @@ export function buildDashboardChartOption({
   missingLabel
 }: {
   samples: readonly SystemSample[];
+  gaps: readonly TimelineGap[];
   metricIds: readonly MetricId[];
   startMs: number;
   endMs: number;
@@ -108,12 +111,13 @@ export function buildDashboardChartOption({
   metricLabel: MetricLabel;
   missingLabel: string;
 }): EChartsOption {
+  const chartSamples = timelineChartSamples(samples, gaps);
   const descriptors = metricIds.map((id) => getMetricDescriptor(id)).filter((descriptor): descriptor is MetricDescriptor => descriptor != null);
   const descriptorMap = new Map(descriptors.map((descriptor) => [descriptor.id, descriptor]));
   const family = descriptors[0]?.unitFamily ?? "percent";
   const series = descriptors.map((descriptor, index) => buildLineSeries({
     descriptor,
-    samples,
+    samples: chartSamples,
     name: metricLabel(descriptor),
     color: palette.colors[index % Math.max(palette.colors.length, 1)] ?? palette.selected,
     selectedTimestampMs: index === 0 ? selectedTimestampMs : null,
@@ -158,7 +162,7 @@ export function buildTimelineChartOption({
   missingLabel: string;
   metricIds?: readonly MetricId[];
 }): EChartsOption {
-  const chartSamples = addGapMarkers(samples, gaps);
+  const chartSamples = timelineChartSamples(samples, gaps);
   const ids = metricIds ? [...metricIds] : timelineMetricIds(samples);
   const descriptors = ids.map((id) => getMetricDescriptor(id)).filter((descriptor): descriptor is MetricDescriptor => descriptor != null);
   const descriptorMap = new Map(descriptors.map((descriptor) => [descriptor.id, descriptor]));
@@ -268,23 +272,6 @@ function buildYAxis(family: UnitFamily, language: Language, palette: ChartPalett
     axisLabel: { color: palette.mutedForeground, fontSize: 11, formatter: (value: number) => family === "percent" ? `${value}%` : family === "throughput" || family === "bytes" ? formatBytes(value, language) : String(value) },
     splitLine: { lineStyle: { color: palette.border, type: "dashed" as const } }
   };
-}
-
-function addGapMarkers(samples: readonly SystemSample[], gaps: readonly TimelineGap[]): SystemSample[] {
-  if (!gaps.length) return [...samples];
-  const markers = gaps.map((gap) => ({
-    timestampMs: gap.startMs,
-    sampleDurationMs: 0,
-    cpuPercent: null,
-    memoryPercent: null,
-    memoryUsedBytes: null,
-    memoryTotalBytes: null,
-    diskReadBytesPerSec: null,
-    diskWriteBytesPerSec: null,
-    gpus: [],
-    hasAppSnapshot: false
-  } satisfies SystemSample));
-  return [...samples, ...markers].sort((left, right) => left.timestampMs - right.timestampMs);
 }
 
 function valueFromTooltip(value: unknown): number | null {

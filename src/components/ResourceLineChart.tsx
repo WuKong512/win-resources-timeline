@@ -6,6 +6,7 @@ import { formatMetricValue, getMetricDescriptor, metricDisplayName, metricValue,
 import type { SystemSample } from "../types/resource";
 import { formatClock } from "../utils/time";
 import { useUiStore } from "../stores/uiStore";
+import { inferSampleGaps } from "../utils/uiSemantics";
 import { useStableEcharts } from "./chartLifecycle";
 
 function cssColor(name: string) {
@@ -69,7 +70,7 @@ export function ResourceLineChart({ samples, selectedTimestampMs, onSampleSelect
   useEffect(() => {
     lifecycle.update(buildTimelineChartOption({
       samples,
-      gaps: [],
+      gaps: inferSampleGaps(samples),
       startMs: samples[0]?.timestampMs ?? 0,
       endMs: samples[samples.length - 1]?.timestampMs ?? 1,
       selectedTimestampMs,

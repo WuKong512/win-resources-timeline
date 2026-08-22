@@ -200,7 +200,9 @@ export function cardMetricFamilies(metricIds: readonly string[]): UnitFamily[] {
 }
 
 export function canAddMetricToCard(card: DashboardCardConfig, metricId: string): boolean {
-  return !card.metricIds.includes(metricId as MetricId) && validateMetricSelection([...card.metricIds, metricId]).ok;
+  return card.metricIds.length < MAX_METRICS_PER_CARD
+    && !card.metricIds.includes(metricId as MetricId)
+    && validateMetricSelection([...card.metricIds, metricId]).ok;
 }
 
 export function defaultGpuMetricId(deviceKey: string, field: "utilization_pct" | "temperature_c"): MetricId {

@@ -19,4 +19,20 @@ describe("stable chart lifecycle", () => {
     lifecycle.dispose();
     expect(dispose).toHaveBeenCalledTimes(1);
   });
+
+  it("applies a theme palette update through setOption on the existing instance", () => {
+    const setOption = vi.fn();
+    const dispose = vi.fn();
+    const chart: ChartInstanceLike = { setOption, resize: vi.fn(), dispose };
+    const factory = vi.fn(() => chart);
+    const lifecycle = createStableChartLifecycle(factory);
+
+    lifecycle.mount({} as HTMLElement);
+    lifecycle.update({ textStyle: { color: "#111" }, series: [] });
+    lifecycle.update({ textStyle: { color: "#eee" }, series: [] });
+
+    expect(factory).toHaveBeenCalledTimes(1);
+    expect(setOption).toHaveBeenCalledTimes(2);
+    expect(dispose).not.toHaveBeenCalled();
+  });
 });
