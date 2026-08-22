@@ -9,7 +9,7 @@ mod platform;
 
 use collector::manager::CollectorManager;
 use crash::CrashDetectorHandle;
-#[cfg(not(debug_assertions))]
+#[cfg(all(not(debug_assertions), not(feature = "qualification")))]
 use db::writer;
 use db::Database;
 use std::sync::{
@@ -18,7 +18,7 @@ use std::sync::{
 };
 use tauri::Manager;
 use tauri_plugin_autostart::MacosLauncher;
-#[cfg(not(debug_assertions))]
+#[cfg(all(not(debug_assertions), not(feature = "qualification")))]
 use tauri_plugin_autostart::ManagerExt;
 
 pub struct AppState {
@@ -50,7 +50,7 @@ pub fn run() {
                 .app_local_data_dir()?
                 .join("resource-timeline.sqlite3");
             let db = Arc::new(Database::open(db_path)?);
-            #[cfg(not(debug_assertions))]
+            #[cfg(all(not(debug_assertions), not(feature = "qualification")))]
             if db.with_writer(writer::start_with_windows).unwrap_or(true) {
                 // Re-enable on every release startup so a moved/replaced portable binary
                 // refreshes the Windows Run entry to the current stable executable path.
