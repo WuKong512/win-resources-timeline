@@ -38,8 +38,33 @@ export function gpuDevices(samples: SystemSample[]): GpuSample[] {
   return [...devices.values()];
 }
 
-export function timelineChartSamples(samples: SystemSample[], gaps: TimelineGap[]): SystemSample[] {
-  if (!gaps.length) return samples;
+export const MIN_INFERRED_SAMPLE_GAP_MS = 15_000;
+
+export function inferSampleGaps(samples: readonly SystemSample[]): TimelineGap[] {
+  const ordered = [...samples].sort((left, right) => left.timestampMs - right.timestampMs);
+  const gaps: TimelineGap[] = [];
+  for (let index = 1; index < ordered.length; index += 1) {
+    const previous = ordered[index - 1];
+    const current = ordered[index];
+    const deltaMs = current.timestampMs - previous.timestampMs;
+    const gapThresholdMs = Math.max(
+      MIN_INFERRED_SAMPLE_GAP_MS,
+      Math.max(0, previous.sampleDurationMs) * 3
+    );
+    if (deltaMs <= gapThresholdMs) continue;
+    const startMs = previous.timestampMs + Math.max(0, previous.sampleDurationMs);
+    if (startMs >= current.timestampMs) continue;
+    gaps.push({
+      startMs,
+      endMs: current.timestampMs,
+      durationMs: current.timestampMs - startMs
+    });
+  }
+  return gaps;
+}
+
+export function timelineChartSamples(samples: readonly SystemSample[], gaps: readonly TimelineGap[]): SystemSample[] {
+  if (!gaps.length) return [...samples];
   const gapMarkers = gaps.map((gap) => ({
     timestampMs: gap.startMs,
     sampleDurationMs: 0,

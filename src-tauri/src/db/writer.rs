@@ -2,8 +2,9 @@ use crate::{
     db::usage::{intersect_foreground, StateRange, TimeRange},
     models::{
         ActivityState, BootIdentity, CollectionSessionMetricMetadata, CollectionSettings,
-        ComputerState, ForegroundApp, GpuSample, MetricCategory, MetricRuntimeSupportStatus,
-        ResourceSnapshot, RuntimeDeviceMetadata, SystemSample, GPU_BOARD_POWER_SCOPE,
+        ComputerState, DashboardConfig, ForegroundApp, GpuSample, MetricCategory,
+        MetricRuntimeSupportStatus, ResourceSnapshot, RuntimeDeviceMetadata, SystemSample,
+        GPU_BOARD_POWER_SCOPE,
     },
 };
 use rusqlite::{params, Connection, OptionalExtension, Transaction};
@@ -1883,6 +1884,48 @@ pub fn save_collection_settings(
     tx.commit()
 }
 
+const DASHBOARD_SETTINGS_KEY: &str = "ui.dashboard.v1";
+const MAX_DASHBOARD_JSON_BYTES: usize = 32_768;
+
+pub fn dashboard_config(conn: &Connection) -> rusqlite::Result<Option<DashboardConfig>> {
+    let Some(value) = setting_text(conn, DASHBOARD_SETTINGS_KEY)? else {
+        return Ok(None);
+    };
+    if value.len() > MAX_DASHBOARD_JSON_BYTES {
+        return Ok(None);
+    }
+    let Ok(config) = serde_json::from_str::<DashboardConfig>(&value) else {
+        return Ok(None);
+    };
+    if config.validate().is_err() {
+        return Ok(None);
+    }
+    Ok(Some(config))
+}
+
+pub fn save_dashboard_config(
+    conn: &Connection,
+    config: &DashboardConfig,
+    updated_at_ms: i64,
+) -> rusqlite::Result<()> {
+    config
+        .validate()
+        .map_err(rusqlite::Error::InvalidParameterName)?;
+    let value = serde_json::to_string(config)
+        .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
+    if value.len() > MAX_DASHBOARD_JSON_BYTES {
+        return Err(rusqlite::Error::InvalidParameterName(
+            "dashboard config JSON is too large".into(),
+        ));
+    }
+    conn.execute(
+        "INSERT INTO settings(key, value, updated_at_ms) VALUES (?1, ?2, ?3)
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at_ms = excluded.updated_at_ms",
+        params![DASHBOARD_SETTINGS_KEY, value, updated_at_ms],
+    )?;
+    Ok(())
+}
+
 pub fn start_with_windows(conn: &Connection) -> rusqlite::Result<bool> {
     Ok(setting_u64(conn, "start_with_windows", 1)? != 0)
 }
@@ -1969,7 +2012,9 @@ fn now_ms() -> i64 {
 
 #[cfg(test)]
 mod tests {
-    use super::retry_backoff;
+    use super::{dashboard_config, retry_backoff, save_dashboard_config};
+    use crate::models::{DashboardCardConfig, DashboardConfig, DASHBOARD_CONFIG_VERSION};
+    use rusqlite::Connection;
     use std::time::Duration;
 
     #[test]
@@ -1978,5 +2023,51 @@ mod tests {
         assert_eq!(retry_backoff(2), Duration::from_millis(50));
         assert_eq!(retry_backoff(8), Duration::from_millis(3_200));
         assert_eq!(retry_backoff(u32::MAX), Duration::from_secs(5));
+    }
+
+    fn dashboard_config_fixture() -> DashboardConfig {
+        DashboardConfig {
+            version: DASHBOARD_CONFIG_VERSION,
+            cards: vec![DashboardCardConfig {
+                id: "compute".into(),
+                metric_ids: vec!["system.cpu.usage_pct".into()],
+                hidden_metric_ids: Vec::new(),
+                order: 0,
+                visible: true,
+            }],
+        }
+    }
+
+    #[test]
+    fn dashboard_settings_round_trip_and_malformed_payload_falls_back() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute(
+            "CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at_ms INTEGER NOT NULL)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO settings(key, value, updated_at_ms) VALUES ('system_sample_interval_ms', '5000', 1)",
+            [],
+        )
+        .unwrap();
+        let config = dashboard_config_fixture();
+        save_dashboard_config(&conn, &config, 2).unwrap();
+        assert_eq!(dashboard_config(&conn).unwrap(), Some(config));
+        assert_eq!(
+            conn.query_row(
+                "SELECT value FROM settings WHERE key = 'system_sample_interval_ms'",
+                [],
+                |row| row.get::<_, String>(0)
+            )
+            .unwrap(),
+            "5000"
+        );
+        conn.execute(
+            "UPDATE settings SET value = '{broken' WHERE key = 'ui.dashboard.v1'",
+            [],
+        )
+        .unwrap();
+        assert_eq!(dashboard_config(&conn).unwrap(), None);
     }
 }

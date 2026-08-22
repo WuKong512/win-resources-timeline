@@ -1,4 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
+import type { DashboardConfig } from "../dashboard/config";
 import type { AppIdentity, AppResourceHistoryPoint, AppResourceSample, CollectionSettings, CollectorStatus, CrashCaseSummary, CrashDetectorStatus, CrashEvidenceDetail, DailyUsageSummary, ForegroundInterval, ResourceApp, StorageUsage, SystemSample, TimelineQueryResult, TodayOverview, UsageSummary } from "../types/resource";
 
 export const getTodayOverview = (startMs: number, endMs: number) =>
@@ -43,6 +44,8 @@ export const getStorageUsage = () => invoke<StorageUsage>("get_storage_usage");
 export const setCollectionPaused = (paused: boolean) => invoke<void>("set_collection_paused", { paused });
 export const getCollectionSettings = () => invoke<CollectionSettings>("get_collection_settings");
 export const setCollectionSettings = (settings: CollectionSettings) => invoke<void>("set_collection_settings", { settings });
+export const getDashboardConfig = () => invoke<DashboardConfig | null>("get_dashboard_config");
+export const setDashboardConfig = (config: DashboardConfig) => invoke<void>("set_dashboard_config", { config });
 export const getAutostartEnabled = () => invoke<boolean>("get_autostart_enabled");
 export const setAutostartEnabled = (enabled: boolean) => invoke<void>("set_autostart_enabled", { enabled });
 export const clearCollectedData = () => invoke<void>("clear_collected_data");
