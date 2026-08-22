@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Ord, PartialOrd, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -533,9 +534,110 @@ impl CollectionSettings {
     }
 }
 
+pub const DASHBOARD_CONFIG_VERSION: u32 = 1;
+pub const DASHBOARD_MAX_CARDS: usize = 12;
+pub const DASHBOARD_MAX_METRICS_PER_CARD: usize = 8;
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct DashboardConfig {
+    pub version: u32,
+    pub cards: Vec<DashboardCardConfig>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct DashboardCardConfig {
+    pub id: String,
+    pub metric_ids: Vec<String>,
+    #[serde(default)]
+    pub hidden_metric_ids: Vec<String>,
+    pub order: u32,
+    pub visible: bool,
+}
+
+impl DashboardConfig {
+    pub fn validate(&self) -> Result<(), String> {
+        if self.version != DASHBOARD_CONFIG_VERSION {
+            return Err("dashboard config version is unsupported".into());
+        }
+        if self.cards.len() > DASHBOARD_MAX_CARDS {
+            return Err("dashboard config contains too many cards".into());
+        }
+        let mut card_ids = HashSet::new();
+        let mut orders = HashSet::new();
+        for card in &self.cards {
+            if card.id.trim().is_empty() || card.id.len() > 64 || !card_ids.insert(card.id.as_str())
+            {
+                return Err("dashboard card ids must be non-empty and unique".into());
+            }
+            if card.order as usize >= DASHBOARD_MAX_CARDS || !orders.insert(card.order) {
+                return Err("dashboard card order must be bounded and unique".into());
+            }
+            if card.metric_ids.is_empty() || card.metric_ids.len() > DASHBOARD_MAX_METRICS_PER_CARD
+            {
+                return Err("dashboard card metric count is out of bounds".into());
+            }
+            let mut metric_ids = HashSet::new();
+            let mut unit_family = None;
+            for metric_id in &card.metric_ids {
+                if metric_id.trim().is_empty()
+                    || metric_id.len() > 256
+                    || !metric_ids.insert(metric_id.as_str())
+                {
+                    return Err("dashboard metric ids must be non-empty and unique".into());
+                }
+                let family = dashboard_metric_family(metric_id)
+                    .ok_or_else(|| format!("dashboard metric id is unsupported: {metric_id}"))?;
+                if unit_family.is_some_and(|existing| existing != family) {
+                    return Err("dashboard card metrics must use one compatible unit family".into());
+                }
+                unit_family = Some(family);
+            }
+            if card.hidden_metric_ids.len() > card.metric_ids.len() {
+                return Err("dashboard hidden metric count is out of bounds".into());
+            }
+            let metric_ids: HashSet<&str> = card.metric_ids.iter().map(String::as_str).collect();
+            let mut hidden_ids = HashSet::new();
+            for metric_id in &card.hidden_metric_ids {
+                if !hidden_ids.insert(metric_id.as_str())
+                    || !metric_ids.contains(metric_id.as_str())
+                {
+                    return Err("dashboard hidden metrics must belong to their card".into());
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+fn dashboard_metric_family(metric_id: &str) -> Option<&'static str> {
+    match metric_id {
+        "system.cpu.usage_pct" | "system.memory.usage_pct" => Some("percent"),
+        "system.memory.used_bytes" => Some("bytes"),
+        "system.disk.read_bps" | "system.disk.write_bps" => Some("throughput"),
+        _ => {
+            let (device_key, field) = metric_id.strip_prefix("gpu.")?.rsplit_once('.')?;
+            if device_key.trim().is_empty() {
+                return None;
+            }
+            match field {
+                "utilization_pct" | "memory_controller_utilization_pct" => Some("percent"),
+                "temperature_c" => Some("temperature"),
+                "board_power_w" => Some("power"),
+                "graphics_clock_mhz" | "memory_clock_mhz" => Some("frequency"),
+                "vram_used_bytes" | "vram_total_bytes" => Some("bytes"),
+                _ => None,
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod collection_settings_tests {
-    use super::CollectionSettings;
+    use super::{
+        CollectionSettings, DashboardCardConfig, DashboardConfig, DASHBOARD_CONFIG_VERSION,
+    };
 
     #[test]
     fn validates_safe_low_overhead_ranges() {
@@ -552,5 +654,44 @@ mod collection_settings_tests {
         }
         .validate()
         .is_err());
+    }
+
+    fn dashboard(metric_ids: &[&str]) -> DashboardConfig {
+        DashboardConfig {
+            version: DASHBOARD_CONFIG_VERSION,
+            cards: vec![DashboardCardConfig {
+                id: "card-1".into(),
+                metric_ids: metric_ids.iter().map(|value| (*value).into()).collect(),
+                hidden_metric_ids: Vec::new(),
+                order: 0,
+                visible: true,
+            }],
+        }
+    }
+
+    #[test]
+    fn dashboard_accepts_same_axis_metrics_and_rejects_incompatible_or_unknown_ids() {
+        assert!(
+            dashboard(&["system.cpu.usage_pct", "gpu.device-uuid.unknown"])
+                .validate()
+                .is_err()
+        );
+        assert!(
+            dashboard(&["system.cpu.usage_pct", "gpu.device-uuid.utilization_pct"])
+                .validate()
+                .is_ok()
+        );
+        assert!(
+            dashboard(&["system.cpu.usage_pct", "system.memory.used_bytes"])
+                .validate()
+                .is_err()
+        );
+        assert!(dashboard(&["system.not_real.value"]).validate().is_err());
+    }
+
+    #[test]
+    fn dashboard_preserves_stable_gpu_identity_without_using_enumeration_index() {
+        let config = dashboard(&["gpu.NVIDIA-UUID-123.temperature_c"]);
+        assert!(config.validate().is_ok());
     }
 }
