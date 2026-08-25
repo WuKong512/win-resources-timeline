@@ -32,7 +32,11 @@
 - 硬件指标在正式接入前完成 [Spike-01](./collection-feasibility-spike.md)，报告来源、权限、更新粒度和增量开销。
 - 报告测试硬件、采集配置、持续时间、平均/P95 CPU、内存和数据库增长。
 - Provider 开关验证真正停止工作。
-- 24 小时 soak 无无界队列、句柄、线程或内存增长；这是 PR-07 release/stability gate，不是 PR-04A storage contract 的 entry blocker。
+- PR-07 的 mandatory release/stability gate 是 multi-session extended native qualification：至少 3 个独立 native session、每个 session >=10 小时、至少 1 个 session >=12 小时、aggregate valid native runtime >=32 小时；整体覆盖 long idle/background、normal interactive、local-midnight rollover、Provider/category disable-enable、DB busy/recovery、clean process shutdown/reopen、schema/integrity continuity、bounded resource behavior 和 validated-profile performance/storage budget。各 session 必须分别检查无无界队列、句柄、线程或内存增长。
+- continuous 24-hour soak 是 optional extended qualification，不是 PR-07 mandatory blocker。该模型与 Resource Timeline 的实际 duty cycle 对齐：Windows 启动、通常运行十多个小时、sleep/shutdown、下一 session 再启动并多日重复；它同时覆盖单 session 慢增长与 repeated startup/shutdown、DB reopen、WAL checkpoint/recovery、Provider lifecycle recreation 和 stale native object/mutex 风险。单次 >=10 小时且至少一次 >=12 小时仍用于检测 memory leak、handle/thread growth、queue accumulation、WAL runaway 和 retry loop。
+- Real Windows sleep/wake 是当前 validated AMD/NVIDIA desktop profile 的 `DEFERRED POWER-STATE / COMPATIBILITY QUALIFICATION`：不是 mandatory PR-07B blocker，也不是 correctness PASS。任何观察到的异常必须保留为 evidence，不得归因于 Resource Timeline、Windows 或硬件；当前异常 attribution 为 `UNKNOWN`，后续 compatibility declaration gate 独立处理。
+
+PR-07B 的 release/stability 结论只适用于实际验证的 hardware profile，不等同于 full cross-hardware support declaration。当前 profile 为 Windows desktop、AMD CPU、NVIDIA GPU、no battery。Intel CPU、AMD/Intel GPU 和 battery-capable device 的 hardware support/compatibility declaration gate 独立保留；未测设备不得宣称已覆盖，未完成时记录为 `Deferred hardware support declaration / compatibility qualification`。
 
 ### 产品语义
 
@@ -72,7 +76,7 @@ PR-03 已在 schema v7 runtime settings storage 上落地 Provider framework；P
 - fake provider tests 覆盖 capability state、plan determinism、disable/re-enable、unsupported、startup/reconfigure retry、late lifecycle reconciliation、stale generation、sample timeout isolation、per-provider control deadline、Disk probe/start-time degradation、pause、shutdown 和 DTO 区分。
 - PR-04A 没有 NVML production integration、`nvidia-smi`、AMD/Intel Provider、CPU sensor、UI redesign 或 PR-05 内容；`tools/metric-probe` 保持独立且未修改。
 
-Spike-01B 已在当前 RTX 5070 Ti 开发机完成 short-term implementation admission（PASS）：有效 administrator comparison、30-minute idle/representative load、enable/disable/re-enable、cleanup、failure isolation 和真实 sleep/wake evidence 均已完成，因此 PR-04 NVIDIA Provider entry gate 已满足。该结论仅限当前开发机，不改变 GPU 默认关闭策略，也不声明 NVIDIA 产品线支持、production-ready 或完整 support matrix。PR-04A 的 provider/session/device metadata 只证明 storage contract 具备 historical traceability capability；PR-04 负责让 production Provider 维护 runtime truth。24-hour soak、数据库增长、跨硬件验证和完整 release matrix 仍属于后续 release/stability 或 support declaration gate。
+Spike-01B 已在当前 RTX 5070 Ti 开发机完成 short-term implementation admission（PASS）：有效 administrator comparison、30-minute idle/representative load、enable/disable/re-enable、cleanup、failure isolation 和真实 sleep/wake evidence 均已完成，因此 PR-04 NVIDIA Provider entry gate 已满足。该结论仅限当前开发机，不改变 GPU 默认关闭策略，也不声明 NVIDIA 产品线支持、production-ready 或完整 support matrix。PR-04A 的 provider/session/device metadata 只证明 storage contract 具备 historical traceability capability；PR-04 负责让 production Provider 维护 runtime truth。PR-07 的后续 release/stability gate 采用本文件定义的 multi-session extended native qualification；continuous 24-hour soak 为 optional extended qualification，数据库增长、跨硬件验证和完整 release matrix 仍分别按相应 gate 执行。
 
 ## PR-05 当前落地状态
 

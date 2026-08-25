@@ -168,6 +168,7 @@ pub fn acquire_instance() -> Result<Option<InstanceGuard>, String> {
     }
 }
 
+#[cfg(not(feature = "qualification"))]
 pub fn refresh_autostart_command() -> Result<(), String> {
     #[cfg(windows)]
     {

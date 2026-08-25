@@ -5,6 +5,10 @@ description = "Local Windows foreground activity and system resource timeline"
 authors = ["Resource Timeline"]
 edition = "2021"
 
+[features]
+default = []
+qualification = []
+
 [lib]
 name = "resource_timeline_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
