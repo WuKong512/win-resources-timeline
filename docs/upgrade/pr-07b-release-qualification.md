@@ -40,6 +40,11 @@ still exercises within-session slow growth and queue/retry behavior while adding
 repeated startup/shutdown, DB reopen, WAL checkpoint/recovery, provider
 recreation, stale native-object risk, and cross-session baseline checks.
 
+Real Windows sleep/wake is deliberately outside the mandatory PR-07B blocker
+list. It is a `DEFERRED POWER-STATE / COMPATIBILITY QUALIFICATION` for the
+validated AMD/NVIDIA desktop profile: not a PASS, not attributed to Resource
+Timeline, Windows, or hardware, and preserved with attribution `UNKNOWN`.
+
 - Repository: `https://github.com/WuKong512/win-resources-timeline.git`
 - `BASE_COMMIT`: `89a9cc821771bd65b80c730bf922b37ff7777075`
 - `START_HEAD`: `89a9cc821771bd65b80c730bf922b37ff7777075`
