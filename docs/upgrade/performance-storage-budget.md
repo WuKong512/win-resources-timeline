@@ -10,9 +10,9 @@
 | 最小模式 | 平均 < 0.2% | 稳态 < 65 MB | 仅 CPU/内存/使用时间 |
 | 查询/聚合 | 短时峰值允许更高 | 有界 | 不应造成持续卡顿 |
 
-这些是工程门槛，不是未经测量的宣传值。发布前需在 Intel/AMD CPU、至少 NVIDIA/AMD/Intel GPU 代表设备和电池设备上测量 P50/P95。
+这些是工程门槛，不是未经测量的宣传值。PR-07B 负责 validated hardware profile 的 release/stability qualification；本轮 profile 为 Windows desktop、AMD CPU、NVIDIA GPU、no battery。它不能证明 full cross-hardware support declaration。Intel CPU、AMD/Intel GPU、NVIDIA GPU 和 battery-capable device 的代表机仍属于独立的 hardware support/compatibility declaration gate；未完成时必须标记 `Deferred hardware support declaration / compatibility qualification`，不得把单一 profile 结果写成全硬件支持 PASS。
 
-硬件指标正式接入前先按 [Spike-01](./collection-feasibility-spike.md) 隔离测量每个候选 Provider。探针只决定接口与开销是否值得继续；它不能替代完整应用的 24 小时 soak 和存储增长测试。
+硬件指标正式接入前先按 [Spike-01](./collection-feasibility-spike.md) 隔离测量每个候选 Provider。探针只决定接口与开销是否值得继续；它不能替代 PR-07 的 multi-session extended native qualification、存储增长测试或独立 hardware support declaration gate。
 
 ## 采样成本控制
 
@@ -72,4 +72,8 @@
 
 每个 Provider 记录调用耗时、失败率、连续失败和采样超时；Writer 记录事务耗时、队列深度、writer delay、drop count；Maintenance 记录删除/rollup 行数和耗时。开发构建提供诊断页，正式构建至少能导出脱敏健康报告。
 
-验收需要 24 小时 soak test、7 天空间增长外推、设置动态启停、数据库忙、睡眠/唤醒和系统时间变化场景。性能回归基于同一采样配置比较，不能混用配置得出结论。
+PR-07 mandatory acceptance 使用 multi-session extended native qualification：至少 3 个独立 native session、每个 >=10 小时、至少一个 >=12 小时、aggregate valid native runtime >=32 小时，并 collectively 覆盖 long idle/background、normal interactive、local-midnight rollover、sleep/wake、动态 Provider/category 启停、数据库忙/恢复、clean process shutdown/reopen 和 schema/integrity continuity。continuous 24-hour soak 保留为 optional extended qualification，不是 mandatory blocker。
+
+该 multi-session model aligned with the application's expected real-world duty cycle：Windows 启动后通常运行十多个小时，再经历 sleep/shutdown 并在下一 session 重新启动、reopen DB，多日重复。它同时观察 within-session slow resource growth、repeated startup/shutdown、WAL checkpoint/recovery、Provider lifecycle recreation、stale native object/mutex risk 和 sleep/wake recovery；单次 >=10 小时与 >=12 小时约束仍保留对 memory leak、handle/thread growth、queue accumulation、WAL runaway 和 retry loop 的敏感性。性能回归基于同一采样配置比较，不能混用配置得出结论。
+
+若真实宿主机 sleep/wake 被外部电源/输入状态异常打断，无法形成完整且可归因的应用恢复证据，必须保留实际 observation 并标记 `DEFERRED — NON-BLOCKING`；这不是 sleep/wake correctness 或 full hardware support 的 PASS，后续 compatibility declaration gate 仍需独立完成。

@@ -1064,6 +1064,8 @@ fn allowed_event_kind(kind: &str) -> bool {
             | "gui_smoke_end"
             | "reopen_start"
             | "reopen_end"
+            | "shutdown_start"
+            | "shutdown_end"
     )
 }
 
