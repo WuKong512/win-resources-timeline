@@ -6,6 +6,7 @@ use crate::{
     AppState,
 };
 use tauri::{AppHandle, State};
+#[cfg(not(feature = "qualification"))]
 use tauri_plugin_autostart::ManagerExt;
 
 #[tauri::command]
@@ -93,22 +94,30 @@ pub fn get_autostart_enabled(
         .db
         .with_writer(writer::start_with_windows)
         .map_err(CommandError::from)?;
-    let autolaunch = app.autolaunch();
-    let actual = autolaunch
-        .is_enabled()
-        .map_err(|e| AppError::Other(e.to_string()))?;
-    if preferred != actual {
-        let result = if preferred {
-            autolaunch.enable()
-        } else {
-            autolaunch.disable()
-        };
-        result.map_err(|e| AppError::Other(e.to_string()))?;
+    #[cfg(feature = "qualification")]
+    {
+        let _ = app;
+        return Ok(preferred);
     }
-    if preferred {
-        crate::platform::refresh_autostart_command().map_err(AppError::Other)?;
+    #[cfg(not(feature = "qualification"))]
+    {
+        let autolaunch = app.autolaunch();
+        let actual = autolaunch
+            .is_enabled()
+            .map_err(|e| AppError::Other(e.to_string()))?;
+        if preferred != actual {
+            let result = if preferred {
+                autolaunch.enable()
+            } else {
+                autolaunch.disable()
+            };
+            result.map_err(|e| AppError::Other(e.to_string()))?;
+        }
+        if preferred {
+            crate::platform::refresh_autostart_command().map_err(AppError::Other)?;
+        }
+        Ok(preferred)
     }
-    Ok(preferred)
 }
 
 #[tauri::command]
@@ -117,19 +126,30 @@ pub fn set_autostart_enabled(
     state: State<'_, AppState>,
     enabled: bool,
 ) -> Result<(), CommandError> {
-    let result = if enabled {
-        app.autolaunch().enable()
-    } else {
-        app.autolaunch().disable()
-    };
-    result.map_err(|e| AppError::Other(e.to_string()))?;
-    if enabled {
-        crate::platform::refresh_autostart_command().map_err(AppError::Other)?;
+    #[cfg(feature = "qualification")]
+    {
+        let _ = app;
+        state
+            .db
+            .with_writer(|conn| writer::save_start_with_windows(conn, enabled, now_ms()))
+            .map_err(Into::into)
     }
-    state
-        .db
-        .with_writer(|conn| writer::save_start_with_windows(conn, enabled, now_ms()))
-        .map_err(Into::into)
+    #[cfg(not(feature = "qualification"))]
+    {
+        let result = if enabled {
+            app.autolaunch().enable()
+        } else {
+            app.autolaunch().disable()
+        };
+        result.map_err(|e| AppError::Other(e.to_string()))?;
+        if enabled {
+            crate::platform::refresh_autostart_command().map_err(AppError::Other)?;
+        }
+        state
+            .db
+            .with_writer(|conn| writer::save_start_with_windows(conn, enabled, now_ms()))
+            .map_err(Into::into)
+    }
 }
 
 #[tauri::command]

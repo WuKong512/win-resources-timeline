@@ -15,7 +15,8 @@ unsafe impl Sync for Guard {}
 
 pub fn acquire() -> Result<Option<Guard>, String> {
     unsafe {
-        let handle = CreateMutexW(None, true, w!("Local\\ResourceTimelineMvpGuard"))
+        let name = guard_name();
+        let handle = CreateMutexW(None, true, PCWSTR::from_raw(name.as_ptr()))
             .map_err(|error| error.to_string())?;
         if GetLastError() == ERROR_ALREADY_EXISTS {
             notify_existing_instance();
@@ -24,6 +25,22 @@ pub fn acquire() -> Result<Option<Guard>, String> {
         }
         Ok(Some(Guard(handle.0 as isize)))
     }
+}
+
+#[cfg(feature = "qualification")]
+fn guard_name() -> Vec<u16> {
+    "Local\\ResourceTimelineQualificationGuard"
+        .encode_utf16()
+        .chain(std::iter::once(0))
+        .collect()
+}
+
+#[cfg(not(feature = "qualification"))]
+fn guard_name() -> Vec<u16> {
+    "Local\\ResourceTimelineMvpGuard"
+        .encode_utf16()
+        .chain(std::iter::once(0))
+        .collect()
 }
 
 fn notify_existing_instance() {
