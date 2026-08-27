@@ -1,7 +1,8 @@
 import { useMemo, useState } from "react";
-import { AlertTriangle, ArrowDown, ArrowUp, Check, CircleHelp, LineChart, Pin, Search } from "lucide-react";
+import { AlertTriangle, ArrowDown, ArrowUp, Check, CircleHelp, LineChart, Pin, RotateCcw, Search } from "lucide-react";
 import { useI18n, type TranslationKey } from "../i18n";
 import { isMetricPinned, type DashboardConfig } from "../dashboard/config";
+import type { MetricCatalogLoadPhase } from "../dashboard/metricCatalogState";
 import { gpuDeviceLabel, metricItemDisplayName, type MetricCatalogItem, type MetricId, type MetricUiStatus } from "../dashboard/metrics";
 import type { MetricCategory, SystemSample } from "../types/resource";
 import { Badge } from "./ui/Badge";
@@ -106,6 +107,22 @@ export function MetricExplorer({ catalog, samples, config, trendMetricIds, onTog
       </section>)}
     </div>}
     <OverviewPins config={config} catalog={catalog} samples={samples} onMoveCard={onMoveCard} onTogglePin={onTogglePin} />
+  </div>;
+}
+
+export function MetricCatalogLoadNotice({ phase, onRetry }: { phase: MetricCatalogLoadPhase; onRetry: () => void }) {
+  const { t } = useI18n();
+  if (phase === "loaded") return null;
+  const failed = phase === "failed";
+  const className = failed
+    ? "border-[hsl(var(--warning)/0.4)] bg-[hsl(var(--warning-surface))] flex flex-wrap items-center justify-between gap-3 rounded-lg border px-3 py-2.5 text-xs"
+    : "border-border bg-muted/35 flex flex-wrap items-center justify-between gap-3 rounded-lg border px-3 py-2.5 text-xs";
+  return <div role={failed ? "alert" : "status"} aria-live={failed ? "assertive" : "polite"} aria-busy={!failed} className={className}>
+    <div className="flex min-w-0 items-start gap-2">
+      {failed ? <AlertTriangle size={15} className="mt-0.5 shrink-0 text-[hsl(var(--warning))]" aria-hidden="true" /> : <CircleHelp size={15} className="mt-0.5 shrink-0 text-muted-foreground" aria-hidden="true" />}
+      <div className="min-w-0"><div className="font-medium text-foreground">{failed ? t("dashboardMetricCatalogDegradedTitle") : t("dashboardMetricCatalogLoading")}</div><div className="mt-0.5 text-muted-foreground">{failed ? t("dashboardMetricCatalogDegradedMessage") : t("dashboardMetricCatalogLoadingMessage")}</div></div>
+    </div>
+    {failed && <Button type="button" variant="outline" className="h-8 shrink-0 px-2.5 text-xs" onClick={onRetry}><RotateCcw size={13} aria-hidden="true" />{t("dashboardRetryMetricCatalog")}</Button>}
   </div>;
 }
 

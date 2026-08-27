@@ -3,7 +3,7 @@ import type { ECharts } from "echarts";
 import { AlertTriangle, Check, CircleHelp, LineChart, RotateCcw } from "lucide-react";
 import { useI18n, type TranslationKey } from "../i18n";
 import { buildDashboardChartOption } from "../dashboard/chartOptions";
-import { formatMetricValue, hasMetricData, metricItemDisplayName, metricValue, type MetricCatalogItem, type MetricId, type UnitFamily } from "../dashboard/metrics";
+import { formatMetricValue, hasMetricData, metricItemDisplayName, metricValue, trendFamilies, type MetricCatalogItem, type MetricId, type UnitFamily } from "../dashboard/metrics";
 import type { SystemSample, TimelineGap } from "../types/resource";
 import { formatClock } from "../utils/time";
 import { useUiStore } from "../stores/uiStore";
@@ -29,7 +29,6 @@ type DashboardTrendWorkspaceProps = {
   onOpenExplorer: () => void;
 };
 
-const familyOrder: UnitFamily[] = ["percent", "throughput", "bytes", "temperature", "power", "frequency"];
 const familyLabels: Record<UnitFamily, TranslationKey> = {
   percent: "dashboardGroupUtilization",
   throughput: "dashboardGroupDisk",
@@ -50,7 +49,7 @@ export function DashboardTrendWorkspace({ catalog, samples, gaps, startMs, endMs
     }
     return map;
   }, [catalog]);
-  const families = familyOrder.filter((family) => (grouped.get(family)?.length ?? 0) > 0);
+  const families = trendFamilies(catalog);
   const family = activeFamily && families.includes(activeFamily) ? activeFamily : families[0] ?? null;
   const familyItems = family ? grouped.get(family) ?? [] : [];
   const selectedIds = useMemo(() => family ? trendSelections[family] ?? [] : [], [family, trendSelections]);

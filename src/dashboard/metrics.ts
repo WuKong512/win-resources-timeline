@@ -36,6 +36,8 @@ export type MetricDimension = "system" | "gpu";
 
 export type MetricUiStatus = "AVAILABLE" | "NO_DATA_IN_RANGE" | "DISABLED" | "UNSUPPORTED" | "FAILED" | "DEGRADED" | "UNKNOWN";
 
+export type CurrentReadingPresentation = "VALUE" | "NO_CURRENT_READING" | "STATUS";
+
 export type AvailabilityRequirement =
   | { kind: "system-field"; field: keyof Pick<SystemSample, "cpuPercent" | "memoryPercent" | "memoryUsedBytes" | "diskReadBytesPerSec" | "diskWriteBytesPerSec"> }
   | { kind: "gpu-field"; field: GpuMetricField };
@@ -65,6 +67,27 @@ export interface MetricCatalogItem {
   device: MetricCatalogDevice | null;
   status: MetricUiStatus;
   rawSupportStatus: MetricCatalogEntry["supportStatus"] | "unknown";
+}
+
+export const UNIT_FAMILY_ORDER: readonly UnitFamily[] = ["percent", "throughput", "bytes", "temperature", "power", "frequency"];
+
+export function isTrendMetricSelectable(item: Pick<MetricCatalogItem, "status">): boolean {
+  return item.status !== "UNSUPPORTED" && item.status !== "UNKNOWN";
+}
+
+export function trendFamilies(catalog: readonly MetricCatalogItem[]): UnitFamily[] {
+  const families = new Set(catalog.filter(isTrendMetricSelectable).map((item) => item.descriptor.unitFamily));
+  return UNIT_FAMILY_ORDER.filter((family) => families.has(family));
+}
+
+/**
+ * Range availability and the latest reading are separate facts. A metric can have a valid
+ * sample earlier in the range while the most recent sample has no value.
+ */
+export function currentReadingPresentation(status: MetricUiStatus, value: number | null): CurrentReadingPresentation {
+  if ((status === "AVAILABLE" || status === "DEGRADED") && value != null && Number.isFinite(value)) return "VALUE";
+  if (status === "AVAILABLE" || status === "DEGRADED") return "NO_CURRENT_READING";
+  return "STATUS";
 }
 
 export const SYSTEM_METRIC_IDS = {
@@ -305,7 +328,9 @@ export function runtimeMetricKey(descriptor: MetricDescriptor): string {
  */
 export function buildMetricCatalog({ snapshot, samples, providers, settings }: BuildMetricCatalogOptions): MetricCatalogItem[] {
   const entries = snapshot?.metrics ?? [];
-  const devices = mergeGpuDevices(snapshot?.devices ?? [], entries, samples);
+  // Sample-only identities are a deliberate degraded fallback. Once the authoritative snapshot
+  // is loaded, it remains the source of device existence instead of the selected range.
+  const devices = mergeGpuDevices(snapshot?.devices ?? [], entries, snapshot == null ? samples : []);
   const items: MetricCatalogItem[] = [];
 
   for (const descriptor of systemMetricDescriptors()) {
@@ -319,7 +344,11 @@ export function buildMetricCatalog({ snapshot, samples, providers, settings }: B
     || gpuEntries.length > 0
     || providers.some((provider) => provider.capabilities.some((capability) => capability.category === "gpu"))
     || samples.some((sample) => sample.gpus.length > 0);
-  if (gpuKnown) {
+  // A failed catalog request may still leave provider capability truth and current system
+  // samples. Do not turn that into a synthetic provider/device identity: only observed device
+  // keys may seed a degraded GPU fallback. An authoritative snapshot may intentionally expose
+  // provider-level rows before a device is discovered, so that path remains available.
+  if (gpuKnown && (devices.length > 0 || snapshot != null)) {
     const gpuProviderId = gpuEntries[0]?.providerId ?? GPU_METRIC_PROVIDER_ID;
     if (devices.length) {
       for (const device of devices) {

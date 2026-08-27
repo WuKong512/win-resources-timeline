@@ -1,13 +1,16 @@
 import { describe, expect, it } from "vitest";
 import {
   buildMetricCatalog,
+  currentReadingPresentation,
   getAvailableMetricDescriptors,
   getMetricDescriptor,
   gpuMetricId,
   metricValue,
+  trendFamilies,
   type GpuMetricField,
   type MetricCatalogItem
 } from "./metrics";
+import { canRetryMetricCatalog, failMetricCatalogLoad, hasAuthoritativeMetricCatalog } from "./metricCatalogState";
 import type { MetricCatalogEntry, MetricCatalogSnapshot, MetricCategory, ProviderStatus, SystemSample } from "../types/resource";
 
 function sample(timestampMs: number, overrides: Partial<SystemSample> = {}): SystemSample {
@@ -128,12 +131,110 @@ describe("metric registry", () => {
     expect(items.map((item) => item.id)).toContain(gpuMetricId("nvml:uuid-b", "temperature_c"));
     expect(items.find((item) => item.id === gpuMetricId("nvml:uuid-a", "temperature_c"))?.device?.stableKey).toBe("nvml:uuid-a");
     expect(items.find((item) => item.id === gpuMetricId("nvml:uuid-b", "temperature_c"))?.device?.stableKey).toBe("nvml:uuid-b");
+    expect(items.find((item) => item.id === gpuMetricId("nvml:uuid-a", "temperature_c"))?.status).toBe("NO_DATA_IN_RANGE");
+  });
+
+  it("does not add a sample-only GPU identity to an authoritative catalog", () => {
+    const items = catalog({ metrics: [], devices: [] }, [sample(1)]);
+
+    expect(items.some((item) => item.device?.stableKey === "nvml:uuid-abc")).toBe(false);
+    expect(items.some((item) => item.id === gpuMetricId("nvml:uuid-abc", "temperature_c"))).toBe(false);
+  });
+
+  it("keeps a degraded catalog observable without inventing a GPU identity", () => {
+    const failed = failMetricCatalogLoad();
+    const items = buildMetricCatalog({
+      snapshot: failed.snapshot,
+      samples: [sample(1, { gpus: [] })],
+      providers: [provider("windows-baseline", ["cpu", "memory", "disk"]), provider("nvidia-nvml", ["gpu"])],
+      settings: settings()
+    });
+
+    expect(hasAuthoritativeMetricCatalog(failed)).toBe(false);
+    expect(canRetryMetricCatalog(failed)).toBe(true);
+    expect(items.some((item) => item.id === "system.cpu.usage_pct")).toBe(true);
+    expect(items.some((item) => item.category === "gpu")).toBe(false);
+
+    const observedFallback = buildMetricCatalog({
+      snapshot: failed.snapshot,
+      samples: [sample(1)],
+      providers: [provider("windows-baseline", ["cpu", "memory", "disk"]), provider("nvidia-nvml", ["gpu"])],
+      settings: settings()
+    });
+    expect(observedFallback.some((item) => item.device?.stableKey === "nvml:uuid-abc")).toBe(true);
   });
 
   it("treats numeric zero as available and null as no-data, never as unsupported", () => {
     const snapshot = { metrics: [systemEntry("system.cpu.usage_pct")], devices: [] };
     expect(catalog(snapshot, [sample(1, { cpuPercent: 0 })]).find((item) => item.id === "system.cpu.usage_pct")?.status).toBe("AVAILABLE");
     expect(catalog(snapshot, [sample(1, { cpuPercent: null })]).find((item) => item.id === "system.cpu.usage_pct")?.status).toBe("NO_DATA_IN_RANGE");
+  });
+
+  it("keeps range availability separate from a missing latest reading", () => {
+    const snapshot = { metrics: [systemEntry("system.cpu.usage_pct")], devices: [] };
+    const samples = [sample(1, { cpuPercent: 42 }), sample(2, { cpuPercent: null })];
+    const item = catalog(snapshot, samples).find((candidate) => candidate.id === "system.cpu.usage_pct")!;
+
+    expect(item.status).toBe("AVAILABLE");
+    expect(metricValue(item.descriptor, samples[1])).toBeNull();
+    expect(currentReadingPresentation(item.status, metricValue(item.descriptor, samples[1]))).toBe("NO_CURRENT_READING");
+    expect(currentReadingPresentation(item.status, metricValue(item.descriptor, samples[0]))).toBe("VALUE");
+  });
+
+  it("hides unsupported-only trend families while keeping their Explorer rows", () => {
+    const device = { stableKey: "nvml:uuid-temp", vendor: "NVIDIA", model: "Temperature GPU", capacityBytes: 8 };
+    const unsupportedMetrics = [entry("gpu.temperature_celsius", "gpu", "unsupported", { device })];
+    const items = catalog({ metrics: unsupportedMetrics, devices: [device] }, [], [provider("windows-baseline", ["cpu", "memory", "disk"]), provider("nvidia-nvml", ["gpu"])])
+      .filter((item) => item.descriptor.unitFamily === "temperature");
+
+    expect(items).toHaveLength(1);
+    expect(items[0].status).toBe("UNSUPPORTED");
+    expect(trendFamilies(items)).not.toContain("temperature");
+    expect(items.map((item) => item.id)).toContain(gpuMetricId(device.stableKey, "temperature_c"));
+  });
+
+  it("hides unknown-only trend families while keeping their Explorer rows", () => {
+    const device = { stableKey: "nvml:uuid-unknown", vendor: "NVIDIA", model: "Unknown GPU", capacityBytes: 8 };
+    const items = buildMetricCatalog({
+      snapshot: { metrics: [], devices: [device] },
+      samples: [],
+      providers: [provider("windows-baseline", ["cpu", "memory", "disk"])],
+      settings: settings()
+    }).filter((item) => item.descriptor.unitFamily === "temperature");
+
+    expect(items).toHaveLength(1);
+    expect(items[0].status).toBe("UNKNOWN");
+    expect(trendFamilies(items)).not.toContain("temperature");
+    expect(items.map((item) => item.id)).toContain(gpuMetricId(device.stableKey, "temperature_c"));
+  });
+
+  it("keeps a no-data trend family visible for explanation", () => {
+    const device = { stableKey: "nvml:uuid-no-data", vendor: "NVIDIA", model: "No Data GPU", capacityBytes: 8 };
+    const items = catalog({ metrics: [], devices: [device] }, []);
+
+    expect(items.find((item) => item.id === gpuMetricId(device.stableKey, "temperature_c"))?.status).toBe("NO_DATA_IN_RANGE");
+    expect(trendFamilies(items)).toContain("temperature");
+  });
+
+  it("keeps a failed trend family visible while its Explorer row explains the failure", () => {
+    const device = { stableKey: "nvml:uuid-failed", vendor: "NVIDIA", model: "Failed GPU", capacityBytes: 8 };
+    const items = catalog({ metrics: [entry("gpu.temperature_celsius", "gpu", "failed", { device })], devices: [device] }, []);
+
+    expect(items.find((item) => item.id === gpuMetricId(device.stableKey, "temperature_c"))?.status).toBe("FAILED");
+    expect(trendFamilies(items)).toContain("temperature");
+  });
+
+  it("keeps a disabled trend family visible without enabling collection", () => {
+    const device = { stableKey: "nvml:uuid-disabled", vendor: "NVIDIA", model: "Disabled GPU", capacityBytes: 8 };
+    const items = buildMetricCatalog({
+      snapshot: { metrics: [], devices: [device] },
+      samples: [],
+      providers: [provider("windows-baseline", ["cpu", "memory", "disk"]), provider("nvidia-nvml", ["gpu"])],
+      settings: settings(["cpu", "memory", "disk"])
+    });
+
+    expect(items.find((item) => item.id === gpuMetricId(device.stableKey, "temperature_c"))?.status).toBe("DISABLED");
+    expect(trendFamilies(items)).toContain("temperature");
   });
 
   it.each([

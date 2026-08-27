@@ -14,6 +14,7 @@ import { DashboardOverview } from "../components/DashboardOverview";
 import { DashboardEditor } from "../components/DashboardEditor";
 import { DashboardTrendWorkspace, type TrendMetricSelections } from "../components/DashboardTrendWorkspace";
 import { DateRangePicker } from "../components/DateRangePicker";
+import { MetricCatalogLoadNotice } from "../components/MetricExplorer";
 import { ResourceTimelineChart } from "../components/ResourceTimelineChart";
 import { RuntimeErrorBoundary } from "../components/RuntimeErrorBoundary";
 import { Badge } from "../components/ui/Badge";
@@ -23,8 +24,9 @@ import { useI18n } from "../i18n";
 import { useUiStore } from "../stores/uiStore";
 import { createDefaultDashboardConfig, reorderDashboardCards, toggleMetricPin, validateDashboardConfig, type DashboardConfig } from "../dashboard/config";
 import { canPersistDashboard, classifyDashboardLoad, isDashboardEditable, type DashboardLoadState } from "../dashboard/loadState";
-import { buildMetricCatalog, type MetricCatalogItem, type MetricId, type UnitFamily } from "../dashboard/metrics";
-import type { AppResourceSample, CapabilityState, CollectionSettings, CollectorStatus, GpuSample, MetricCatalogSnapshot, ProviderStatus, SystemSample, TimelineQueryResult } from "../types/resource";
+import { buildMetricCatalog, isTrendMetricSelectable, trendFamilies, type MetricCatalogItem, type MetricId, type UnitFamily } from "../dashboard/metrics";
+import { completeMetricCatalogLoad, failMetricCatalogLoad, initialMetricCatalogLoadState, startMetricCatalogLoad, type MetricCatalogLoadState } from "../dashboard/metricCatalogState";
+import type { AppResourceSample, CapabilityState, CollectionSettings, CollectorStatus, GpuSample, ProviderStatus, SystemSample, TimelineQueryResult } from "../types/resource";
 import { effectiveTimelineDate, formatBytes, formatClock, localDateString, millisecondsUntilLocalMidnight, timelineWindowRange } from "../utils/time";
 import { aggregateCategoryCapability, gpuDevices, metricDataState, timelineRefreshIntervalMs } from "../utils/uiSemantics";
 
@@ -40,7 +42,7 @@ export function TimelinePage() {
   const [timeline, setTimeline] = useState<TimelineQueryResult | null>(null);
   const [status, setStatus] = useState<CollectorStatus | null>(null);
   const [settings, setSettings] = useState<CollectionSettings | null>(null);
-  const [metricCatalogSnapshot, setMetricCatalogSnapshot] = useState<MetricCatalogSnapshot | null>(null);
+  const [metricCatalogLoadState, setMetricCatalogLoadState] = useState<MetricCatalogLoadState>(initialMetricCatalogLoadState);
   const [dashboardConfig, setDashboardConfigState] = useState<DashboardConfig | null>(null);
   const [dashboardLoadState, setDashboardLoadState] = useState<DashboardLoadState>("loading");
   const [dashboardCustomizing, setDashboardCustomizing] = useState(false);
@@ -59,6 +61,7 @@ export function TimelinePage() {
   const trendInitializedRef = useRef(false);
   const timelineRef = useRef<TimelineQueryResult | null>(null);
   const requestIdRef = useRef(0);
+  const metricCatalogRequestRef = useRef(0);
   const dashboardLoadRequestRef = useRef(0);
   const dashboardSaveRevisionRef = useRef(0);
   const mountedRef = useRef(false);
@@ -103,17 +106,15 @@ export function TimelinePage() {
     Promise.all([
       getSystemTimeline(nextRange.startMs, nextRange.endMs, 2_500),
       getCollectorStatus(),
-      getCollectionSettings(),
-      getMetricCatalog().catch(() => null)
+      getCollectionSettings()
     ])
-      .then(([nextTimeline, nextStatus, nextSettings, nextCatalog]) => {
+      .then(([nextTimeline, nextStatus, nextSettings]) => {
         if (!mountedRef.current || cancelled || requestId !== requestIdRef.current) return;
         setRange(nextRange);
         timelineRef.current = nextTimeline;
         setTimeline(nextTimeline);
         setStatus(nextStatus);
         setSettings(nextSettings);
-        setMetricCatalogSnapshot(nextCatalog);
         setSelected((current) => current && nextTimeline.samples.some((sample) => sample.timestampMs === current.timestampMs) ? current : null);
       })
       .catch(() => {
@@ -128,6 +129,25 @@ export function TimelinePage() {
       });
     return () => { cancelled = true; };
   }, [followsCurrentDate, preset, selectedDate, setSelectedDate, t]);
+
+  const loadMetricCatalog = useCallback(() => {
+    let cancelled = false;
+    const requestId = metricCatalogRequestRef.current + 1;
+    metricCatalogRequestRef.current = requestId;
+    setMetricCatalogLoadState(startMetricCatalogLoad());
+    getMetricCatalog()
+      .then((snapshot) => {
+        if (!mountedRef.current || cancelled || requestId !== metricCatalogRequestRef.current) return;
+        setMetricCatalogLoadState(snapshot ? completeMetricCatalogLoad(snapshot) : failMetricCatalogLoad());
+      })
+      .catch(() => {
+        if (!mountedRef.current || cancelled || requestId !== metricCatalogRequestRef.current) return;
+        setMetricCatalogLoadState(failMetricCatalogLoad());
+      });
+    return () => { cancelled = true; };
+  }, []);
+
+  useEffect(() => loadMetricCatalog(), [loadMetricCatalog]);
 
   useEffect(() => {
     let cancelled = false;
@@ -251,17 +271,17 @@ export function TimelinePage() {
   const coverage = timeline?.coverage ?? 0;
   const selectedTime = selected ? formatClock(selected.timestampMs, language) : null;
   const metricCatalog = useMemo<MetricCatalogItem[]>(() => buildMetricCatalog({
-    snapshot: metricCatalogSnapshot,
+    snapshot: metricCatalogLoadState.snapshot,
     samples,
     providers: status?.providerStatus ?? [],
     settings
-  }), [metricCatalogSnapshot, samples, settings, status]);
+  }), [metricCatalogLoadState.snapshot, samples, settings, status]);
   const effectiveDashboardConfig = dashboardConfig ?? createDefaultDashboardConfig(metricCatalog);
   const dashboardEditable = isDashboardEditable(dashboardLoadState);
   const trendMetricIds = useMemo(() => Object.values(trendSelections).flatMap((ids) => ids ?? []), [trendSelections]);
 
   useEffect(() => {
-    const families = availableTrendFamilies(metricCatalog);
+    const families = trendFamilies(metricCatalog);
     setTrendSelections((currentSelections) => {
       if (!trendInitializedRef.current) {
         trendInitializedRef.current = true;
@@ -270,7 +290,7 @@ export function TimelinePage() {
       const next: TrendMetricSelections = {};
       let changed = false;
       for (const [family, ids] of Object.entries(currentSelections) as [UnitFamily, MetricId[] | undefined][]) {
-        const validIds = (ids ?? []).filter((id) => metricCatalog.some((item) => item.id === id && item.descriptor.unitFamily === family && item.status !== "UNSUPPORTED" && item.status !== "UNKNOWN"));
+        const validIds = (ids ?? []).filter((id) => metricCatalog.some((item) => item.id === id && item.descriptor.unitFamily === family && isTrendMetricSelectable(item)));
         if (validIds.length) next[family] = validIds;
         if (validIds.length !== (ids?.length ?? 0)) changed = true;
       }
@@ -311,7 +331,7 @@ export function TimelinePage() {
       if (currentIds.includes(metricId)) {
         return { ...currentSelections, [family]: currentIds.filter((id) => id !== metricId) };
       }
-      if (item.status === "UNSUPPORTED" || item.status === "UNKNOWN") return currentSelections;
+      if (!isTrendMetricSelectable(item)) return currentSelections;
       const nextIds = [...currentIds, metricId];
       return { ...currentSelections, [family]: nextIds };
     });
@@ -319,7 +339,7 @@ export function TimelinePage() {
 
   const focusTrendMetric = useCallback((metricId: MetricId) => {
     const item = metricCatalog.find((candidate) => candidate.id === metricId);
-    if (!item || item.status === "UNSUPPORTED" || item.status === "UNKNOWN") return;
+    if (!item || !isTrendMetricSelectable(item)) return;
     const family = item.descriptor.unitFamily;
     setActiveTrendFamily(family);
     setTrendSelections((currentSelections) => {
@@ -348,6 +368,7 @@ export function TimelinePage() {
       {(refreshing || refreshError) && <div role={refreshError ? "alert" : "status"} className={`${refreshError ? "error-surface" : "border-border bg-muted/40 text-muted-foreground"} flex flex-wrap items-center justify-between gap-3 rounded-lg border px-4 py-2.5 text-xs`}><span>{refreshError || t("timelineRefreshing")}</span>{refreshError && <Button variant="outline" className="h-8 px-2.5 text-xs" onClick={() => loadTimeline(true)}>{t("retry")}</Button>}</div>}
       {dashboardCustomizing && dashboardEditable && <RuntimeErrorBoundary title={t("runtimeErrorTitle")} message={t("runtimeErrorMessage")} retryLabel={t("retry")}><DashboardEditor config={effectiveDashboardConfig} catalog={metricCatalog} samples={samples} trendMetricIds={trendMetricIds} onTogglePin={toggleOverviewMetric} onToggleTrend={toggleTrendMetric} onMoveCard={moveOverviewCard} onRestoreDefaults={restoreDashboardDefaults} saving={dashboardSaving} saveError={dashboardSaveError} /></RuntimeErrorBoundary>}
       {dashboardLoadState === "failed" && <InlineError title={t("dashboardLoadErrorTitle")} message={t("dashboardLoadErrorMessage")} onRetry={loadDashboardConfig} />}
+      <MetricCatalogLoadNotice phase={metricCatalogLoadState.phase} onRetry={loadMetricCatalog} />
       <RuntimeErrorBoundary title={t("runtimeErrorTitle")} message={t("runtimeErrorMessage")} retryLabel={t("retry")}>
         <DashboardOverview config={effectiveDashboardConfig} catalog={metricCatalog} samples={samples} onFocusMetric={focusTrendMetric} />
       </RuntimeErrorBoundary>
@@ -389,14 +410,8 @@ export function TimelinePage() {
   </div>;
 }
 
-function availableTrendFamilies(catalog: readonly MetricCatalogItem[]): UnitFamily[] {
-  const families = new Set(catalog.map((item) => item.descriptor.unitFamily));
-  const order: UnitFamily[] = ["percent", "throughput", "bytes", "temperature", "power", "frequency"];
-  return order.filter((family) => families.has(family));
-}
-
 function defaultTrendSelections(catalog: readonly MetricCatalogItem[]): TrendMetricSelections {
-  const selectable = (item: MetricCatalogItem) => item.status === "AVAILABLE" || item.status === "NO_DATA_IN_RANGE" || item.status === "DEGRADED";
+  const selectable = (item: MetricCatalogItem) => isTrendMetricSelectable(item) && (item.status === "AVAILABLE" || item.status === "NO_DATA_IN_RANGE" || item.status === "DEGRADED");
   const percentIds = catalog.filter((item) => selectable(item) && item.descriptor.unitFamily === "percent" && (item.id === "system.cpu.usage_pct" || item.id === "system.memory.usage_pct" || item.descriptor.gpuField === "utilization_pct")).map((item) => item.id);
   const throughputIds = catalog.filter((item) => selectable(item) && item.descriptor.unitFamily === "throughput" && (item.id === "system.disk.read_bps" || item.id === "system.disk.write_bps")).map((item) => item.id);
   return {

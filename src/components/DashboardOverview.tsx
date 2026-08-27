@@ -1,7 +1,7 @@
 import { ArrowUpRight, CircleHelp, Cpu, Database, Gauge, HardDrive, MemoryStick, Thermometer } from "lucide-react";
 import { useI18n } from "../i18n";
 import { type DashboardCardConfig, type DashboardConfig } from "../dashboard/config";
-import { formatMetricValue, metricItemDisplayName, metricValue, type MetricCatalogItem, type MetricId } from "../dashboard/metrics";
+import { currentReadingPresentation, formatMetricValue, metricItemDisplayName, metricValue, type MetricCatalogItem, type MetricId } from "../dashboard/metrics";
 import type { SystemSample } from "../types/resource";
 import { formatBytes, formatClock } from "../utils/time";
 import { Badge } from "./ui/Badge";
@@ -80,7 +80,8 @@ function OverviewMetric({ item, latest, samples }: { item: MetricCatalogItem; la
   const { language, t } = useI18n();
   const label = metricItemDisplayName(item, t, samples);
   const value = latest ? metricValue(item.descriptor, latest) : null;
-  const formatted = item.status === "AVAILABLE" || item.status === "DEGRADED"
+  const reading = currentReadingPresentation(item.status, value);
+  const formatted = reading === "VALUE"
     ? formatMetricValue(item.descriptor, value, language)
     : null;
   return <div className="flex items-start justify-between gap-3">
@@ -89,7 +90,7 @@ function OverviewMetric({ item, latest, samples }: { item: MetricCatalogItem; la
       <div className="min-w-0"><div className="truncate text-xs font-medium" title={label}>{label}</div><div className="mt-1"><StatusBadge status={item.status} /></div></div>
     </div>
     <div className={`shrink-0 text-right font-mono text-[17px] font-semibold tabular-nums ${formatted ? "text-foreground" : "text-muted-foreground"}`}>
-      {formatted ?? statusValue(item.status, t)}
+      {formatted ?? (reading === "NO_CURRENT_READING" ? t("dashboardNoCurrentReading") : statusValue(item.status, t))}
     </div>
   </div>;
 }
@@ -114,7 +115,7 @@ function overviewCardTitle(card: DashboardCardConfig, items: MetricCatalogItem[]
 }
 
 function statusValue(status: MetricCatalogItem["status"], t: ReturnType<typeof useI18n>["t"]): string {
-  if (status === "NO_DATA_IN_RANGE") return t("dashboardNoCurrentSample");
+  if (status === "NO_DATA_IN_RANGE") return t("dashboardMetricStatusNoData");
   if (status === "DISABLED") return t("dashboardMetricStatusDisabled");
   if (status === "UNSUPPORTED") return t("dashboardMetricStatusUnsupported");
   if (status === "FAILED") return t("dashboardMetricStatusFailed");

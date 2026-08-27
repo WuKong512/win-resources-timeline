@@ -46,7 +46,7 @@ function catalogFor(samples: SystemSample[]): MetricCatalogItem[] {
     samples,
     providers,
     settings: { foregroundPollIntervalMs: 1_000, systemSampleIntervalMs: 5_000, idleThresholdSeconds: 60, systemSampleRetentionDays: 30, enabledCategories: ["cpu", "memory", "disk", "gpu"], disabledProviders: [] },
-    snapshot: { metrics: [], devices: [] }
+    snapshot: null
   });
 }
 

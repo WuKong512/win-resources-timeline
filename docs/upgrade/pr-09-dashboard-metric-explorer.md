@@ -10,8 +10,8 @@ Status: executable product contract for the post-PR-08 dashboard enhancement.
 
 ## Information hierarchy
 
-1. **Overview** — a compact adaptive set of current-value cards answers “what is happening now?” CPU, memory, disk I/O, and usable GPU utilization/temperature appear only when the capability is usable. Missing values show an explicit state; numeric zero remains visible as zero.
-2. **Trends** — one prominent ECharts workspace with unit-family groups and metric chips. Only compatible metrics share a view; switching families changes the view rather than mixing unrelated axes.
+1. **Overview** — a compact adaptive set of current-value cards answers “what is happening now?” CPU, memory, disk I/O, and usable GPU utilization/temperature appear only when the capability is usable. Range availability and the latest reading are separate: an `AVAILABLE` metric with a null latest value says no current reading; numeric zero remains visible as zero.
+2. **Trends** — one prominent ECharts workspace with unit-family groups and metric chips. Only compatible metrics share a view; switching families changes the view rather than mixing unrelated axes. A family is shown only when at least one metric can enter trend selection; failed, disabled, and no-data metrics remain meaningful entries, while unsupported-only families stay out of the workspace.
 3. **Metric Explorer** — a searchable, grouped catalog of known system and GPU metrics. The catalog is independent of the selected range and shows readable names, units, device identity, status, and pin/trend state.
 4. **Detail** — existing bounded timeline selection, GPU device detail, provider health, and process evidence remain progressively disclosed below the primary workspace.
 
@@ -27,6 +27,8 @@ The frontend projects provider metadata plus current-range samples into:
 - `DEGRADED`: valid capability/data remains while provider health reports a partial failure.
 
 These states are never inferred from `value == null` or from `0`. Unknown is reserved for a genuinely unavailable classification.
+
+The catalog request has an explicit `loading` / `loaded` / `failed` state. A failed request leaves timeline and existing data usable through a clearly marked degraded fallback with a retry action; fallback is never presented as authoritative. A fallback may use real `deviceKey` values already observed in samples, but never creates an index- or provider-derived GPU identity.
 
 ## Defaults and drill-down
 
