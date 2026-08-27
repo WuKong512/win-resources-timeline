@@ -2,7 +2,7 @@ use crate::{
     collector::system_metrics::now_ms,
     db::{query, writer},
     error::{AppError, CommandError},
-    models::{AppIdentity, CollectionSettings, CollectorStatus, StorageUsage},
+    models::{AppIdentity, CollectionSettings, CollectorStatus, DashboardConfig, StorageUsage},
     AppState,
 };
 use tauri::{AppHandle, State};
@@ -64,6 +64,25 @@ pub fn set_collection_settings(
         .collector
         .update_settings(settings)
         .map_err(|error| AppError::Other(error).into())
+}
+
+#[tauri::command]
+pub fn get_dashboard_config(
+    state: State<'_, AppState>,
+) -> Result<Option<DashboardConfig>, CommandError> {
+    state.db.read(writer::dashboard_config).map_err(Into::into)
+}
+
+#[tauri::command]
+pub fn set_dashboard_config(
+    state: State<'_, AppState>,
+    config: DashboardConfig,
+) -> Result<(), CommandError> {
+    config.validate().map_err(AppError::InvalidRequest)?;
+    state
+        .db
+        .with_writer(|conn| writer::save_dashboard_config(conn, &config, now_ms()))
+        .map_err(Into::into)
 }
 
 #[tauri::command]

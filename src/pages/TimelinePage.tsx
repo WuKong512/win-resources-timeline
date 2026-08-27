@@ -4,9 +4,13 @@ import {
   getAppResourceSamples,
   getCollectionSettings,
   getCollectorStatus,
+  getDashboardConfig,
   getResourceAvailableDates,
-  getSystemTimeline
+  getSystemTimeline,
+  setDashboardConfig
 } from "../api/tauriApi";
+import { DashboardChartCard } from "../components/DashboardChartCard";
+import { DashboardEditor } from "../components/DashboardEditor";
 import { DateRangePicker } from "../components/DateRangePicker";
 import { ResourceTimelineChart } from "../components/ResourceTimelineChart";
 import { Badge } from "../components/ui/Badge";
@@ -14,6 +18,8 @@ import { Button } from "../components/ui/Button";
 import { Card, CardContent, CardHeader, CardTitle } from "../components/ui/Card";
 import { useI18n } from "../i18n";
 import { useUiStore } from "../stores/uiStore";
+import { createDefaultDashboardConfig, validateDashboardConfig, type DashboardConfig } from "../dashboard/config";
+import { canPersistDashboard, classifyDashboardLoad, isDashboardEditable, type DashboardLoadState } from "../dashboard/loadState";
 import type { AppResourceSample, CapabilityState, CollectionSettings, CollectorStatus, GpuSample, ProviderStatus, SystemSample, TimelineQueryResult } from "../types/resource";
 import { effectiveTimelineDate, formatBytes, formatClock, localDateString, millisecondsUntilLocalMidnight, timelineWindowRange } from "../utils/time";
 import { aggregateCategoryCapability, gpuDevices, metricDataState, timelineCoverageState, timelineRefreshIntervalMs } from "../utils/uiSemantics";
@@ -30,6 +36,12 @@ export function TimelinePage() {
   const [timeline, setTimeline] = useState<TimelineQueryResult | null>(null);
   const [status, setStatus] = useState<CollectorStatus | null>(null);
   const [settings, setSettings] = useState<CollectionSettings | null>(null);
+  const [dashboardConfig, setDashboardConfigState] = useState<DashboardConfig | null>(null);
+  const [dashboardLoadState, setDashboardLoadState] = useState<DashboardLoadState>("loading");
+  const [dashboardCustomizing, setDashboardCustomizing] = useState(false);
+  const [dashboardDirty, setDashboardDirty] = useState(false);
+  const [dashboardSaving, setDashboardSaving] = useState(false);
+  const [dashboardSaveError, setDashboardSaveError] = useState("");
   const [selected, setSelected] = useState<SystemSample | null>(null);
   const [processEvidence, setProcessEvidence] = useState<AppResourceSample[]>([]);
   const [processLoading, setProcessLoading] = useState(false);
@@ -39,6 +51,8 @@ export function TimelinePage() {
   const [refreshError, setRefreshError] = useState("");
   const timelineRef = useRef<TimelineQueryResult | null>(null);
   const requestIdRef = useRef(0);
+  const dashboardLoadRequestRef = useRef(0);
+  const dashboardSaveRevisionRef = useRef(0);
   const mountedRef = useRef(false);
   // Deliberate historical selections stay fixed; only a view selected as today follows local midnight.
   const [followsCurrentDate, setFollowsCurrentDate] = useState(() => selectedDate === localDateString());
@@ -123,6 +137,55 @@ export function TimelinePage() {
     return () => { cancelled = true; };
   }, [followsCurrentDate, selectedDate, setSelectedDate, t]);
 
+  const loadDashboardConfig = useCallback(() => {
+    let cancelled = false;
+    const requestId = dashboardLoadRequestRef.current + 1;
+    dashboardLoadRequestRef.current = requestId;
+    dashboardSaveRevisionRef.current += 1;
+    setDashboardLoadState("loading");
+    setDashboardCustomizing(false);
+    setDashboardDirty(false);
+    setDashboardSaveError("");
+    getDashboardConfig()
+      .then((config) => {
+        if (cancelled || requestId !== dashboardLoadRequestRef.current) return;
+        const validation = config ? validateDashboardConfig(config) : null;
+        setDashboardConfigState(validation?.ok ? validation.config : null);
+        setDashboardLoadState(classifyDashboardLoad(config, validation?.ok === true));
+      })
+      .catch(() => {
+        if (cancelled || requestId !== dashboardLoadRequestRef.current) return;
+        setDashboardLoadState("failed");
+      });
+    return () => { cancelled = true; };
+  }, []);
+
+  useEffect(() => loadDashboardConfig(), [loadDashboardConfig]);
+
+  useEffect(() => {
+    if (!canPersistDashboard(dashboardLoadState, dashboardDirty, dashboardConfig)) return;
+    const timer = window.setTimeout(() => {
+      const revision = dashboardSaveRevisionRef.current + 1;
+      dashboardSaveRevisionRef.current = revision;
+      setDashboardSaving(true);
+      setDashboardSaveError("");
+      setDashboardConfig(dashboardConfig)
+        .then(() => {
+          if (dashboardSaveRevisionRef.current === revision) setDashboardDirty(false);
+        })
+        .catch(() => {
+          if (dashboardSaveRevisionRef.current === revision) setDashboardSaveError(t("dashboardSaveError"));
+        })
+        .finally(() => {
+          if (dashboardSaveRevisionRef.current === revision) setDashboardSaving(false);
+        });
+    }, 250);
+    return () => {
+      window.clearTimeout(timer);
+      dashboardSaveRevisionRef.current += 1;
+    };
+  }, [dashboardConfig, dashboardDirty, dashboardLoadState, t]);
+
   useEffect(() => loadTimeline(), [loadTimeline]);
 
   useEffect(() => {
@@ -177,6 +240,21 @@ export function TimelinePage() {
   const devices = useMemo(() => gpuDevices(samples), [samples]);
   const coverage = timeline?.coverage ?? 0;
   const selectedTime = selected ? formatClock(selected.timestampMs, language) : null;
+  const effectiveDashboardConfig = dashboardConfig ?? createDefaultDashboardConfig(samples);
+  const dashboardEditable = isDashboardEditable(dashboardLoadState);
+
+  const updateDashboardConfig = useCallback((next: DashboardConfig) => {
+    if (!isDashboardEditable(dashboardLoadState)) return;
+    const validation = validateDashboardConfig(next);
+    if (!validation.ok) return;
+    setDashboardConfigState(validation.config);
+    setDashboardDirty(true);
+    setDashboardSaveError("");
+  }, [dashboardLoadState]);
+
+  const restoreDashboardDefaults = useCallback(() => {
+    if (window.confirm(t("dashboardRestoreConfirm"))) updateDashboardConfig(createDefaultDashboardConfig(samples));
+  }, [samples, t, updateDashboardConfig]);
 
   return <div className="space-y-5">
     <header className="flex flex-wrap items-end justify-between gap-4">
@@ -190,11 +268,24 @@ export function TimelinePage() {
           {([1, 7, 30] as WindowPreset[]).map((days) => <button key={days} type="button" className={preset === days ? "segmented-control-active" : "segmented-control-item"} onClick={() => setPreset(days)}>{t(days === 1 ? "rangeDay" : days === 7 ? "range7Days" : "range30Days")}</button>)}
         </div>
         <DateRangePicker value={selectedDate} onChange={handleDateChange} availableDates={availableDates} loading={datesLoading} />
+        <Button type="button" variant={dashboardCustomizing ? "default" : "outline"} disabled={!dashboardEditable} onClick={() => setDashboardCustomizing((value) => !value)}>{dashboardCustomizing ? t("dashboardDone") : t("dashboardCustomize")}</Button>
       </div>
     </header>
 
     {error && !timeline ? <InlineError message={error} onRetry={loadTimeline} title={t("timelineErrorTitle")} /> : loading ? <TimelineLoading /> : <>
       {(refreshing || refreshError) && <div role={refreshError ? "alert" : "status"} className={`${refreshError ? "error-surface" : "border-border bg-muted/40 text-muted-foreground"} flex flex-wrap items-center justify-between gap-3 rounded-lg border px-4 py-2.5 text-xs`}><span>{refreshError || t("timelineRefreshing")}</span>{refreshError && <Button variant="outline" className="h-8 px-2.5 text-xs" onClick={() => loadTimeline(true)}>{t("retry")}</Button>}</div>}
+      {dashboardCustomizing && dashboardEditable && <DashboardEditor config={effectiveDashboardConfig} samples={samples} onChange={updateDashboardConfig} onRestoreDefaults={restoreDashboardDefaults} saving={dashboardSaving} saveError={dashboardSaveError} />}
+      <section aria-labelledby="dashboard-title" className="space-y-3">
+        <div className="flex flex-wrap items-end justify-between gap-3">
+          <div>
+            <div className="eyebrow">{t("dashboardTitle")}</div>
+            <h2 id="dashboard-title" className="mt-1 text-lg font-semibold">{t("dashboardTitle")}</h2>
+          </div>
+          {dashboardLoadState === "loading" && <span className="text-xs text-muted-foreground">{t("loadingLocalData")}</span>}
+        </div>
+        {dashboardLoadState === "failed" && <InlineError title={t("dashboardLoadErrorTitle")} message={t("dashboardLoadErrorMessage")} onRetry={loadDashboardConfig} />}
+        {effectiveDashboardConfig.cards.some((card) => card.visible) ? <div className="grid gap-3 xl:grid-cols-2">{effectiveDashboardConfig.cards.filter((card) => card.visible).sort((left, right) => left.order - right.order).map((card) => <DashboardChartCard key={card.id} card={card} samples={samples} gaps={timeline?.gaps ?? []} startMs={range.startMs} endMs={range.endMs} selectedTimestampMs={selected?.timestampMs ?? null} onSampleSelect={setSelected} />)}</div> : <Card><CardContent className="py-10 text-center text-sm text-muted-foreground">{t("dashboardNoCards")}</CardContent></Card>}
+      </section>
       <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
         <SignalCard icon={<Cpu size={16} />} label={t("metricCpu")} value={latest?.cpuPercent} capability={aggregateCategoryCapability(status?.providerStatus ?? [], settings, "cpu")} unit="percent" />
         <SignalCard icon={<MemoryStick size={16} />} label={t("metricMemory")} value={latest?.memoryPercent} capability={aggregateCategoryCapability(status?.providerStatus ?? [], settings, "memory")} unit="percent" />

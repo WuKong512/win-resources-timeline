@@ -102,6 +102,8 @@ pub fn run() {
             commands::settings::set_collection_paused,
             commands::settings::get_collection_settings,
             commands::settings::set_collection_settings,
+            commands::settings::get_dashboard_config,
+            commands::settings::set_dashboard_config,
             commands::settings::get_autostart_enabled,
             commands::settings::set_autostart_enabled,
             commands::settings::clear_collected_data,
