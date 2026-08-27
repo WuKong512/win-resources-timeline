@@ -1,11 +1,14 @@
 import { describe, expect, it } from "vitest";
-import type { SystemSample } from "../types/resource";
+import { buildMetricCatalog, getMetricDescriptor, type MetricCatalogItem } from "./metrics";
+import type { MetricCategory, ProviderStatus, SystemSample } from "../types/resource";
 import {
   canAddMetricToCard,
   createDefaultDashboardConfig,
   deserializeDashboardConfig,
   MAX_METRICS_PER_CARD,
+  reorderDashboardCards,
   serializeDashboardConfig,
+  toggleMetricPin,
   validateDashboardConfig,
   validateMetricSelection
 } from "./config";
@@ -23,6 +26,30 @@ const baseSample: SystemSample = {
   hasAppSnapshot: false
 };
 
+function provider(providerId: string, categories: MetricCategory[]): ProviderStatus {
+  return {
+    providerId,
+    displayName: providerId,
+    supported: true,
+    enabled: true,
+    lifecycle: "running",
+    capabilities: categories.map((category) => ({ providerId, category, supportStatus: "supported", enabled: true, canToggle: true, state: "supportedEnabled", reasonCode: null })),
+    lastSuccessAtMs: null,
+    failureCount: 0,
+    lastError: null
+  };
+}
+
+function catalogFor(samples: SystemSample[]): MetricCatalogItem[] {
+  const providers = [provider("windows-baseline", ["cpu", "memory", "disk"]), ...samples.some((sample) => sample.gpus.length) ? [provider("nvidia-nvml", ["gpu"])] : []];
+  return buildMetricCatalog({
+    samples,
+    providers,
+    settings: { foregroundPollIntervalMs: 1_000, systemSampleIntervalMs: 5_000, idleThresholdSeconds: 60, systemSampleRetentionDays: 30, enabledCategories: ["cpu", "memory", "disk", "gpu"], disabledProviders: [] },
+    snapshot: { metrics: [], devices: [] }
+  });
+}
+
 describe("dashboard config", () => {
   it("accepts same-family metrics and rejects incompatible metrics", () => {
     expect(validateMetricSelection(["system.cpu.usage_pct", "gpu.nvml:uuid.utilization_pct"]).ok).toBe(true);
@@ -32,15 +59,16 @@ describe("dashboard config", () => {
     expect(validateMetricSelection(["system.cpu.not_real"]).ok).toBe(false);
   });
 
-  it("generates adaptive defaults and does not create a permanent GPU card without GPU data", () => {
-    const noGpu = createDefaultDashboardConfig([baseSample]);
+  it("generates adaptive defaults from the catalog and keeps GPU detail progressive", () => {
+    const noGpu = createDefaultDashboardConfig(catalogFor([baseSample]));
     expect(noGpu.cards.map((card) => card.id)).toEqual(["compute-usage", "memory", "disk-io"]);
     const withGpu = {
       ...baseSample,
       gpus: [{ deviceKey: "uuid-1", vendor: "NVIDIA", model: "GPU", capacityBytes: null, utilizationPercent: 10, memoryControllerUtilizationPercent: null, temperatureCelsius: 50, powerWatts: null, graphicsClockMhz: null, memoryClockMhz: null, vramUsedBytes: null, vramTotalBytes: null, powerScope: null, qualityMask: 0 }]
     };
-    const adaptive = createDefaultDashboardConfig([withGpu]);
-    expect(adaptive.cards.find((card) => card.id === "compute-usage")?.metricIds).toContain("gpu.uuid-1.utilization_pct");
+    const adaptive = createDefaultDashboardConfig(catalogFor([withGpu]));
+    expect(adaptive.cards.find((card) => card.id === "compute-usage")?.metricIds).not.toContain("gpu.uuid-1.utilization_pct");
+    expect(adaptive.cards.find((card) => card.id === "gpu-utilization")?.metricIds).toContain("gpu.uuid-1.utilization_pct");
     expect(adaptive.cards.map((card) => card.id)).toContain("gpu-temperature");
   });
 
@@ -66,5 +94,21 @@ describe("dashboard config", () => {
     const card = { id: "full", metricIds, hiddenMetricIds: [], order: 0, visible: true };
     expect(metricIds).toHaveLength(8);
     expect(canAddMetricToCard(card, "gpu.uuid-8.utilization_pct")).toBe(false);
+  });
+
+  it("pins, unpins, and reorders overview items without exposing card IDs", () => {
+    const config = createDefaultDashboardConfig(catalogFor([baseSample]));
+    const pinned = toggleMetricPin(config, "system.memory.used_bytes");
+    expect(pinned.cards.some((card) => card.metricIds.includes("system.memory.used_bytes"))).toBe(true);
+    const unpinned = toggleMetricPin(pinned, "system.memory.used_bytes");
+    expect(unpinned.cards.some((card) => card.visible && card.metricIds.includes("system.memory.used_bytes"))).toBe(false);
+    const moved = reorderDashboardCards(config, "disk-io", -1);
+    expect(moved.cards.find((card) => card.id === "disk-io")?.order).toBe(1);
+  });
+
+  it("does not manufacture a descriptor when a catalog item is missing", () => {
+    const catalog = catalogFor([baseSample]).filter((item) => item.id !== "system.disk.read_bps");
+    expect(createDefaultDashboardConfig(catalog).cards.find((card) => card.id === "disk-io")?.metricIds).toEqual(["system.disk.write_bps"]);
+    expect(getMetricDescriptor("system.disk.read_bps")?.id).toBe("system.disk.read_bps");
   });
 });

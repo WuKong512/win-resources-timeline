@@ -1,6 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import type { DashboardConfig } from "../dashboard/config";
-import type { AppIdentity, AppResourceHistoryPoint, AppResourceSample, CollectionSettings, CollectorStatus, CrashCaseSummary, CrashDetectorStatus, CrashEvidenceDetail, DailyUsageSummary, ForegroundInterval, ResourceApp, StorageUsage, SystemSample, TimelineQueryResult, TodayOverview, UsageSummary } from "../types/resource";
+import type { AppIdentity, AppResourceHistoryPoint, AppResourceSample, CollectionSettings, CollectorStatus, CrashCaseSummary, CrashDetectorStatus, CrashEvidenceDetail, DailyUsageSummary, ForegroundInterval, MetricCatalogSnapshot, ResourceApp, StorageUsage, SystemSample, TimelineQueryResult, TodayOverview, UsageSummary } from "../types/resource";
 
 export const getTodayOverview = (startMs: number, endMs: number) =>
   invoke<TodayOverview>("get_today_overview", { startMs, endMs });
@@ -23,6 +23,8 @@ export const getSystemSamples = (startMs: number, endMs: number, maxPoints = 250
 
 export const getSystemTimeline = (startMs: number, endMs: number, maxPoints = 2500) =>
   invoke<TimelineQueryResult>("get_system_timeline", { startMs, endMs, maxPoints });
+
+export const getMetricCatalog = () => invoke<MetricCatalogSnapshot>("get_metric_catalog");
 
 export const getResourceAvailableDates = () => invoke<string[]>("get_resource_available_dates");
 

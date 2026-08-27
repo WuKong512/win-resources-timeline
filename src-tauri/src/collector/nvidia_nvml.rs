@@ -1030,6 +1030,11 @@ impl MetricProvider for NvidiaNvmlProvider {
         context.check()?;
         if requested_categories.contains(&MetricCategory::Gpu) {
             self.probe_session(context)?;
+        } else if self.metadata.is_empty() {
+            // Keep the registered GPU metric family visible to the dashboard while collection is
+            // disabled. A later enabled probe replaces these generic entries with per-device
+            // capability metadata (or an explicit unsupported/failed result).
+            self.metadata = system_metric_metadata(MetricRuntimeSupportStatus::Supported);
         }
         Ok(self.descriptor.capabilities.clone())
     }

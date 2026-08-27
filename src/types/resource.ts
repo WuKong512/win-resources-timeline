@@ -111,6 +111,29 @@ export interface TimelineQueryResult {
   gaps: TimelineGap[];
 }
 
+export type MetricRuntimeSupportStatus = "supported" | "unsupported" | "permission_denied" | "provider_missing" | "probe_failed" | "failed";
+
+export interface MetricCatalogDevice {
+  stableKey: string;
+  vendor: string | null;
+  model: string | null;
+  capacityBytes: number | null;
+}
+
+export interface MetricCatalogEntry {
+  metricKey: string;
+  category: MetricCategory;
+  providerId: string;
+  device: MetricCatalogDevice | null;
+  enabled: boolean;
+  supportStatus: MetricRuntimeSupportStatus;
+}
+
+export interface MetricCatalogSnapshot {
+  metrics: MetricCatalogEntry[];
+  devices: MetricCatalogDevice[];
+}
+
 export interface AppResourceSample {
   appKey: string;
   processName: string;

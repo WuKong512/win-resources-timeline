@@ -18,6 +18,8 @@
 | PR-05 | 进程与崩溃 | Top-N selector、多级聚合、system events、case/hold/evidence summary | PR-01、PR-02/03 稳定接口 |
 | PR-06 | 新信息架构 UI | 时间线、使用统计、崩溃回溯、采集/保留设置 | 后端 DTO 稳定 |
 | PR-07 | 稳定与发布 | soak、迁移演练、性能/空间报告、发布说明 | 前述功能完成 |
+| PR-08 | Dashboard chart interaction | stable ECharts lifecycle、tooltip/crosshair、hover/click/gap semantics | PR-07 merged |
+| PR-09 | Dashboard information architecture + Metric Explorer | adaptive overview、unit-compatible trend workspace、capability-aware metric catalog | PR-08 merged；post-release UI enhancement |
 
 ## 每阶段验收门槛
 
@@ -94,3 +96,7 @@ PR-05 已在 schema v8 上实现进程与崩溃证据后端边界：
 - 明确产品非目标、隐私默认值、性能预算和数据安全约束。
 - 后续 PR 顺序、依赖和验收条件可直接转为 issue/checklist。
 - PR-03 的 Provider runtime/DTO 接口已落地；PR-04A 的 schema v8 GPU contract 和现有 UI 信息架构保持独立，硬件 Provider 与新信息架构 UI 仍由后续 PR 负责。
+
+## PR-09 交付边界
+
+PR-09 是 PR-08 合并后的 Dashboard UI 增强：复用 schema v8、既有 `ui.dashboard.v1` 配置和 Provider/session/device capability truth，不新增 Provider、不迁移数据库，也不改写 PR-00..PR-08 历史状态。

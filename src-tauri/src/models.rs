@@ -121,7 +121,8 @@ pub struct ProviderStatus {
 ///
 /// This deliberately uses the same vocabulary as `collection_session_metric`, while keeping
 /// value presence independent from capability state: a legal numeric zero is still a value.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum MetricRuntimeSupportStatus {
     Supported,
     Unsupported,
@@ -129,6 +130,33 @@ pub enum MetricRuntimeSupportStatus {
     ProviderMissing,
     ProbeFailed,
     Failed,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct MetricCatalogDevice {
+    pub stable_key: String,
+    pub vendor: Option<String>,
+    pub model: Option<String>,
+    pub capacity_bytes: Option<i64>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct MetricCatalogEntry {
+    pub metric_key: String,
+    pub category: MetricCategory,
+    pub provider_id: String,
+    pub device: Option<MetricCatalogDevice>,
+    pub enabled: bool,
+    pub support_status: MetricRuntimeSupportStatus,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct MetricCatalogSnapshot {
+    pub metrics: Vec<MetricCatalogEntry>,
+    pub devices: Vec<MetricCatalogDevice>,
 }
 
 impl MetricRuntimeSupportStatus {

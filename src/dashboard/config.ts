@@ -1,9 +1,9 @@
 import type { SystemSample } from "../types/resource";
 import {
-  getAvailableMetricDescriptors,
   getMetricDescriptor,
   hasMetricData,
   isMetricId,
+  type MetricCatalogItem,
   type MetricId,
   type UnitFamily,
   SYSTEM_METRIC_IDS,
@@ -160,20 +160,23 @@ function serializedDashboardSize(config: DashboardConfig): number {
   }
 }
 
-export function createDefaultDashboardConfig(samples: readonly SystemSample[]): DashboardConfig {
-  const availableIds = new Set(getAvailableMetricDescriptors(samples).map((descriptor) => descriptor.id));
+export function createDefaultDashboardConfig(catalog: readonly MetricCatalogItem[]): DashboardConfig {
+  const overviewItems = catalog.filter((item) => item.status === "AVAILABLE" || item.status === "NO_DATA_IN_RANGE" || item.status === "DEGRADED");
+  const availableIds = new Set(overviewItems.map((item) => item.id));
   const cards: DashboardCardConfig[] = [];
-  const computeMetrics: MetricId[] = [];
-  if (availableIds.has(SYSTEM_METRIC_IDS.cpuUsage)) computeMetrics.push(SYSTEM_METRIC_IDS.cpuUsage);
-  const gpuUsageIds = [...availableIds].filter((id): id is MetricId => id.startsWith("gpu.") && id.endsWith(".utilization_pct"));
-  computeMetrics.push(...gpuUsageIds);
-  if (computeMetrics.length) cards.push(makeCard("compute-usage", computeMetrics, cards.length));
+  if (availableIds.has(SYSTEM_METRIC_IDS.cpuUsage)) cards.push(makeCard("compute-usage", [SYSTEM_METRIC_IDS.cpuUsage], cards.length));
 
   if (availableIds.has(SYSTEM_METRIC_IDS.memoryUsage)) cards.push(makeCard("memory", [SYSTEM_METRIC_IDS.memoryUsage], cards.length));
   const diskMetrics = [SYSTEM_METRIC_IDS.diskRead, SYSTEM_METRIC_IDS.diskWrite].filter((id) => availableIds.has(id));
   if (diskMetrics.length) cards.push(makeCard("disk-io", diskMetrics, cards.length));
 
-  const gpuTemperatureIds = [...availableIds].filter((id): id is MetricId => id.startsWith("gpu.") && id.endsWith(".temperature_c"));
+  const gpuUsageIds = overviewItems
+    .filter((item) => item.descriptor.dimension === "gpu" && item.descriptor.gpuField === "utilization_pct")
+    .map((item) => item.id);
+  if (gpuUsageIds.length) cards.push(makeCard("gpu-utilization", gpuUsageIds, cards.length));
+  const gpuTemperatureIds = overviewItems
+    .filter((item) => item.descriptor.dimension === "gpu" && item.descriptor.gpuField === "temperature_c")
+    .map((item) => item.id);
   if (gpuTemperatureIds.length) cards.push(makeCard("gpu-temperature", gpuTemperatureIds, cards.length));
 
   return { version: DASHBOARD_CONFIG_VERSION, cards };
@@ -211,4 +214,46 @@ export function defaultGpuMetricId(deviceKey: string, field: "utilization_pct" |
 
 export function metricIsCurrentlyAvailable(metricId: MetricId, samples: readonly SystemSample[]): boolean {
   return hasMetricData(metricId, samples);
+}
+
+export function isMetricPinned(config: DashboardConfig, metricId: MetricId): boolean {
+  return config.cards.some((card) => card.visible && card.metricIds.includes(metricId) && !card.hiddenMetricIds.includes(metricId));
+}
+
+export function toggleMetricPin(config: DashboardConfig, metricId: MetricId): DashboardConfig {
+  const cards = config.cards.map((card) => ({ ...card, metricIds: [...card.metricIds], hiddenMetricIds: [...card.hiddenMetricIds] }));
+  const existing = cards.find((card) => card.metricIds.includes(metricId));
+  if (existing) {
+    const pinned = existing.visible && !existing.hiddenMetricIds.includes(metricId);
+    if (pinned) {
+      existing.hiddenMetricIds = [...new Set([...existing.hiddenMetricIds, metricId])];
+      if (existing.hiddenMetricIds.length === existing.metricIds.length) {
+        const remaining = cards.filter((card) => card.id !== existing.id).map((card, order) => ({ ...card, order }));
+        return { ...config, cards: remaining };
+      }
+    } else {
+      existing.visible = true;
+      existing.hiddenMetricIds = existing.hiddenMetricIds.filter((id) => id !== metricId);
+    }
+    return { ...config, cards };
+  }
+
+  if (cards.length >= MAX_DASHBOARD_CARDS) return config;
+
+  const cardId = nextMetricCardId(cards, metricId);
+  return {
+    ...config,
+    cards: [...cards, { id: cardId, metricIds: [metricId], hiddenMetricIds: [], order: cards.length, visible: true }]
+  };
+}
+
+function nextMetricCardId(cards: readonly DashboardCardConfig[], metricId: MetricId): string {
+  const base = metricId.startsWith("gpu.") ? "gpu-metric" : metricId.split(".").slice(1, 3).join("-") || "metric";
+  const existing = new Set(cards.map((card) => card.id));
+  if (!existing.has(base)) return base;
+  for (let index = 2; index <= MAX_DASHBOARD_CARDS; index += 1) {
+    const candidate = `${base}-${index}`;
+    if (!existing.has(candidate)) return candidate;
+  }
+  return base.slice(0, 64);
 }

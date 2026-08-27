@@ -2375,9 +2375,39 @@ impl MetricProvider for WindowsBaselineProvider {
     fn health(&self) -> ProviderHealthObservation {
         self.health.clone()
     }
+
+    fn metric_metadata(&self) -> Vec<ProviderMetricMetadata> {
+        [
+            (MetricCategory::Cpu, "system.cpu.usage_pct"),
+            (MetricCategory::Memory, "system.memory.usage_pct"),
+            (MetricCategory::Memory, "system.memory.used_bytes"),
+            (MetricCategory::Disk, "system.disk.read_bps"),
+            (MetricCategory::Disk, "system.disk.write_bps"),
+        ]
+        .into_iter()
+        .map(|(category, metric_key)| ProviderMetricMetadata {
+            category,
+            metric_key: metric_key.to_string(),
+            device: None,
+            support_status: self.metric_support_status(category),
+        })
+        .collect()
+    }
 }
 
 impl WindowsBaselineProvider {
+    fn metric_support_status(&self, category: MetricCategory) -> MetricRuntimeSupportStatus {
+        self.descriptor
+            .capabilities
+            .iter()
+            .find(|capability| capability.category == category)
+            .map(|capability| match capability.support_status {
+                CapabilitySupportStatus::Supported => MetricRuntimeSupportStatus::Supported,
+                CapabilitySupportStatus::Unsupported => MetricRuntimeSupportStatus::Unsupported,
+            })
+            .unwrap_or(MetricRuntimeSupportStatus::Unsupported)
+    }
+
     fn set_disk_unavailable(&mut self, reason_code: ProviderErrorCode) {
         for capability in &mut self.descriptor.capabilities {
             if capability.category == MetricCategory::Disk {
