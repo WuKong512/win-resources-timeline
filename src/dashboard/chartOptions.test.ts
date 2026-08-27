@@ -13,11 +13,19 @@ function labels(descriptor: { id: string }) {
 }
 
 describe("chart option builder", () => {
-  it("creates stable series ids, preserves null data, and never requests series blur", () => {
+  it("keeps line visibility invariant across ECharts interactive states", () => {
     const option = buildTimelineChartOption({ samples: [sampleA, sampleB], gaps: [], startMs: 0, endMs: 3_000, selectedTimestampMs: 1_000, language: "en", palette, metricLabel: labels, missingLabel: "No sample" });
     const series = option.series as Array<Record<string, unknown>>;
     expect(series.map((item) => item.id)).toEqual(expect.arrayContaining(["system.cpu.usage_pct", "system.memory.usage_pct", "system.disk.read_bps", "system.disk.write_bps", "gpu.uuid-1.utilization_pct"]));
     expect(series.every((item) => (item.emphasis as { focus?: string }).focus === "none")).toBe(true);
+    for (const item of series) {
+      const normal = item.lineStyle as { color: string; width: number; opacity: number; type?: string };
+      for (const state of ["emphasis", "blur", "select"]) {
+        const stateLine = (item[state] as { lineStyle: typeof normal }).lineStyle;
+        expect(stateLine).toEqual(normal);
+        expect(stateLine.opacity).toBe(1);
+      }
+    }
     const cpu = series.find((item) => item.id === "system.cpu.usage_pct")!;
     expect(cpu.data).toEqual([[1_000, 32.4], [2_000, null]]);
     expect((cpu.markLine as { data: unknown[] }).data).toEqual([{ xAxis: 1_000 }]);

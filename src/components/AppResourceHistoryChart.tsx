@@ -4,10 +4,19 @@ import { useI18n } from "../i18n";
 import type { AppResourceHistoryPoint } from "../types/resource";
 import { formatBytes, formatClock } from "../utils/time";
 import { useUiStore } from "../stores/uiStore";
+import { buildLineVisibilityOptions } from "../dashboard/chartOptions";
 import { useStableEcharts } from "./chartLifecycle";
 
 function cssColor(name: string) {
   return `hsl(${getComputedStyle(document.documentElement).getPropertyValue(name).trim()})`;
+}
+
+function appLineOptions(color: string, width: number) {
+  const lineVisibility = buildLineVisibilityOptions({ color, width });
+  return {
+    ...lineVisibility,
+    emphasis: { ...lineVisibility.emphasis, focus: "none" as const, scale: true }
+  };
 }
 
 export function AppResourceHistoryChart({ points }: { points: AppResourceHistoryPoint[] }) {
@@ -75,10 +84,10 @@ export function AppResourceHistoryChart({ points }: { points: AppResourceHistory
         { type: "value", gridIndex: 1, name: "I/O", axisLine: { show: false }, axisTick: { show: false }, axisLabel: { color: mutedForeground, fontSize: 11, formatter: (value: number) => `${formatBytes(value, language)}/s` }, splitLine: { lineStyle: { color: border, type: "dashed" } } }
       ],
       series: [
-        { id: "app.cpu.usage_pct", name: "CPU", type: "line", xAxisIndex: 0, yAxisIndex: 0, showSymbol: false, connectNulls: false, lineStyle: { width: 1.8 }, emphasis: { focus: "none", scale: true }, data: points.map((point) => [point.timestampMs, point.cpuPercent]) },
-        { id: "app.memory.used_bytes", name: t("memory"), type: "line", xAxisIndex: 0, yAxisIndex: 1, showSymbol: false, connectNulls: false, lineStyle: { width: 1.8 }, emphasis: { focus: "none", scale: true }, data: points.map((point) => [point.timestampMs, point.memoryUsedBytes]) },
-        { id: "app.io.read_bps", name: t("ioRead"), type: "line", xAxisIndex: 1, yAxisIndex: 2, showSymbol: false, connectNulls: false, lineStyle: { width: 1.6 }, emphasis: { focus: "none", scale: true }, data: points.map((point) => [point.timestampMs, point.ioReadBytesPerSec]) },
-        { id: "app.io.write_bps", name: t("ioWrite"), type: "line", xAxisIndex: 1, yAxisIndex: 2, showSymbol: false, connectNulls: false, lineStyle: { width: 1.6 }, emphasis: { focus: "none", scale: true }, data: points.map((point) => [point.timestampMs, point.ioWriteBytesPerSec]) }
+        { id: "app.cpu.usage_pct", name: "CPU", type: "line", xAxisIndex: 0, yAxisIndex: 0, showSymbol: false, connectNulls: false, ...appLineOptions(colors[0], 1.8), data: points.map((point) => [point.timestampMs, point.cpuPercent]) },
+        { id: "app.memory.used_bytes", name: t("memory"), type: "line", xAxisIndex: 0, yAxisIndex: 1, showSymbol: false, connectNulls: false, ...appLineOptions(colors[1], 1.8), data: points.map((point) => [point.timestampMs, point.memoryUsedBytes]) },
+        { id: "app.io.read_bps", name: t("ioRead"), type: "line", xAxisIndex: 1, yAxisIndex: 2, showSymbol: false, connectNulls: false, ...appLineOptions(colors[2], 1.6), data: points.map((point) => [point.timestampMs, point.ioReadBytesPerSec]) },
+        { id: "app.io.write_bps", name: t("ioWrite"), type: "line", xAxisIndex: 1, yAxisIndex: 2, showSymbol: false, connectNulls: false, ...appLineOptions(colors[3], 1.6), data: points.map((point) => [point.timestampMs, point.ioWriteBytesPerSec]) }
       ]
     } as echarts.EChartsOption);
   }, [language, lifecycle, points, resolvedTheme, t]);

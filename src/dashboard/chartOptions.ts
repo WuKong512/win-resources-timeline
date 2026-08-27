@@ -35,6 +35,20 @@ type TooltipItem = {
   value?: unknown;
 };
 
+type ChartLineStyle = {
+  color: string;
+  width: number;
+  opacity: 1;
+  type?: "solid" | "dashed";
+};
+
+export type LineVisibilityOptions = {
+  lineStyle: ChartLineStyle;
+  emphasis: { lineStyle: ChartLineStyle };
+  blur: { lineStyle: ChartLineStyle };
+  select: { lineStyle: ChartLineStyle };
+};
+
 type LineSeries = {
   id: string;
   name: string;
@@ -45,12 +59,15 @@ type LineSeries = {
   symbol: "circle";
   symbolSize: number;
   connectNulls: false;
-  lineStyle: { width: number; type?: "solid" | "dashed" };
+  lineStyle: ChartLineStyle;
   emphasis: {
     focus: "none";
     scale: true;
+    lineStyle: ChartLineStyle;
     itemStyle: { borderWidth: number; borderColor: string };
   };
+  blur: { lineStyle: ChartLineStyle };
+  select: { lineStyle: ChartLineStyle };
   data: Array<[number, number | null]>;
   markLine?: {
     symbol: "none";
@@ -226,6 +243,8 @@ function buildLineSeries({
   yAxisIndex?: number;
   dashed: boolean;
 }): LineSeries {
+  const lineWidth = descriptor.dimension === "gpu" ? 1.6 : 1.9;
+  const lineVisibility = buildLineVisibilityOptions({ color, width: lineWidth, dashed });
   return {
     id: descriptor.id,
     name,
@@ -236,12 +255,22 @@ function buildLineSeries({
     symbol: "circle",
     symbolSize: 7,
     connectNulls: false,
-    lineStyle: { width: descriptor.dimension === "gpu" ? 1.6 : 1.9, ...(dashed ? { type: "dashed" as const } : {}) },
-    emphasis: { focus: "none", scale: true, itemStyle: { borderWidth: 2, borderColor: selectedColor } },
+    ...lineVisibility,
+    emphasis: { ...lineVisibility.emphasis, focus: "none", scale: true, itemStyle: { borderWidth: 2, borderColor: selectedColor } },
     data: samples.map((sample) => [sample.timestampMs, metricValue(descriptor, sample)]),
     markLine: selectedTimestampMs == null
       ? { symbol: "none", silent: true, label: { show: false }, lineStyle: { color: selectedColor, width: 2, type: "solid" }, data: [] }
       : { symbol: "none", silent: true, label: { show: false }, lineStyle: { color: selectedColor, width: 2, type: "solid" }, data: [{ xAxis: selectedTimestampMs }] }
+  };
+}
+
+export function buildLineVisibilityOptions({ color, width, dashed = false }: { color: string; width: number; dashed?: boolean }): LineVisibilityOptions {
+  const normal: ChartLineStyle = { color, width, opacity: 1, ...(dashed ? { type: "dashed" } : {}) };
+  return {
+    lineStyle: { ...normal },
+    emphasis: { lineStyle: { ...normal } },
+    blur: { lineStyle: { ...normal } },
+    select: { lineStyle: { ...normal } }
   };
 }
 
