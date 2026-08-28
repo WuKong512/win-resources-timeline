@@ -12,7 +12,7 @@ AMD uProf / `AMDPowerProfileAPI` is a technically promising optional AMD source 
 - The current metrics documentation gives useful semantics for package temperature, package power, and core effective frequency.
 - The local CPU identity, `Family 1Ah / Model 44h`, is inside the documented `Family 1Ah Model 40h–4Fh` counter range.
 
-The source is not deployment-qualified in Q1. The machine has no AMD uProf installation, so no API contract probe, live values, lifecycle run, busy-session exercise, or overhead measurement was performed. The current Hyper-V/VBS/HVCI configuration independently makes the temperature counter unavailable. Exact API signatures, client privilege behavior, installed driver/service lifecycle, and the version-specific redistribution terms remain gates for the next qualification pass.
+The source is not deployment-qualified in Q1. The machine has no AMD uProf installation, so no API contract probe, live values, lifecycle run, busy-session exercise, or overhead measurement was performed. The currently enabled Microsoft Hypervisor independently makes the temperature counter unavailable under AMD's documented limitation; VBS and HVCI states are recorded as platform context. Exact API signatures, client privilege behavior, installed driver/service lifecycle, and the version-specific redistribution terms remain gates for the next qualification pass.
 
 **Source decision:** `DEFER`
 
@@ -222,15 +222,15 @@ AMD's current uProf page labels the download **Download with EULA**, and the cur
 | A. User installs AMD uProf and Resource Timeline dynamically calls the local library | Technically plausible as an external-installed dependency, subject to exact installed-version API compatibility, non-admin/permission behavior, and legal review. This is the only deployment shape worth carrying forward without bundling. |
 | B. Resource Timeline redistributes `AMDPowerProfileAPI.dll` | No authorization established. Do not redistribute. `BLOCKED_LEGAL_DISTRIBUTION_REVIEW`. |
 | C. Resource Timeline redistributes or installs the AMD profiling driver | No authorization established. Do not redistribute or install automatically; the kernel-driver and elevation boundary makes this a separate legal/security review. `BLOCKED_LEGAL_DISTRIBUTION_REVIEW`. |
-| D. Explicit written permission | Treat explicit AMD/legal permission as required before bundling or redistributing the DLL, driver, headers, samples, or documentation. A developer API page is not an implicit redistribution grant. |
+| D. Redistribution authorization | No redistribution authorization has been established. Bundling or redistribution remains blocked until the exact version-specific license terms are reviewed and either explicitly grant the intended redistribution rights or separate AMD permission covering the intended distribution model is obtained. A developer API page is not an implicit redistribution grant. |
 
-No AMD proprietary DLL, header, driver, sample, or license file is committed. Q1 does not make a legal conclusion. The distribution verdict is **`BLOCKED_LEGAL_DISTRIBUTION_REVIEW`** until the exact 5.3 license artifacts are available to counsel/owners and explicitly clear the intended distribution model.
+No AMD proprietary DLL, header, driver, sample, or license file is committed. Q1 does not make a legal conclusion. The distribution verdict is **`BLOCKED_LEGAL_DISTRIBUTION_REVIEW`** until the exact 5.3 license artifacts are reviewed and either grant the intended redistribution rights or are supplemented by separate AMD permission covering the intended distribution model.
 
 If a future implementation is approved for an external-installed dependency, it must use runtime dynamic loading from an explicit, verified installation path. The documented install root may be used as the first candidate, but the exact library subpath must come from the installed package/manifest. The adapter must not use a bare `LoadLibrary("AMDPowerProfileAPI.dll")`, current-working-directory lookup, or random PATH search. Use a safe Windows DLL-loading strategy with an explicit absolute path, verify the selected AMD binary, and return `ProviderMissing` or an equivalent unavailable state when the path cannot be resolved safely.
 
 ## Concurrency and busy behavior
 
-AMD documents: **only one power profile session can run at a time**. This creates a direct product conflict with AMD uProf, Ryzen Master, or another application using the same profiling facility.
+AMD documents: **only one power profile session can run at a time**. This creates a potential conflict with AMD uProf or any other application that holds the same power-profile facility. Ryzen Master interaction is **`NOT_ESTABLISHED`** in Q1 and must be verified, if relevant, during a future controlled live qualification.
 
 Q1 did not open a second session because uProf is not installed. Busy behavior is therefore `DOCUMENTED_NOT_LIVE_EXERCISED`.
 
@@ -306,7 +306,7 @@ The adapter must preserve the distinction between unavailable data and a real nu
 | Source becomes unavailable during polling | `SampleFailed`/health degradation, bounded retry/backoff, generation-safe recovery |
 | Invalid or non-finite value | Discard the field and report probe/source failure; never convert to zero |
 | Stop/close failure | `StopFailed`/health failure with cleanup status |
-| Hyper-V temperature limitation | `UNSUPPORTED_BY_CURRENT_PLATFORM_CONFIGURATION`, not an API bug |
+| Microsoft Hypervisor temperature limitation | `UNSUPPORTED_BY_CURRENT_PLATFORM_CONFIGURATION`, not an API bug |
 
 The only legal zero is a real zero explicitly returned by the source with a valid status and timestamp.
 
@@ -338,18 +338,19 @@ The source is not rejected: its static metric semantics and Ryzen 9000 support a
 
 ## Validation and delivery record
 
-Q1 makes documentation-only changes. Repository validation is still required and is recorded in the delivery report:
+Q1 makes documentation-only changes. The final repository validation was run on this branch after the review-repair edits:
 
-```text
-cargo fmt --manifest-path tools/metric-probe/Cargo.toml -- --check
-cargo test --manifest-path tools/metric-probe/Cargo.toml
-cargo fmt --manifest-path src-tauri/Cargo.toml -- --check
-cargo check --manifest-path src-tauri/Cargo.toml
-cargo test --manifest-path src-tauri/Cargo.toml
-git diff --check
-```
+| Check | Final result |
+| --- | --- |
+| `cargo fmt --manifest-path tools/metric-probe/Cargo.toml -- --check` | `PASS` (exit 0; Cargo reported only the environment warning `could not canonicalize path C:\Users\Hello`) |
+| `cargo test --manifest-path tools/metric-probe/Cargo.toml` | `PASS` — 57 passed; 0 failed; 0 ignored |
+| `cargo fmt --manifest-path src-tauri/Cargo.toml -- --check` | `PASS` (exit 0; same environment warning) |
+| `cargo check --manifest-path src-tauri/Cargo.toml` | `PASS` |
+| `cargo test --manifest-path src-tauri/Cargo.toml` | `PASS` — 225 passed; 0 failed; 2 ignored; the binary/doc-test targets also reported 0 tests |
+| `git diff --check` | `PASS` |
+| `tools/metric-probe` release build | `NOT_REQUIRED` — probe source unchanged |
 
-No `tools/metric-probe` release build is needed because the probe was not modified. No 10-hour soak or new long-run qualification was run.
+No 10-hour soak or new long-run qualification was run. The live AMD uProf runs remain separately blocked by the absent installation and are not represented as validation passes.
 
 ## Next step
 
