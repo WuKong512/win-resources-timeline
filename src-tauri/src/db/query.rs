@@ -6,7 +6,9 @@ use crate::{
     models::{
         AppIdentity, AppResourceHistoryPoint, AppResourceSample, AppUsageSummary,
         ComputerStateInterval, DailyUsageSummary, ForegroundInterval, GpuSample, GpuSamplePoint,
-        ResourceApp, SystemSample, SystemTimeline, TimelineGap, TodayOverview, UsageSummary,
+        MetricCatalogDevice, MetricCatalogEntry, MetricCatalogSnapshot, MetricCategory,
+        MetricRuntimeSupportStatus, ResourceApp, SystemSample, SystemTimeline, TimelineGap,
+        TodayOverview, UsageSummary,
     },
 };
 use rusqlite::{params, Connection, OptionalExtension};
@@ -415,6 +417,115 @@ pub fn system_samples(
         .into_iter()
         .map(|(_, sample)| sample)
         .collect())
+}
+
+/// Returns the current collection session's provider-reported metric catalog and the known GPU
+/// identities. Range samples are intentionally not consulted here: the frontend combines this
+/// capability truth with the selected range to project `NO_DATA_IN_RANGE` separately.
+pub fn metric_catalog(conn: &Connection) -> rusqlite::Result<MetricCatalogSnapshot> {
+    let devices = load_gpu_catalog_devices(conn)?;
+    let Some(session_id) = current_runtime_collection_session_id(conn)? else {
+        return Ok(MetricCatalogSnapshot {
+            metrics: Vec::new(),
+            devices,
+        });
+    };
+
+    let mut statement = conn.prepare(
+        r#"SELECT m.metric_key, p.kind, p.name, d.stable_key, d.vendor, d.model,
+                  d.capacity_bytes, m.enabled, m.support_status
+           FROM collection_session_metric m
+           JOIN provider p ON p.id = m.provider_id
+           LEFT JOIN hardware_device d ON d.id = m.device_id
+           WHERE m.session_id = ?1
+           ORDER BY p.kind, p.name, m.metric_key, d.stable_key"#,
+    )?;
+    let rows = statement.query_map([session_id], |row| {
+        let category = metric_category_from_catalog_value(row.get::<_, String>(1)?)?;
+        let device_key: Option<String> = row.get(3)?;
+        let device = match device_key {
+            Some(stable_key) => Some(MetricCatalogDevice {
+                stable_key,
+                vendor: row.get(4)?,
+                model: row.get(5)?,
+                capacity_bytes: row.get(6)?,
+            }),
+            None => None,
+        };
+        Ok(MetricCatalogEntry {
+            metric_key: row.get(0)?,
+            category,
+            provider_id: row.get(2)?,
+            device,
+            enabled: row.get::<_, i64>(7)? != 0,
+            support_status: metric_runtime_support_from_catalog_value(row.get(8)?)?,
+        })
+    })?;
+    let metrics = rows.collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(MetricCatalogSnapshot { metrics, devices })
+}
+
+fn current_runtime_collection_session_id(conn: &Connection) -> rusqlite::Result<Option<i64>> {
+    conn.query_row(
+        "SELECT cs.id
+         FROM collection_session cs
+         JOIN settings s ON s.key = 'runtime_collection_session_id'
+                        AND CAST(s.value AS INTEGER) = cs.id
+         WHERE cs.ended_at_ms IS NULL",
+        [],
+        |row| row.get(0),
+    )
+    .optional()
+}
+
+fn load_gpu_catalog_devices(conn: &Connection) -> rusqlite::Result<Vec<MetricCatalogDevice>> {
+    let mut statement = conn.prepare(
+        "SELECT stable_key, vendor, model, capacity_bytes
+         FROM hardware_device
+         WHERE category = 'gpu'
+         ORDER BY stable_key COLLATE NOCASE, stable_key",
+    )?;
+    let rows = statement.query_map([], |row| {
+        Ok(MetricCatalogDevice {
+            stable_key: row.get(0)?,
+            vendor: row.get(1)?,
+            model: row.get(2)?,
+            capacity_bytes: row.get(3)?,
+        })
+    })?;
+    rows.collect()
+}
+
+fn metric_category_from_catalog_value(value: String) -> rusqlite::Result<MetricCategory> {
+    match value.as_str() {
+        "cpu" => Ok(MetricCategory::Cpu),
+        "gpu" => Ok(MetricCategory::Gpu),
+        "memory" => Ok(MetricCategory::Memory),
+        "disk" => Ok(MetricCategory::Disk),
+        "network" => Ok(MetricCategory::Network),
+        "power" => Ok(MetricCategory::Power),
+        "battery" => Ok(MetricCategory::Battery),
+        "process" => Ok(MetricCategory::Process),
+        _ => Err(rusqlite::Error::InvalidParameterName(
+            "metric catalog contains an unknown category".into(),
+        )),
+    }
+}
+
+fn metric_runtime_support_from_catalog_value(
+    value: String,
+) -> rusqlite::Result<MetricRuntimeSupportStatus> {
+    match value.as_str() {
+        "supported" => Ok(MetricRuntimeSupportStatus::Supported),
+        "unsupported" => Ok(MetricRuntimeSupportStatus::Unsupported),
+        "permission_denied" => Ok(MetricRuntimeSupportStatus::PermissionDenied),
+        "provider_missing" => Ok(MetricRuntimeSupportStatus::ProviderMissing),
+        "probe_failed" => Ok(MetricRuntimeSupportStatus::ProbeFailed),
+        "failed" => Ok(MetricRuntimeSupportStatus::Failed),
+        _ => Err(rusqlite::Error::InvalidParameterName(
+            "metric catalog contains an unknown support status".into(),
+        )),
+    }
 }
 
 pub fn system_timeline(

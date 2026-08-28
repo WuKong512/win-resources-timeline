@@ -2562,6 +2562,24 @@ mod tests {
         })
         .unwrap();
 
+        let metric_catalog = db.read(query::metric_catalog).unwrap();
+        assert_eq!(
+            metric_catalog
+                .devices
+                .iter()
+                .map(|device| device.stable_key.as_str())
+                .collect::<Vec<_>>(),
+            vec!["runtime:gpu:primary", "runtime:gpu:secondary"]
+        );
+        assert!(metric_catalog.metrics.iter().any(|metric| {
+            metric.metric_key == "gpu.power_watts"
+                && metric
+                    .device
+                    .as_ref()
+                    .is_some_and(|device| device.stable_key == "runtime:gpu:primary")
+                && metric.support_status == MetricRuntimeSupportStatus::Supported
+        }));
+
         let samples = db
             .read(|conn| query::system_samples(conn, 1, 31_000, 100))
             .unwrap();

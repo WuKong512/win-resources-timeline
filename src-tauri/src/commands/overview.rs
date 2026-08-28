@@ -2,8 +2,9 @@ use crate::{
     db::query,
     error::CommandError,
     models::{
-        AppResourceHistoryPoint, AppResourceSample, DailyUsageSummary, GpuSamplePoint, ResourceApp,
-        SystemSample, SystemTimeline, TodayOverview, UsageSummary,
+        AppResourceHistoryPoint, AppResourceSample, DailyUsageSummary, GpuSamplePoint,
+        MetricCatalogSnapshot, ResourceApp, SystemSample, SystemTimeline, TodayOverview,
+        UsageSummary,
     },
     AppState,
 };
@@ -171,6 +172,13 @@ pub fn get_system_timeline(
         .db
         .read(|conn| query::system_timeline(conn, start_ms, end_ms, max_points))
         .map_err(Into::into)
+}
+
+#[tauri::command]
+pub fn get_metric_catalog(
+    state: State<'_, AppState>,
+) -> Result<MetricCatalogSnapshot, CommandError> {
+    state.db.read(query::metric_catalog).map_err(Into::into)
 }
 
 #[tauri::command]
