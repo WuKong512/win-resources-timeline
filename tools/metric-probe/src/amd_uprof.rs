@@ -15,6 +15,11 @@ pub fn run_load_child(_install_root: std::path::PathBuf) -> Result<(), String> {
     Err("AMD uProf library load-check is Windows-only".to_string())
 }
 
+#[cfg(not(windows))]
+pub fn run_load_only_child(_path: std::path::PathBuf) -> Result<(), String> {
+    Err("AMD uProf load-only diagnostic is Windows-only".to_string())
+}
+
 #[cfg(windows)]
 mod windows_impl {
     use super::{AmdUprofConfig, AmdUprofMode};
@@ -29,6 +34,7 @@ mod windows_impl {
         collections::{BTreeMap, BTreeSet},
         ffi::{c_char, CStr},
         fs,
+        io::Read,
         mem::{self, size_of},
         path::{Path, PathBuf},
         process::{Child, Stdio},
@@ -38,7 +44,7 @@ mod windows_impl {
     use windows::{
         core::{PCSTR, PCWSTR},
         Win32::{
-            Foundation::{FreeLibrary, HANDLE, HMODULE},
+            Foundation::{FreeLibrary, GetLastError, HANDLE, HMODULE},
             System::LibraryLoader::{
                 GetProcAddress, LoadLibraryExW, LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR,
                 LOAD_LIBRARY_SEARCH_SYSTEM32,
@@ -170,13 +176,17 @@ mod windows_impl {
         process_architecture: String,
         marker_files: BTreeMap<String, bool>,
         safe_load: String,
+        isolated_load_exit_code: Option<i32>,
+        isolated_load_exit_code_hex: Option<String>,
+        isolated_load_stdout: Option<String>,
+        isolated_load_stderr: Option<String>,
+        isolated_load_timed_out: bool,
         audit_status: String,
         audit_error: Option<String>,
     }
 
     #[derive(Debug, Clone)]
     struct VerifiedInstall {
-        root: PathBuf,
         library: PathBuf,
         audit: InstallationAudit,
     }
@@ -1128,8 +1138,10 @@ mod windows_impl {
         let mut concurrency = None;
         if let Some(verified) = verified.as_ref() {
             match load_library_in_owned_child(verified) {
-                Ok(load_status) => {
-                    installation.safe_load = format!("{}; {}", installation.safe_load, load_status);
+                Ok(observation) if observation.succeeded() => {
+                    record_load_observation(&mut installation, &observation);
+                    installation.safe_load =
+                        format!("{}; pass_isolated_load_only_child", installation.safe_load);
                     match config.mode {
                         AmdUprofMode::Sanity | AmdUprofMode::Cadence => {
                             run_sampling(
@@ -1147,6 +1159,31 @@ mod windows_impl {
                             concurrency = Some(run_busy(&config, verified, &mut context));
                         }
                     }
+                }
+                Ok(observation) => {
+                    record_load_observation(&mut installation, &observation);
+                    let error = observation.failure_summary();
+                    installation.safe_load = format!("{}; {}", installation.safe_load, error);
+                    installation.audit_status =
+                        "path_and_architecture_verified; isolated_load_failed; API_not_called"
+                            .to_string();
+                    installation.audit_error = Some("isolated_library_load_failed".to_string());
+                    context.errors.push(error);
+                    context.seed_failure(
+                        POWER_KEY,
+                        "unsafe_library",
+                        "isolated_library_load_failed",
+                    );
+                    context.seed_failure(
+                        FREQUENCY_KEY,
+                        "unsafe_library",
+                        "isolated_library_load_failed",
+                    );
+                    context.seed_failure(
+                        TEMPERATURE_KEY,
+                        "unsafe_library",
+                        "isolated_library_load_failed",
+                    );
                 }
                 Err(error) => {
                     installation.safe_load = format!("{}; {}", installation.safe_load, error);
@@ -1286,20 +1323,102 @@ mod windows_impl {
         Ok(())
     }
 
-    fn load_library_in_owned_child(install: &VerifiedInstall) -> Result<String, String> {
+    /// Minimal loader-boundary diagnostic. It deliberately does not resolve or call
+    /// any AMD export. A vendor DLL or dependency that terminates the process during
+    /// LoadLibraryExW will therefore leave only the BEFORE_LOAD record in the child.
+    pub fn run_load_only_child(path: PathBuf) -> Result<(), String> {
+        if !path.is_absolute() {
+            return Err("load-only diagnostic requires an absolute path".to_string());
+        }
+        let path = path
+            .canonicalize()
+            .map_err(|error| format!("canonicalize load-only path failed: {error}"))?;
+        let wide = wide_path(&path);
+        let flags = LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_SYSTEM32;
+        println!(
+            "BEFORE_LOAD path={} flags=0x{:08X} process_architecture={}",
+            path.display(),
+            flags.0,
+            process_architecture()
+        );
+        let result =
+            unsafe { LoadLibraryExW(PCWSTR::from_raw(wide.as_ptr()), HANDLE::default(), flags) };
+        match result {
+            Ok(module) => {
+                println!("LOAD_RETURNED_SUCCESS handle={:p}", module.0);
+                // Do not resolve exports, call vendor code, or explicitly unload here.
+                // Process exit releases the diagnostic module after the observation.
+                Ok(())
+            }
+            Err(error) => {
+                let last_error = unsafe { GetLastError() };
+                println!(
+                    "LOAD_RETURNED_ERROR win32_error={} win32_error_hex=0x{:08X} detail={}",
+                    last_error.0, last_error.0, error
+                );
+                Ok(())
+            }
+        }
+    }
+
+    #[derive(Debug)]
+    struct LoadChildObservation {
+        exit_code: Option<i32>,
+        exit_code_hex: Option<String>,
+        stdout: String,
+        stderr: String,
+        timed_out: bool,
+    }
+
+    impl LoadChildObservation {
+        fn succeeded(&self) -> bool {
+            !self.timed_out && self.exit_code == Some(0)
+        }
+
+        fn failure_summary(&self) -> String {
+            format!(
+                "isolated_load_child_exit_signed_{}_hex_{}{}",
+                self.exit_code
+                    .map(|value| value.to_string())
+                    .unwrap_or_else(|| "abnormal".to_string()),
+                self.exit_code_hex.as_deref().unwrap_or("N/A"),
+                if self.timed_out {
+                    "_timeout_after_child_kill"
+                } else {
+                    ""
+                }
+            )
+        }
+    }
+
+    fn record_load_observation(
+        installation: &mut InstallationAudit,
+        observation: &LoadChildObservation,
+    ) {
+        installation.isolated_load_exit_code = observation.exit_code;
+        installation.isolated_load_exit_code_hex = observation.exit_code_hex.clone();
+        installation.isolated_load_stdout = Some(observation.stdout.clone());
+        installation.isolated_load_stderr = Some(observation.stderr.clone());
+        installation.isolated_load_timed_out = observation.timed_out;
+    }
+
+    fn load_library_in_owned_child(
+        install: &VerifiedInstall,
+    ) -> Result<LoadChildObservation, String> {
         let executable = std::env::current_exe()
             .map_err(|error| format!("locate qualification probe executable failed: {error}"))?;
         let mut child = std::process::Command::new(executable)
-            .arg("amd-uprof-load-child")
-            .arg("--install-root")
-            .arg(&install.root)
+            .arg("amd-uprof-load-only-child")
+            .arg("--path")
+            .arg(&install.library)
             .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
             .creation_flags(0x0800_0000)
             .spawn()
             .map_err(|error| format!("spawn isolated library-load check failed: {error}"))?;
         let deadline = Instant::now() + Duration::from_secs(5);
+        let mut timed_out = false;
         let status = loop {
             if let Some(status) = child
                 .try_wait()
@@ -1308,22 +1427,44 @@ mod windows_impl {
                 break status;
             }
             if Instant::now() >= deadline {
+                timed_out = true;
                 let _ = child.kill();
-                let _ = child.wait();
-                return Err("isolated_library_load_timeout".to_string());
+                break child.wait().map_err(|error| {
+                    format!("wait isolated library-load check failed: {error}")
+                })?;
             }
             std::thread::sleep(Duration::from_millis(25));
         };
-        if status.success() {
-            Ok("pass_isolated_load_and_symbol_resolution".to_string())
+        let mut stdout = String::new();
+        if let Some(mut pipe) = child.stdout.take() {
+            pipe.read_to_string(&mut stdout)
+                .map_err(|error| format!("read isolated library-load stdout failed: {error}"))?;
+        }
+        let mut stderr = String::new();
+        if let Some(mut pipe) = child.stderr.take() {
+            pipe.read_to_string(&mut stderr)
+                .map_err(|error| format!("read isolated library-load stderr failed: {error}"))?;
+        }
+        let exit_code = status.code();
+        let exit_code_hex = exit_code.map(|value| format!("0x{:08X}", value as u32));
+        Ok(LoadChildObservation {
+            exit_code,
+            exit_code_hex,
+            stdout: bounded_diagnostic_output(stdout),
+            stderr: bounded_diagnostic_output(stderr),
+            timed_out,
+        })
+    }
+
+    fn bounded_diagnostic_output(output: String) -> String {
+        const MAX_DIAGNOSTIC_OUTPUT: usize = 16 * 1024;
+        if output.len() <= MAX_DIAGNOSTIC_OUTPUT {
+            output
         } else {
-            Err(format!(
-                "isolated_library_load_failed_exit_{}",
-                status
-                    .code()
-                    .map(|value| value.to_string())
-                    .unwrap_or_else(|| "abnormal".to_string())
-            ))
+            let mut bounded = output;
+            bounded.truncate(MAX_DIAGNOSTIC_OUTPUT);
+            bounded.push_str("\n[truncated]");
+            bounded
         }
     }
 
@@ -1956,6 +2097,11 @@ mod windows_impl {
             process_architecture: process_architecture().to_string(),
             marker_files: BTreeMap::new(),
             safe_load: "not_attempted".to_string(),
+            isolated_load_exit_code: None,
+            isolated_load_exit_code_hex: None,
+            isolated_load_stdout: None,
+            isolated_load_stderr: None,
+            isolated_load_timed_out: false,
             audit_status: "failed".to_string(),
             audit_error: None,
         };
@@ -2032,7 +2178,6 @@ mod windows_impl {
             "verified_for_dynamic_load; Authenticode/version recorded by read-only host audit"
                 .to_string();
         Ok(VerifiedInstall {
-            root,
             library: canonical_library,
             audit,
         })
@@ -2092,6 +2237,32 @@ mod windows_impl {
             report.installation.process_architecture,
             report.installation.safe_load,
             report.installation.audit_status
+        ));
+        output.push_str(&format!(
+            "- Isolated load child exit: signed `{}` / hex `{}` / timed out `{}`\n- Isolated child stdout/stderr captured: `{}` / `{}`\n\n",
+            report
+                .installation
+                .isolated_load_exit_code
+                .map(|value| value.to_string())
+                .unwrap_or_else(|| "N/A".to_string()),
+            report
+                .installation
+                .isolated_load_exit_code_hex
+                .as_deref()
+                .unwrap_or("N/A"),
+            report.installation.isolated_load_timed_out,
+            report
+                .installation
+                .isolated_load_stdout
+                .as_ref()
+                .map(|value| value.len().to_string())
+                .unwrap_or_else(|| "N/A".to_string()),
+            report
+                .installation
+                .isolated_load_stderr
+                .as_ref()
+                .map(|value| value.len().to_string())
+                .unwrap_or_else(|| "N/A".to_string()),
         ));
         output.push_str("## Metrics\n\n");
         output.push_str(
@@ -2703,8 +2874,25 @@ mod windows_impl {
             assert_eq!(status_name(0xDEAD_BEEF), "AMDT_RESULT_UNKNOWN_0xDEADBEEF");
             assert_eq!(status_code(0xDEAD_BEEF), "0xDEADBEEF");
         }
+
+        #[test]
+        fn load_child_observation_preserves_signed_and_hex_exit() {
+            let observation = LoadChildObservation {
+                exit_code: Some(-1),
+                exit_code_hex: Some("0xFFFFFFFF".to_string()),
+                stdout: "BEFORE_LOAD".to_string(),
+                stderr: String::new(),
+                timed_out: false,
+            };
+            assert!(!observation.succeeded());
+            assert_eq!(observation.exit_code, Some(-1));
+            assert_eq!(observation.exit_code_hex.as_deref(), Some("0xFFFFFFFF"));
+            assert!(observation
+                .failure_summary()
+                .contains("signed_-1_hex_0xFFFFFFFF"));
+        }
     }
 }
 
 #[cfg(windows)]
-pub use windows_impl::{run, run_load_child, run_workload_child};
+pub use windows_impl::{run, run_load_child, run_load_only_child, run_workload_child};

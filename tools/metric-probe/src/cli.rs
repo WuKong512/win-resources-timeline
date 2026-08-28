@@ -15,6 +15,7 @@ pub enum Command {
     AmdUprof(AmdUprofConfig),
     AmdUprofWorkloadChild { workers: u32 },
     AmdUprofLoadChild { install_root: PathBuf },
+    AmdUprofLoadOnlyChild { path: PathBuf },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -194,6 +195,7 @@ where
         "cpu-sensor-amd-uprof" => parse_amd_uprof_args(args),
         "amd-uprof-workload-child" => parse_amd_uprof_workload_child_args(args),
         "amd-uprof-load-child" => parse_amd_uprof_load_child_args(args),
+        "amd-uprof-load-only-child" => parse_amd_uprof_load_only_child_args(args),
         "--help" | "-h" => Err(usage().to_string()),
         "--version" | "-V" => Err("metric-probe 0.1.0".to_string()),
         other => Err(format!(
@@ -315,6 +317,22 @@ where
     install_root
         .map(|install_root| Command::AmdUprofLoadChild { install_root })
         .ok_or_else(|| "AMD uProf load-check requires --install-root".to_string())
+}
+
+fn parse_amd_uprof_load_only_child_args<I>(args: I) -> Result<Command, String>
+where
+    I: IntoIterator<Item = String>,
+{
+    let mut path = None;
+    let mut args = args.into_iter();
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--path" => path = Some(parse_path(&arg, args.next())?),
+            other => return Err(format!("invalid AMD uProf load-only argument '{other}'")),
+        }
+    }
+    path.map(|path| Command::AmdUprofLoadOnlyChild { path })
+        .ok_or_else(|| "AMD uProf load-only check requires --path".to_string())
 }
 
 fn parse_lifecycle_args<I>(args: I) -> Result<Command, String>
@@ -605,6 +623,18 @@ mod tests {
         assert_eq!(
             parse_args(["metric-probe", "amd-uprof-workload-child", "--workers", "3"]).unwrap(),
             Command::AmdUprofWorkloadChild { workers: 3 }
+        );
+        assert_eq!(
+            parse_args([
+                "metric-probe",
+                "amd-uprof-load-only-child",
+                "--path",
+                "D:/apps/AMDuProf/bin/AMDPowerProfileAPI.dll",
+            ])
+            .unwrap(),
+            Command::AmdUprofLoadOnlyChild {
+                path: PathBuf::from("D:/apps/AMDuProf/bin/AMDPowerProfileAPI.dll"),
+            }
         );
     }
 
