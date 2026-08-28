@@ -16,6 +16,7 @@ pub enum Command {
     AmdUprofWorkloadChild { workers: u32 },
     AmdUprofLoadChild { install_root: PathBuf },
     AmdUprofLoadOnlyChild { path: PathBuf },
+    AmdUprofInitOnlyChild { install_root: PathBuf },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -196,6 +197,7 @@ where
         "amd-uprof-workload-child" => parse_amd_uprof_workload_child_args(args),
         "amd-uprof-load-child" => parse_amd_uprof_load_child_args(args),
         "amd-uprof-load-only-child" => parse_amd_uprof_load_only_child_args(args),
+        "amd-uprof-init-only-child" => parse_amd_uprof_init_only_child_args(args),
         "--help" | "-h" => Err(usage().to_string()),
         "--version" | "-V" => Err("metric-probe 0.1.0".to_string()),
         other => Err(format!(
@@ -333,6 +335,23 @@ where
     }
     path.map(|path| Command::AmdUprofLoadOnlyChild { path })
         .ok_or_else(|| "AMD uProf load-only check requires --path".to_string())
+}
+
+fn parse_amd_uprof_init_only_child_args<I>(args: I) -> Result<Command, String>
+where
+    I: IntoIterator<Item = String>,
+{
+    let mut install_root = None;
+    let mut args = args.into_iter();
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--install-root" => install_root = Some(parse_path(&arg, args.next())?),
+            other => return Err(format!("invalid AMD uProf init-only argument '{other}'")),
+        }
+    }
+    install_root
+        .map(|install_root| Command::AmdUprofInitOnlyChild { install_root })
+        .ok_or_else(|| "AMD uProf init-only check requires --install-root".to_string())
 }
 
 fn parse_lifecycle_args<I>(args: I) -> Result<Command, String>
@@ -634,6 +653,18 @@ mod tests {
             .unwrap(),
             Command::AmdUprofLoadOnlyChild {
                 path: PathBuf::from("D:/apps/AMDuProf/bin/AMDPowerProfileAPI.dll"),
+            }
+        );
+        assert_eq!(
+            parse_args([
+                "metric-probe",
+                "amd-uprof-init-only-child",
+                "--install-root",
+                "D:/apps/AMDuProf",
+            ])
+            .unwrap(),
+            Command::AmdUprofInitOnlyChild {
+                install_root: PathBuf::from("D:/apps/AMDuProf"),
             }
         );
     }

@@ -20,6 +20,11 @@ pub fn run_load_only_child(_path: std::path::PathBuf) -> Result<(), String> {
     Err("AMD uProf load-only diagnostic is Windows-only".to_string())
 }
 
+#[cfg(not(windows))]
+pub fn run_init_only_child(_install_root: std::path::PathBuf) -> Result<(), String> {
+    Err("AMD uProf init-only diagnostic is Windows-only".to_string())
+}
+
 #[cfg(windows)]
 mod windows_impl {
     use super::{AmdUprofConfig, AmdUprofMode};
@@ -98,6 +103,11 @@ mod windows_impl {
     const AMDT_DEVICE_TYPE_CPU_CORE: u32 = 3;
     const AMDT_DEVICE_TYPE_PHYSICAL_CORE: u32 = 5;
     const AMDT_DEVICE_TYPE_THREAD: u32 = 6;
+    const INIT_ONLY_SYMBOLS: [&str; 3] = [
+        "AMDTPwrProfileInitialize",
+        "AMDTPwrGetSupportedCounters",
+        "AMDTPwrProfileClose",
+    ];
 
     type AmdResult = u32;
 
@@ -161,6 +171,13 @@ mod windows_impl {
         start_profiling: StartProfiling,
         read_all_enabled_counters: ReadAllEnabledCounters,
         stop_profiling: StopProfiling,
+        close: ProfileClose,
+    }
+
+    #[derive(Clone, Copy)]
+    struct InitOnlyFunctions {
+        initialize: ProfileInitialize,
+        get_supported_counters: GetSupportedCounters,
         close: ProfileClose,
     }
 
@@ -306,6 +323,24 @@ mod windows_impl {
         stable_status: String,
         vendor_status: Option<String>,
         vendor_status_code: Option<String>,
+    }
+
+    #[derive(Debug, Clone, Serialize)]
+    struct InitOnlyChildReport {
+        schema_version: String,
+        probe_name: String,
+        started_at_utc: String,
+        finished_at_utc: String,
+        process_architecture: String,
+        installation: InstallationAudit,
+        load: OperationReport,
+        initialize: OperationReport,
+        enumeration: OperationReport,
+        enumerated_descriptor_count: Option<u32>,
+        descriptors: Vec<CounterReport>,
+        close: OperationReport,
+        run_status: String,
+        notes: Vec<String>,
     }
 
     #[derive(Debug, Clone, Serialize)]
@@ -805,20 +840,39 @@ mod windows_impl {
         functions: AmdFunctions,
     }
 
+    struct InitOnlyLibrary {
+        module: HMODULE,
+        functions: InitOnlyFunctions,
+    }
+
+    struct InitOnlySession {
+        library: InitOnlyLibrary,
+        initialized: bool,
+    }
+
+    impl InitOnlySession {
+        fn close(&mut self) -> OperationReport {
+            if !self.initialized {
+                return operation_pending("AMDTPwrProfileClose");
+            }
+            let status = unsafe { (self.library.functions.close)() };
+            self.initialized = false;
+            operation_from_status("AMDTPwrProfileClose", status)
+        }
+    }
+
+    impl Drop for InitOnlySession {
+        fn drop(&mut self) {
+            if self.initialized {
+                let _ = unsafe { (self.library.functions.close)() };
+                self.initialized = false;
+            }
+        }
+    }
+
     impl AmdLibrary {
         fn load(install: &VerifiedInstall) -> Result<Self, AmdError> {
-            let wide = wide_path(&install.library);
-            let flags = LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_SYSTEM32;
-            let module = unsafe {
-                LoadLibraryExW(PCWSTR::from_raw(wide.as_ptr()), HANDLE::default(), flags)
-            }
-            .map_err(|error| {
-                AmdError::synthetic(
-                    "LoadLibraryExW",
-                    "provider_missing",
-                    &format!("explicit_absolute_library_load_failed: {error}"),
-                )
-            })?;
+            let module = load_module(&install.library)?;
 
             let functions = unsafe { load_functions(module) }.map_err(|missing| {
                 unsafe {
@@ -834,7 +888,34 @@ mod windows_impl {
         }
     }
 
+    impl InitOnlyLibrary {
+        fn load(install: &VerifiedInstall) -> Result<Self, AmdError> {
+            let module = load_module(&install.library)?;
+            let functions = unsafe { load_init_only_functions(module) }.map_err(|missing| {
+                unsafe {
+                    let _ = FreeLibrary(module);
+                }
+                AmdError::synthetic(
+                    "GetProcAddress",
+                    "provider_missing",
+                    &format!("missing_installed_init_only_api_symbol:{missing}"),
+                )
+            })?;
+            Ok(Self { module, functions })
+        }
+    }
+
     impl Drop for AmdLibrary {
+        fn drop(&mut self) {
+            if !self.module.is_invalid() {
+                unsafe {
+                    let _ = FreeLibrary(self.module);
+                }
+            }
+        }
+    }
+
+    impl Drop for InitOnlyLibrary {
         fn drop(&mut self) {
             if !self.module.is_invalid() {
                 unsafe {
@@ -1359,6 +1440,174 @@ mod windows_impl {
                 Ok(())
             }
         }
+    }
+
+    /// Strictly bounded API reachability diagnostic. This child resolves only the
+    /// initialize, enumerate, and close symbols. Its function table has no enable,
+    /// timer, start, or read entry points, so sampling is structurally unavailable.
+    pub fn run_init_only_child(install_root: PathBuf) -> Result<(), String> {
+        let started_at_utc = crate::utc_now_string();
+        let verified = match verify_install(&Some(install_root)) {
+            Ok(verified) => verified,
+            Err(audit) => {
+                let report = InitOnlyChildReport {
+                    schema_version: "cpu-sensor-amd-uprof-init-only/v1".to_string(),
+                    probe_name: "amd-uprof-init-only-child".to_string(),
+                    started_at_utc,
+                    finished_at_utc: crate::utc_now_string(),
+                    process_architecture: process_architecture().to_string(),
+                    installation: audit,
+                    load: operation_pending("LoadLibraryExW"),
+                    initialize: operation_pending("AMDTPwrProfileInitialize"),
+                    enumeration: operation_pending("AMDTPwrGetSupportedCounters"),
+                    enumerated_descriptor_count: None,
+                    descriptors: Vec::new(),
+                    close: operation_pending("AMDTPwrProfileClose"),
+                    run_status: "installation_verification_failed".to_string(),
+                    notes: vec!["init_only_sampling_unreachable".to_string()],
+                };
+                emit_init_only_report(&report)?;
+                return Ok(());
+            }
+        };
+
+        let flags = LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_SYSTEM32;
+        println!(
+            "INIT_ONLY_BEFORE_LOAD path={} flags=0x{:08X} process_architecture={}",
+            verified.library.display(),
+            flags.0,
+            process_architecture()
+        );
+
+        let library = match InitOnlyLibrary::load(&verified) {
+            Ok(library) => library,
+            Err(error) => {
+                let report = InitOnlyChildReport {
+                    schema_version: "cpu-sensor-amd-uprof-init-only/v1".to_string(),
+                    probe_name: "amd-uprof-init-only-child".to_string(),
+                    started_at_utc,
+                    finished_at_utc: crate::utc_now_string(),
+                    process_architecture: process_architecture().to_string(),
+                    installation: verified.audit,
+                    load: error.operation_report(),
+                    initialize: operation_pending("AMDTPwrProfileInitialize"),
+                    enumeration: operation_pending("AMDTPwrGetSupportedCounters"),
+                    enumerated_descriptor_count: None,
+                    descriptors: Vec::new(),
+                    close: operation_pending("AMDTPwrProfileClose"),
+                    run_status: "library_load_failed".to_string(),
+                    notes: vec!["init_only_sampling_unreachable".to_string()],
+                };
+                emit_init_only_report(&report)?;
+                return Ok(());
+            }
+        };
+
+        let mut session = InitOnlySession {
+            library,
+            initialized: false,
+        };
+        let initialize_status =
+            unsafe { (session.library.functions.initialize)(AMDT_PWR_MODE_TIMELINE_ONLINE) };
+        let initialize = operation_from_status("AMDTPwrProfileInitialize", initialize_status);
+        if initialize_status != AMDT_STATUS_OK {
+            let report = InitOnlyChildReport {
+                schema_version: "cpu-sensor-amd-uprof-init-only/v1".to_string(),
+                probe_name: "amd-uprof-init-only-child".to_string(),
+                started_at_utc,
+                finished_at_utc: crate::utc_now_string(),
+                process_architecture: process_architecture().to_string(),
+                installation: verified.audit,
+                load: operation_ok("LoadLibraryExW"),
+                initialize,
+                enumeration: operation_pending("AMDTPwrGetSupportedCounters"),
+                enumerated_descriptor_count: None,
+                descriptors: Vec::new(),
+                close: operation_pending("AMDTPwrProfileClose"),
+                run_status: "initialize_failed".to_string(),
+                notes: vec!["init_only_sampling_unreachable".to_string()],
+            };
+            emit_init_only_report(&report)?;
+            return Ok(());
+        }
+        session.initialized = true;
+
+        let mut count = 0u32;
+        let mut pointer = ptr::null_mut();
+        let enumeration_status =
+            unsafe { (session.library.functions.get_supported_counters)(&mut count, &mut pointer) };
+        let mut descriptors = Vec::new();
+        let enumerated_descriptor_count = if enumeration_status == AMDT_STATUS_OK
+            && count <= MAX_COUNTERS
+            && (count == 0 || !pointer.is_null())
+        {
+            for index in 0..count {
+                let raw = unsafe { *pointer.add(index as usize) };
+                descriptors.push(CounterReport {
+                    counter_id: raw.counter_id,
+                    device_id: raw.device_id,
+                    device_type: device_type_name(raw.device_type).to_string(),
+                    device_instance_id: raw.device_instance_id,
+                    category: category_name(raw.category).to_string(),
+                    aggregation: aggregation_name(raw.aggregation).to_string(),
+                    units: unit_name(raw.units).to_string(),
+                    min_value: raw.min_value,
+                    max_value: raw.max_value,
+                    name: read_c_string(raw.name),
+                    selected_metric: None,
+                    enable_status: Some("not_called".to_string()),
+                    enable_vendor_status: None,
+                });
+            }
+            Some(count)
+        } else {
+            None
+        };
+        let enumeration = if enumeration_status != AMDT_STATUS_OK {
+            operation_from_status("AMDTPwrGetSupportedCounters", enumeration_status)
+        } else if count > MAX_COUNTERS || (count > 0 && pointer.is_null()) {
+            AmdError::synthetic(
+                "AMDTPwrGetSupportedCounters",
+                "failed",
+                "counter_descriptor_buffer_invalid",
+            )
+            .operation_report()
+        } else {
+            operation_ok("AMDTPwrGetSupportedCounters")
+        };
+        let close = session.close();
+        let run_status = if enumeration.stable_status == "ok" && close.stable_status == "ok" {
+            "completed".to_string()
+        } else {
+            "enumeration_or_close_failed".to_string()
+        };
+        let report = InitOnlyChildReport {
+            schema_version: "cpu-sensor-amd-uprof-init-only/v1".to_string(),
+            probe_name: "amd-uprof-init-only-child".to_string(),
+            started_at_utc,
+            finished_at_utc: crate::utc_now_string(),
+            process_architecture: process_architecture().to_string(),
+            installation: verified.audit,
+            load: operation_ok("LoadLibraryExW"),
+            initialize,
+            enumeration,
+            enumerated_descriptor_count,
+            descriptors,
+            close,
+            run_status,
+            notes: vec![
+                "init_only_sampling_unreachable".to_string(),
+                "enable_timer_start_read_not_resolved".to_string(),
+            ],
+        };
+        emit_init_only_report(&report)
+    }
+
+    fn emit_init_only_report(report: &InitOnlyChildReport) -> Result<(), String> {
+        let json = serde_json::to_string_pretty(report)
+            .map_err(|error| format!("serialize AMD uProf init-only report failed: {error}"))?;
+        println!("{json}");
+        Ok(())
     }
 
     #[derive(Debug)]
@@ -2672,6 +2921,27 @@ mod windows_impl {
         (!value.is_empty()).then_some(value)
     }
 
+    fn load_module(path: &Path) -> Result<HMODULE, AmdError> {
+        let wide = wide_path(path);
+        let flags = LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_SYSTEM32;
+        unsafe { LoadLibraryExW(PCWSTR::from_raw(wide.as_ptr()), HANDLE::default(), flags) }
+            .map_err(|error| {
+                AmdError::synthetic(
+                    "LoadLibraryExW",
+                    "provider_missing",
+                    &format!("explicit_absolute_library_load_failed: {error}"),
+                )
+            })
+    }
+
+    unsafe fn load_init_only_functions(module: HMODULE) -> Result<InitOnlyFunctions, String> {
+        Ok(InitOnlyFunctions {
+            initialize: load_init_symbol(module, INIT_ONLY_SYMBOLS[0])?,
+            get_supported_counters: load_init_symbol(module, INIT_ONLY_SYMBOLS[1])?,
+            close: load_init_symbol(module, INIT_ONLY_SYMBOLS[2])?,
+        })
+    }
+
     unsafe fn load_functions(module: HMODULE) -> Result<AmdFunctions, String> {
         macro_rules! symbol {
             ($name:literal, $type:ty) => {
@@ -2700,6 +2970,13 @@ mod windows_impl {
     unsafe fn load_symbol<T: Copy>(module: HMODULE, name: &[u8]) -> Option<T> {
         let proc = GetProcAddress(module, PCSTR::from_raw(name.as_ptr()))?;
         Some(mem::transmute_copy(&proc))
+    }
+
+    unsafe fn load_init_symbol<T: Copy>(module: HMODULE, name: &str) -> Result<T, String> {
+        let mut nul_terminated = Vec::with_capacity(name.len() + 1);
+        nul_terminated.extend_from_slice(name.as_bytes());
+        nul_terminated.push(0);
+        load_symbol::<T>(module, &nul_terminated).ok_or_else(|| name.to_string())
     }
 
     fn wide_path(path: &Path) -> Vec<u16> {
@@ -2891,8 +3168,30 @@ mod windows_impl {
                 .failure_summary()
                 .contains("signed_-1_hex_0xFFFFFFFF"));
         }
+
+        #[test]
+        fn init_only_contract_excludes_sampling_operations() {
+            assert_eq!(
+                INIT_ONLY_SYMBOLS,
+                [
+                    "AMDTPwrProfileInitialize",
+                    "AMDTPwrGetSupportedCounters",
+                    "AMDTPwrProfileClose",
+                ]
+            );
+            for forbidden in [
+                "AMDTPwrEnableCounter",
+                "AMDTPwrSetTimerSamplingPeriod",
+                "AMDTPwrStartProfiling",
+                "AMDTPwrReadAllEnabledCounters",
+            ] {
+                assert!(!INIT_ONLY_SYMBOLS.contains(&forbidden));
+            }
+        }
     }
 }
 
 #[cfg(windows)]
-pub use windows_impl::{run, run_load_child, run_load_only_child, run_workload_child};
+pub use windows_impl::{
+    run, run_init_only_child, run_load_child, run_load_only_child, run_workload_child,
+};

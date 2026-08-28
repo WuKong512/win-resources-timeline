@@ -94,6 +94,9 @@ fn run_main() -> Result<(), String> {
         Command::AmdUprofWorkloadChild { workers } => amd_uprof::run_workload_child(workers),
         Command::AmdUprofLoadChild { install_root } => amd_uprof::run_load_child(install_root),
         Command::AmdUprofLoadOnlyChild { path } => amd_uprof::run_load_only_child(path),
+        Command::AmdUprofInitOnlyChild { install_root } => {
+            amd_uprof::run_init_only_child(install_root)
+        }
     }
 }
 
