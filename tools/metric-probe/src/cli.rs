@@ -10,6 +10,8 @@ pub enum Command {
     Run(RunConfig),
     Lifecycle(LifecycleConfig),
     Scenarios(ScenarioConfig),
+    CpuSensors(CpuSensorConfig),
+    CpuSensorLifecycle(CpuSensorLifecycleConfig),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -64,6 +66,40 @@ pub struct ScenarioConfig {
     pub sample_count: u64,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CpuSensorConfig {
+    pub duration_seconds: u64,
+    pub poll_interval_ms: u64,
+    pub output_dir: PathBuf,
+}
+
+impl Default for CpuSensorConfig {
+    fn default() -> Self {
+        Self {
+            duration_seconds: 60,
+            poll_interval_ms: 1_000,
+            output_dir: PathBuf::from("artifacts/metric-probe/cpu-sensors"),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CpuSensorLifecycleConfig {
+    pub enabled_duration_ms: u64,
+    pub disabled_duration_ms: u64,
+    pub output_dir: PathBuf,
+}
+
+impl Default for CpuSensorLifecycleConfig {
+    fn default() -> Self {
+        Self {
+            enabled_duration_ms: 2_000,
+            disabled_duration_ms: 2_000,
+            output_dir: PathBuf::from("artifacts/metric-probe/cpu-sensor-lifecycle"),
+        }
+    }
+}
+
 impl Default for ScenarioConfig {
     fn default() -> Self {
         Self {
@@ -99,12 +135,58 @@ where
         "run" => parse_run_args(args),
         "lifecycle" => parse_lifecycle_args(args),
         "scenarios" => parse_scenario_args(args),
+        "cpu-sensors" => parse_cpu_sensor_args(args),
+        "cpu-sensor-lifecycle" => parse_cpu_sensor_lifecycle_args(args),
         "--help" | "-h" => Err(usage().to_string()),
         "--version" | "-V" => Err("metric-probe 0.1.0".to_string()),
         other => Err(format!(
             "invalid command '{other}'; expected inventory or run"
         )),
     }
+}
+
+fn parse_cpu_sensor_args<I>(args: I) -> Result<Command, String>
+where
+    I: IntoIterator<Item = String>,
+{
+    let mut config = CpuSensorConfig::default();
+    let mut args = args.into_iter();
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--duration-seconds" => {
+                config.duration_seconds = parse_positive(&arg, args.next())?;
+            }
+            "--poll-interval-ms" => {
+                config.poll_interval_ms = parse_positive(&arg, args.next())?;
+            }
+            "--output-dir" => config.output_dir = parse_path(&arg, args.next())?,
+            "--help" | "-h" => return Err(usage().to_string()),
+            other => return Err(format!("invalid cpu-sensors argument '{other}'")),
+        }
+    }
+    Ok(Command::CpuSensors(config))
+}
+
+fn parse_cpu_sensor_lifecycle_args<I>(args: I) -> Result<Command, String>
+where
+    I: IntoIterator<Item = String>,
+{
+    let mut config = CpuSensorLifecycleConfig::default();
+    let mut args = args.into_iter();
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--enabled-duration-ms" => {
+                config.enabled_duration_ms = parse_positive(&arg, args.next())?;
+            }
+            "--disabled-duration-ms" => {
+                config.disabled_duration_ms = parse_positive(&arg, args.next())?;
+            }
+            "--output-dir" => config.output_dir = parse_path(&arg, args.next())?,
+            "--help" | "-h" => return Err(usage().to_string()),
+            other => return Err(format!("invalid cpu-sensor-lifecycle argument '{other}'")),
+        }
+    }
+    Ok(Command::CpuSensorLifecycle(config))
 }
 
 fn parse_lifecycle_args<I>(args: I) -> Result<Command, String>
@@ -206,7 +288,7 @@ fn parse_positive(flag: &str, value: Option<String>) -> Result<u64, String> {
 }
 
 pub fn usage() -> &'static str {
-    "Usage:\n  metric-probe inventory\n  metric-probe run [options]\n  metric-probe lifecycle [options]\n  metric-probe scenarios [options]\n\nRun options:\n  --duration-seconds <n>\n  --core-interval-ms <n>\n  --process-interval-ms <n>\n  --output-dir <path>\n  --no-process-probe\n  --no-disk-probe\n  --no-network-probe\n  --no-power-probe\n  --no-gpu-probe\n\nLifecycle options:\n  --enabled-duration-ms <n>\n  --disabled-duration-ms <n>\n  --output-dir <path>\n\nScenario options:\n  --sample-count <n>\n  --output-dir <path>"
+    "Usage:\n  metric-probe inventory\n  metric-probe run [options]\n  metric-probe lifecycle [options]\n  metric-probe scenarios [options]\n  metric-probe cpu-sensors [options]\n  metric-probe cpu-sensor-lifecycle [options]\n\nRun options:\n  --duration-seconds <n>\n  --core-interval-ms <n>\n  --process-interval-ms <n>\n  --output-dir <path>\n  --no-process-probe\n  --no-disk-probe\n  --no-network-probe\n  --no-power-probe\n  --no-gpu-probe\n\nLifecycle options:\n  --enabled-duration-ms <n>\n  --disabled-duration-ms <n>\n  --output-dir <path>\n\nScenario options:\n  --sample-count <n>\n  --output-dir <path>\n\nCPU sensor options:\n  --duration-seconds <n>\n  --poll-interval-ms <n>\n  --output-dir <path>\n\nCPU sensor lifecycle options:\n  --enabled-duration-ms <n>\n  --disabled-duration-ms <n>\n  --output-dir <path>"
 }
 
 pub fn args() -> Vec<String> {
@@ -215,7 +297,10 @@ pub fn args() -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_args, Command, LifecycleConfig, RunConfig, ScenarioConfig};
+    use super::{
+        parse_args, Command, CpuSensorConfig, CpuSensorLifecycleConfig, LifecycleConfig, RunConfig,
+        ScenarioConfig,
+    };
     use std::path::PathBuf;
 
     #[test]
@@ -303,6 +388,46 @@ mod tests {
             Command::Scenarios(ScenarioConfig {
                 output_dir: PathBuf::from("tmp/scenarios"),
                 sample_count: 3,
+            })
+        );
+    }
+
+    #[test]
+    fn parses_cpu_sensor_commands() {
+        assert_eq!(
+            parse_args([
+                "metric-probe",
+                "cpu-sensors",
+                "--duration-seconds",
+                "300",
+                "--poll-interval-ms",
+                "2500",
+                "--output-dir",
+                "tmp/cpu",
+            ])
+            .unwrap(),
+            Command::CpuSensors(CpuSensorConfig {
+                duration_seconds: 300,
+                poll_interval_ms: 2500,
+                output_dir: PathBuf::from("tmp/cpu"),
+            })
+        );
+        assert_eq!(
+            parse_args([
+                "metric-probe",
+                "cpu-sensor-lifecycle",
+                "--enabled-duration-ms",
+                "1000",
+                "--disabled-duration-ms",
+                "2000",
+                "--output-dir",
+                "tmp/lifecycle",
+            ])
+            .unwrap(),
+            Command::CpuSensorLifecycle(CpuSensorLifecycleConfig {
+                enabled_duration_ms: 1000,
+                disabled_duration_ms: 2000,
+                output_dir: PathBuf::from("tmp/lifecycle"),
             })
         );
     }

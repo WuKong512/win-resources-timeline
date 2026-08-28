@@ -6,7 +6,7 @@ use windows::{
     core::{HRESULT, PCWSTR},
     Win32::{
         Foundation::{
-            CloseHandle, ERROR_ACCESS_DENIED, ERROR_INVALID_HANDLE, ERROR_INVALID_PARAMETER,
+            CloseHandle, BOOL, ERROR_ACCESS_DENIED, ERROR_INVALID_HANDLE, ERROR_INVALID_PARAMETER,
             ERROR_PARTIAL_COPY, ERROR_PROCESS_ABORTED, FILETIME, HANDLE,
         },
         NetworkManagement::IpHelper::{
@@ -18,6 +18,10 @@ use windows::{
             Diagnostics::ToolHelp::{
                 CreateToolhelp32Snapshot, Thread32First, Thread32Next, TH32CS_SNAPTHREAD,
                 THREADENTRY32,
+            },
+            Memory::{
+                MapViewOfFile, OpenFileMappingW, UnmapViewOfFile, VirtualQuery, FILE_MAP_READ,
+                MEMORY_BASIC_INFORMATION, MEMORY_MAPPED_VIEW_ADDRESS,
             },
             Performance::{
                 PdhAddEnglishCounterW, PdhCloseQuery, PdhCollectQueryData,
@@ -254,6 +258,365 @@ impl Drop for DiskProvider {
             }
         }
     }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct CpuPerformanceCounters {
+    pub processor_frequency_mhz: f64,
+    pub processor_performance_percent: f64,
+    pub processor_utility_percent: f64,
+    pub percent_maximum_frequency: f64,
+}
+
+/// Windows Processor Information counters collected through one reusable PDH query.
+///
+/// This is deliberately an independent probe primitive. It is not used by the
+/// production collector and does not turn an OS counter into a hardware sensor.
+#[derive(Debug)]
+pub struct CpuPerformanceProvider {
+    query: isize,
+    processor_frequency: isize,
+    processor_performance: isize,
+    processor_utility: isize,
+    percent_maximum_frequency: isize,
+    warmed: bool,
+}
+
+impl CpuPerformanceProvider {
+    pub fn new() -> ReadResult<Self> {
+        unsafe {
+            let mut query = 0;
+            if PdhOpenQueryW(PCWSTR::null(), 0, &mut query) != 0 {
+                return ReadResult::status(
+                    ReadStatus::ProviderMissing,
+                    "pdh_processor_information_open_failed",
+                );
+            }
+            let paths = [
+                r"\Processor Information(_Total)\Processor Frequency",
+                r"\Processor Information(_Total)\% Processor Performance",
+                r"\Processor Information(_Total)\% Processor Utility",
+                r"\Processor Information(_Total)\% of Maximum Frequency",
+            ];
+            let mut counters = [0_isize; 4];
+            for (path, counter) in paths.iter().zip(counters.iter_mut()) {
+                let path = wide(path);
+                if PdhAddEnglishCounterW(query, PCWSTR::from_raw(path.as_ptr()), 0, counter) != 0 {
+                    PdhCloseQuery(query);
+                    return ReadResult::status(
+                        ReadStatus::ProviderMissing,
+                        "pdh_processor_information_counter_missing",
+                    );
+                }
+            }
+            if PdhCollectQueryData(query) != 0 {
+                PdhCloseQuery(query);
+                return ReadResult::status(
+                    ReadStatus::Failed,
+                    "pdh_processor_information_initial_collect_failed",
+                );
+            }
+            ReadResult::value(Self {
+                query,
+                processor_frequency: counters[0],
+                processor_performance: counters[1],
+                processor_utility: counters[2],
+                percent_maximum_frequency: counters[3],
+                warmed: false,
+            })
+        }
+    }
+
+    pub fn sample(&mut self) -> ReadResult<CpuPerformanceCounters> {
+        unsafe {
+            if PdhCollectQueryData(self.query) != 0 {
+                return ReadResult::status(
+                    ReadStatus::Failed,
+                    "pdh_processor_information_collect_failed",
+                );
+            }
+            let values = [
+                formatted_counter(self.processor_frequency),
+                formatted_counter(self.processor_performance),
+                formatted_counter(self.processor_utility),
+                formatted_counter(self.percent_maximum_frequency),
+            ];
+            let [Some(processor_frequency_mhz), Some(processor_performance_percent), Some(processor_utility_percent), Some(percent_maximum_frequency)] =
+                values
+            else {
+                return ReadResult::status(
+                    ReadStatus::Failed,
+                    "pdh_processor_information_read_failed",
+                );
+            };
+            if !self.warmed {
+                self.warmed = true;
+                return ReadResult::status(
+                    ReadStatus::Failed,
+                    "pdh_processor_information_warmup_sample",
+                );
+            }
+            ReadResult::value(CpuPerformanceCounters {
+                processor_frequency_mhz,
+                processor_performance_percent,
+                processor_utility_percent,
+                percent_maximum_frequency,
+            })
+        }
+    }
+}
+
+impl Drop for CpuPerformanceProvider {
+    fn drop(&mut self) {
+        unsafe {
+            if self.query != 0 {
+                PdhCloseQuery(self.query);
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct AfterburnerSnapshot {
+    pub source_timestamp_seconds: i64,
+    pub cpu_temperature_celsius: Option<f64>,
+    pub cpu_power_watts: Option<f64>,
+    pub cpu_clock_mhz: Option<f64>,
+}
+
+#[repr(C)]
+struct MahmSharedMemoryHeader {
+    signature: u32,
+    version: u32,
+    header_size: u32,
+    entry_count: u32,
+    entry_size: u32,
+    time: i32,
+    gpu_entry_count: u32,
+    gpu_entry_size: u32,
+}
+
+#[repr(C)]
+struct MahmSharedMemoryEntry {
+    source_name: [u8; 260],
+    source_units: [u8; 260],
+    localized_source_name: [u8; 260],
+    localized_source_units: [u8; 260],
+    recommended_format: [u8; 260],
+    data: f32,
+    min_limit: f32,
+    max_limit: f32,
+    flags: u32,
+    gpu: u32,
+    source_id: u32,
+}
+
+// The SDK documents the four-character literal `MAHM`; MSVC stores that
+// multi-character constant as the byte sequence `MHAM` in this DWORD.
+const MAHM_SIGNATURE: u32 = u32::from_le_bytes(*b"MHAM");
+const MAHM_VERSION_2: u32 = 0x0002_0000;
+const MAHM_GLOBAL_GPU: u32 = u32::MAX;
+const MAHM_CPU_TEMPERATURE: u32 = 0x0000_0080;
+const MAHM_CPU_CLOCK: u32 = 0x0000_00A0;
+const MAHM_CPU_POWER: u32 = 0x0000_0100;
+
+fn mapped_range_is_readable(view: *const u8, length: usize) -> bool {
+    if view.is_null() || length == 0 {
+        return false;
+    }
+
+    let mut cursor = view as usize;
+    let mut remaining = length;
+    while remaining > 0 {
+        let mut region = MEMORY_BASIC_INFORMATION::default();
+        let queried = unsafe {
+            VirtualQuery(
+                Some(cursor as *const std::ffi::c_void),
+                &mut region,
+                size_of::<MEMORY_BASIC_INFORMATION>(),
+            )
+        };
+        if queried != size_of::<MEMORY_BASIC_INFORMATION>() || region.RegionSize == 0 {
+            return false;
+        }
+
+        let region_start = region.BaseAddress as usize;
+        let Some(region_end) = region_start.checked_add(region.RegionSize) else {
+            return false;
+        };
+        if cursor < region_start || cursor >= region_end {
+            return false;
+        }
+
+        let available = region_end - cursor;
+        if available >= remaining {
+            return true;
+        }
+        remaining -= available;
+        cursor = region_end;
+    }
+    true
+}
+
+/// Read-only adapter for MSI Afterburner's documented MAHM shared-memory SDK.
+///
+/// The adapter is reference-only: it never starts Afterburner, writes to the
+/// mapping, installs a driver, or treats the result as a production dependency.
+pub struct AfterburnerSharedMemory {
+    mapping: HANDLE,
+    view: *mut std::ffi::c_void,
+    header_size: usize,
+    entry_count: usize,
+    entry_size: usize,
+}
+
+impl std::fmt::Debug for AfterburnerSharedMemory {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("AfterburnerSharedMemory")
+            .field("header_size", &self.header_size)
+            .field("entry_count", &self.entry_count)
+            .field("entry_size", &self.entry_size)
+            .finish()
+    }
+}
+
+impl AfterburnerSharedMemory {
+    pub fn open() -> ReadResult<Self> {
+        Self::open_named("MAHMSharedMemory")
+    }
+
+    fn open_named(name: &str) -> ReadResult<Self> {
+        unsafe {
+            let name = wide(name);
+            let mapping =
+                match OpenFileMappingW(FILE_MAP_READ.0, BOOL(0), PCWSTR::from_raw(name.as_ptr())) {
+                    Ok(mapping) => mapping,
+                    Err(error) => {
+                        let access_denied =
+                            error.code() == HRESULT::from_win32(ERROR_ACCESS_DENIED.0);
+                        return ReadResult::status(
+                            if access_denied {
+                                ReadStatus::PermissionDenied
+                            } else {
+                                ReadStatus::ProviderMissing
+                            },
+                            if access_denied {
+                                "afterburner_shared_memory_access_denied"
+                            } else {
+                                "afterburner_shared_memory_missing"
+                            },
+                        );
+                    }
+                };
+            let view = MapViewOfFile(mapping, FILE_MAP_READ, 0, 0, 0).Value;
+            if view.is_null() {
+                close_handle(mapping);
+                return ReadResult::status(
+                    ReadStatus::Failed,
+                    "afterburner_shared_memory_map_failed",
+                );
+            }
+            if !mapped_range_is_readable(view as *const u8, size_of::<MahmSharedMemoryHeader>()) {
+                let _ = UnmapViewOfFile(MEMORY_MAPPED_VIEW_ADDRESS { Value: view });
+                close_handle(mapping);
+                return ReadResult::status(
+                    ReadStatus::Failed,
+                    "afterburner_shared_memory_map_bounds_invalid",
+                );
+            }
+            let header = &*(view as *const MahmSharedMemoryHeader);
+            let header_size = header.header_size as usize;
+            let entry_count = header.entry_count as usize;
+            let entry_size = header.entry_size as usize;
+            let mapped_size = entry_count
+                .checked_mul(entry_size)
+                .and_then(|entries_size| header_size.checked_add(entries_size));
+            let valid = header.signature == MAHM_SIGNATURE
+                && header.version >= MAHM_VERSION_2
+                && header_size >= size_of::<MahmSharedMemoryHeader>()
+                && entry_size >= size_of::<MahmSharedMemoryEntry>()
+                && entry_count <= 1024
+                && mapped_size.is_some_and(|size| {
+                    size <= 16 * 1024 * 1024 && mapped_range_is_readable(view as *const u8, size)
+                });
+            if !valid {
+                let _ = UnmapViewOfFile(MEMORY_MAPPED_VIEW_ADDRESS { Value: view });
+                close_handle(mapping);
+                return ReadResult::status(
+                    ReadStatus::Failed,
+                    "afterburner_shared_memory_header_invalid",
+                );
+            }
+            ReadResult::value(Self {
+                mapping,
+                view,
+                header_size,
+                entry_count,
+                entry_size,
+            })
+        }
+    }
+
+    pub fn sample(&self) -> ReadResult<AfterburnerSnapshot> {
+        unsafe {
+            let header = &*(self.view as *const MahmSharedMemoryHeader);
+            if header.signature != MAHM_SIGNATURE || header.version < MAHM_VERSION_2 {
+                return ReadResult::status(
+                    ReadStatus::Failed,
+                    "afterburner_shared_memory_invalidated",
+                );
+            }
+            let mut temperature = None;
+            let mut power = None;
+            let mut clock = None;
+            for index in 0..self.entry_count {
+                let offset = self.header_size + index.saturating_mul(self.entry_size);
+                let entry =
+                    &*((self.view as *const u8).add(offset) as *const MahmSharedMemoryEntry);
+                let value = valid_sensor_value(entry.data);
+                if entry.gpu != MAHM_GLOBAL_GPU {
+                    continue;
+                }
+                match entry.source_id {
+                    MAHM_CPU_TEMPERATURE => temperature = value,
+                    MAHM_CPU_POWER => power = value,
+                    MAHM_CPU_CLOCK => clock = value,
+                    _ => {}
+                }
+            }
+            if temperature.is_none() && power.is_none() && clock.is_none() {
+                return ReadResult::status(
+                    ReadStatus::Unsupported,
+                    "afterburner_cpu_sources_missing",
+                );
+            }
+            ReadResult::value(AfterburnerSnapshot {
+                source_timestamp_seconds: header.time as i64,
+                cpu_temperature_celsius: temperature,
+                cpu_power_watts: power,
+                cpu_clock_mhz: clock,
+            })
+        }
+    }
+}
+
+impl Drop for AfterburnerSharedMemory {
+    fn drop(&mut self) {
+        unsafe {
+            if !self.view.is_null() {
+                let _ = UnmapViewOfFile(MEMORY_MAPPED_VIEW_ADDRESS { Value: self.view });
+            }
+            close_handle(self.mapping);
+        }
+    }
+}
+
+fn valid_sensor_value(value: f32) -> Option<f64> {
+    value
+        .is_finite()
+        .then_some(value as f64)
+        .filter(|value| value.abs() < f32::MAX as f64)
 }
 
 pub fn machine_info() -> MachineInfo {
@@ -1113,7 +1476,7 @@ fn architecture_name(system_info: SYSTEM_INFO) -> String {
 mod tests {
     use super::{
         is_probeable_process_id, network_classification, summarize_process_detail,
-        ProcessDetailSummary, ProcessMetrics, ReadResult, ReadStatus,
+        AfterburnerSharedMemory, ProcessDetailSummary, ProcessMetrics, ReadResult, ReadStatus,
     };
     use windows::Win32::NetworkManagement::IpHelper::{
         IF_TYPE_IEEE80211, IF_TYPE_SOFTWARE_LOOPBACK, MIB_IF_ROW2,
@@ -1287,5 +1650,23 @@ mod tests {
     fn pid_zero_is_excluded_from_process_detail_attempts() {
         assert!(!is_probeable_process_id(0));
         assert!(is_probeable_process_id(1));
+    }
+
+    #[test]
+    fn missing_reference_mapping_is_provider_missing() {
+        let result = AfterburnerSharedMemory::open_named(
+            "ResourceTimelineCpuSensorProbeMappingThatDoesNotExist",
+        );
+        assert_eq!(result.status, ReadStatus::ProviderMissing);
+        assert_eq!(result.reason_code, "afterburner_shared_memory_missing");
+        assert!(result.value.is_none());
+    }
+
+    #[test]
+    fn invalid_reference_values_are_not_accepted() {
+        assert!(super::valid_sensor_value(f32::NAN).is_none());
+        assert!(super::valid_sensor_value(f32::INFINITY).is_none());
+        assert!(super::valid_sensor_value(f32::MAX).is_none());
+        assert_eq!(super::valid_sensor_value(42.5), Some(42.5));
     }
 }
