@@ -26,6 +26,7 @@ import { createDefaultDashboardConfig, reorderDashboardCards, toggleMetricPin, v
 import { canPersistDashboard, classifyDashboardLoad, isDashboardEditable, type DashboardLoadState } from "../dashboard/loadState";
 import { buildMetricCatalog, isTrendMetricSelectable, trendFamilies, type MetricCatalogItem, type MetricId, type UnitFamily } from "../dashboard/metrics";
 import { completeMetricCatalogLoad, failMetricCatalogLoad, initialMetricCatalogLoadState, startMetricCatalogLoad, type MetricCatalogLoadState } from "../dashboard/metricCatalogState";
+import { shouldClearTimelineForLoad, shouldShowTimelineRefreshNotice } from "../dashboard/refreshState";
 import type { AppResourceSample, CapabilityState, CollectionSettings, CollectorStatus, GpuSample, ProviderStatus, SystemSample, TimelineQueryResult } from "../types/resource";
 import { effectiveTimelineDate, formatBytes, formatClock, localDateString, millisecondsUntilLocalMidnight, timelineWindowRange } from "../utils/time";
 import { aggregateCategoryCapability, gpuDevices, metricDataState, timelineRefreshIntervalMs } from "../utils/uiSemantics";
@@ -95,8 +96,7 @@ export function TimelinePage() {
     if (nextDate !== selectedDate) setSelectedDate(nextDate);
     if (background) {
       setRefreshing(true);
-      setRefreshError("");
-    } else {
+    } else if (shouldClearTimelineForLoad(background)) {
       timelineRef.current = null;
       setTimeline(null);
       setLoading(true);
@@ -115,6 +115,7 @@ export function TimelinePage() {
         setTimeline(nextTimeline);
         setStatus(nextStatus);
         setSettings(nextSettings);
+        if (background) setRefreshError("");
         setSelected((current) => current && nextTimeline.samples.some((sample) => sample.timestampMs === current.timestampMs) ? current : null);
       })
       .catch(() => {
@@ -365,7 +366,7 @@ export function TimelinePage() {
     </header>
 
     {error && !timeline ? <InlineError message={error} onRetry={loadTimeline} title={t("timelineErrorTitle")} /> : loading ? <TimelineLoading /> : <>
-      {(refreshing || refreshError) && <div role={refreshError ? "alert" : "status"} className={`${refreshError ? "error-surface" : "border-border bg-muted/40 text-muted-foreground"} flex flex-wrap items-center justify-between gap-3 rounded-lg border px-4 py-2.5 text-xs`}><span>{refreshError || t("timelineRefreshing")}</span>{refreshError && <Button variant="outline" className="h-8 px-2.5 text-xs" onClick={() => loadTimeline(true)}>{t("retry")}</Button>}</div>}
+      {shouldShowTimelineRefreshNotice({ refreshing, refreshError }) && <div role="alert" className="error-surface flex flex-wrap items-center justify-between gap-3 rounded-lg border px-4 py-2.5 text-xs"><span>{refreshError}</span><Button variant="outline" className="h-8 px-2.5 text-xs" onClick={() => loadTimeline(true)}>{t("retry")}</Button></div>}
       {dashboardCustomizing && dashboardEditable && <RuntimeErrorBoundary title={t("runtimeErrorTitle")} message={t("runtimeErrorMessage")} retryLabel={t("retry")}><DashboardEditor config={effectiveDashboardConfig} catalog={metricCatalog} samples={samples} trendMetricIds={trendMetricIds} onTogglePin={toggleOverviewMetric} onToggleTrend={toggleTrendMetric} onMoveCard={moveOverviewCard} onRestoreDefaults={restoreDashboardDefaults} saving={dashboardSaving} saveError={dashboardSaveError} /></RuntimeErrorBoundary>}
       {dashboardLoadState === "failed" && <InlineError title={t("dashboardLoadErrorTitle")} message={t("dashboardLoadErrorMessage")} onRetry={loadDashboardConfig} />}
       <MetricCatalogLoadNotice phase={metricCatalogLoadState.phase} onRetry={loadMetricCatalog} />
