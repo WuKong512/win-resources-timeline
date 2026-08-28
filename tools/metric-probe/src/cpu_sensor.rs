@@ -17,7 +17,11 @@ use std::{
 };
 
 const CPU_SENSOR_SCHEMA: &str = "cpu-sensor-spike/v1";
-const CPU_SENSOR_LIFECYCLE_SCHEMA: &str = "cpu-sensor-spike-lifecycle/v1";
+const CPU_SENSOR_LIFECYCLE_SCHEMA: &str = "cpu-sensor-spike-lifecycle/v2";
+
+const SOURCE_NT_POWER: &str = "nt_power";
+const SOURCE_PDH: &str = "pdh";
+const SOURCE_AFTERBURNER: &str = "afterburner";
 
 #[derive(Debug, Clone, Serialize)]
 struct CpuSensorSource {
@@ -108,11 +112,104 @@ struct CpuSensorLifecyclePhase {
     enabled: bool,
     duration_ms: u64,
     scheduler_tick_count: u64,
-    successful_sample_count: u64,
-    source_poll_count_delta: u64,
+    sample_attempt_count: u64,
+    logical_source_poll_count_delta: u64,
+    successful_source_read_count: u64,
+    failed_source_read_count: u64,
+    source_results: CpuSensorSourceResults,
+    source_generation: u64,
+    source_handles_released_at_start: bool,
     no_source_polling_observed: bool,
     resource_start: Option<CpuSensorResourceSnapshot>,
     resource_end: Option<CpuSensorResourceSnapshot>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Default, PartialEq, Eq)]
+struct SourceReadCounts {
+    attempted: u64,
+    successful: u64,
+    failed: u64,
+}
+
+impl SourceReadCounts {
+    fn merge(&mut self, other: Self) {
+        self.attempted = self.attempted.saturating_add(other.attempted);
+        self.successful = self.successful.saturating_add(other.successful);
+        self.failed = self.failed.saturating_add(other.failed);
+    }
+
+    fn has_success(self) -> bool {
+        self.successful > 0
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Default, PartialEq, Eq)]
+struct CpuSensorSourceResults {
+    nt_power: SourceReadCounts,
+    pdh: SourceReadCounts,
+    afterburner: SourceReadCounts,
+}
+
+impl CpuSensorSourceResults {
+    fn merge(&mut self, other: Self) {
+        self.nt_power.merge(other.nt_power);
+        self.pdh.merge(other.pdh);
+        self.afterburner.merge(other.afterburner);
+    }
+
+    fn total_attempted(self) -> u64 {
+        self.nt_power
+            .attempted
+            .saturating_add(self.pdh.attempted)
+            .saturating_add(self.afterburner.attempted)
+    }
+
+    fn total_successful(self) -> u64 {
+        self.nt_power
+            .successful
+            .saturating_add(self.pdh.successful)
+            .saturating_add(self.afterburner.successful)
+    }
+
+    fn total_failed(self) -> u64 {
+        self.nt_power
+            .failed
+            .saturating_add(self.pdh.failed)
+            .saturating_add(self.afterburner.failed)
+    }
+
+    fn successful_source_keys(self) -> Vec<String> {
+        [
+            (SOURCE_NT_POWER, self.nt_power),
+            (SOURCE_PDH, self.pdh),
+            (SOURCE_AFTERBURNER, self.afterburner),
+        ]
+        .into_iter()
+        .filter(|(_, counts)| counts.has_success())
+        .map(|(source, _)| source.to_string())
+        .collect()
+    }
+
+    fn source_has_success(self, source: &str) -> bool {
+        match source {
+            SOURCE_NT_POWER => self.nt_power.has_success(),
+            SOURCE_PDH => self.pdh.has_success(),
+            SOURCE_AFTERBURNER => self.afterburner.has_success(),
+            _ => false,
+        }
+    }
+}
+
+#[cfg(windows)]
+impl SourceReadCounts {
+    fn observe<T>(&mut self, result: &crate::windows::ReadResult<T>) {
+        self.attempted = self.attempted.saturating_add(1);
+        if matches!(result.status, crate::windows::ReadStatus::Value) && result.value.is_some() {
+            self.successful = self.successful.saturating_add(1);
+        } else {
+            self.failed = self.failed.saturating_add(1);
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -137,10 +234,23 @@ struct CpuSensorLifecycleReport {
     sources: Vec<CpuSensorSource>,
     phases: Vec<CpuSensorLifecyclePhase>,
     resources: CpuSensorLifecycleResources,
+    baseline_enabled_successful_sources: Vec<String>,
+    re_enabled_successful_sources: Vec<String>,
+    available_source_recovery: bool,
+    source_handles_released_on_disable: bool,
     enable_disable_reenable: bool,
     cleanup_completed: bool,
     failure_isolation: String,
     sleep_resume: String,
+}
+
+#[derive(Debug, Default)]
+struct LifecycleEvaluation {
+    baseline_enabled_successful_sources: Vec<String>,
+    re_enabled_successful_sources: Vec<String>,
+    available_source_recovery: bool,
+    source_handles_released_on_disable: bool,
+    pass: bool,
 }
 
 #[cfg(windows)]
@@ -152,6 +262,7 @@ struct CpuSensorSession {
     pdh_status: (crate::windows::ReadStatus, String),
     afterburner_status: (crate::windows::ReadStatus, String),
     logical_source_poll_count: u64,
+    enable_generation: u64,
 }
 
 #[cfg(windows)]
@@ -162,6 +273,12 @@ struct CpuSensorReading {
     os_latency_ms: f64,
     pdh_latency_ms: f64,
     afterburner_latency_ms: f64,
+}
+
+#[cfg(windows)]
+struct CpuSensorPoll {
+    reading: CpuSensorReading,
+    source_results: CpuSensorSourceResults,
 }
 
 #[cfg(windows)]
@@ -180,6 +297,7 @@ impl CpuSensorSession {
                 "not_initialized".to_string(),
             ),
             logical_source_poll_count: 0,
+            enable_generation: 0,
         };
         session.enable();
         session
@@ -220,6 +338,7 @@ impl CpuSensorSession {
         self.pdh_status = pdh_status;
         self.afterburner_status = afterburner_status;
         self.enabled = true;
+        self.enable_generation = self.enable_generation.saturating_add(1);
     }
 
     fn disable(&mut self) {
@@ -236,7 +355,11 @@ impl CpuSensorSession {
         self.logical_source_poll_count
     }
 
-    fn sample(&mut self) -> Option<CpuSensorReading> {
+    fn enable_generation(&self) -> u64 {
+        self.enable_generation
+    }
+
+    fn sample(&mut self) -> Option<CpuSensorPoll> {
         if !self.enabled {
             return None;
         }
@@ -263,14 +386,34 @@ impl CpuSensorSession {
                 (None, 0.0)
             };
 
-        Some(CpuSensorReading {
+        let reading = CpuSensorReading {
             os_frequency,
             pdh,
             afterburner,
             os_latency_ms,
             pdh_latency_ms,
             afterburner_latency_ms,
+        };
+        let source_results = reading.source_results();
+        Some(CpuSensorPoll {
+            reading,
+            source_results,
         })
+    }
+}
+
+#[cfg(windows)]
+impl CpuSensorReading {
+    fn source_results(&self) -> CpuSensorSourceResults {
+        let mut results = CpuSensorSourceResults::default();
+        results.nt_power.observe(&self.os_frequency);
+        if let Some(result) = self.pdh.as_ref() {
+            results.pdh.observe(result);
+        }
+        if let Some(result) = self.afterburner.as_ref() {
+            results.afterburner.observe(result);
+        }
+        results
     }
 }
 
@@ -328,9 +471,9 @@ fn run_windows(config: CpuSensorConfig) -> Result<(PathBuf, PathBuf), String> {
             let interval_ms = previous_poll
                 .map(|previous: Instant| now.duration_since(previous).as_millis() as u64);
             let timestamp_ms = crate::unix_now_ms();
-            if let Some(reading) = session.sample() {
-                record_reading(&mut metrics, &reading, timestamp_ms, interval_ms);
-                if let Some(Some(reference)) = reading.afterburner.as_ref().map(|result| {
+            if let Some(poll) = session.sample() {
+                record_reading(&mut metrics, &poll.reading, timestamp_ms, interval_ms);
+                if let Some(Some(reference)) = poll.reading.afterburner.as_ref().map(|result| {
                     result
                         .value
                         .as_ref()
@@ -361,7 +504,7 @@ fn run_windows(config: CpuSensorConfig) -> Result<(PathBuf, PathBuf), String> {
         metric.finalize();
     }
     let metric_summaries = metrics.iter().map(metric_summary).collect::<Vec<_>>();
-    let sources = source_descriptions(&session, &metrics);
+    let sources = source_descriptions(&session, &metrics, None);
     let average_cpu = self_samples
         .probe_cpu_share_percent
         .iter()
@@ -494,14 +637,12 @@ fn run_lifecycle_windows(config: CpuSensorLifecycleConfig) -> Result<(PathBuf, P
     ];
     session.disable();
     let cleanup_completed = session.is_stopped();
-    let disabled_no_polling = phases
-        .iter()
-        .filter(|phase| !phase.enabled)
-        .all(|phase| phase.scheduler_tick_count > 0 && phase.no_source_polling_observed);
-    let reenabled_sampled = phases
-        .iter()
-        .any(|phase| phase.phase == "re-enabled-1" && phase.successful_sample_count > 0);
+    let evaluation = evaluate_lifecycle(&phases, cleanup_completed);
     let resources = lifecycle_resources(&phases);
+    let lifecycle_source_results = phases
+        .iter()
+        .find(|phase| phase.phase == "enabled-1")
+        .map(|phase| &phase.source_results);
     let report = CpuSensorLifecycleReport {
         schema_version: CPU_SENSOR_LIFECYCLE_SCHEMA.to_string(),
         probe_name: "cpu-sensor-lifecycle".to_string(),
@@ -512,15 +653,92 @@ fn run_lifecycle_windows(config: CpuSensorLifecycleConfig) -> Result<(PathBuf, P
             disabled_duration_ms: config.disabled_duration_ms,
             poll_interval_ms: poll_interval.as_millis() as u64,
         },
-        sources: source_descriptions(&session, &[]),
+        sources: source_descriptions(&session, &[], lifecycle_source_results),
         phases,
         resources,
-        enable_disable_reenable: disabled_no_polling && reenabled_sampled,
+        baseline_enabled_successful_sources: evaluation.baseline_enabled_successful_sources,
+        re_enabled_successful_sources: evaluation.re_enabled_successful_sources,
+        available_source_recovery: evaluation.available_source_recovery,
+        source_handles_released_on_disable: evaluation.source_handles_released_on_disable,
+        enable_disable_reenable: evaluation.pass,
         cleanup_completed,
-        failure_isolation: "Source handles are owned by this optional session; a missing PDH/shared-memory source is represented as a per-source failure and does not stop the lifecycle harness".to_string(),
+        failure_isolation: "Each source has independent attempted/successful/failed counts; a missing PDH/shared-memory source is represented as provider_missing and does not stop the lifecycle harness".to_string(),
         sleep_resume: "not_exercised".to_string(),
     };
     write_lifecycle_report(&config.output_dir, &report)
+}
+
+fn evaluate_lifecycle(
+    phases: &[CpuSensorLifecyclePhase],
+    cleanup_completed: bool,
+) -> LifecycleEvaluation {
+    let enabled = phases.iter().find(|phase| phase.phase == "enabled-1");
+    let disabled_1 = phases.iter().find(|phase| phase.phase == "disabled-1");
+    let re_enabled = phases.iter().find(|phase| phase.phase == "re-enabled-1");
+    let disabled_2 = phases.iter().find(|phase| phase.phase == "disabled-2");
+
+    let baseline_enabled_successful_sources = enabled
+        .map(|phase| phase.source_results.successful_source_keys())
+        .unwrap_or_default();
+    let re_enabled_successful_sources = re_enabled
+        .map(|phase| phase.source_results.successful_source_keys())
+        .unwrap_or_default();
+    let available_source_recovery = !baseline_enabled_successful_sources.is_empty()
+        && re_enabled
+            .map(|phase| {
+                baseline_enabled_successful_sources
+                    .iter()
+                    .all(|source| phase.source_results.source_has_success(source))
+            })
+            .unwrap_or(false);
+    let enabled_observed = enabled.is_some_and(enabled_phase_observed);
+    let re_enabled_observed = re_enabled.is_some_and(enabled_phase_observed);
+    let disabled_1_quiet = disabled_1.is_some_and(disabled_phase_quiet);
+    let disabled_2_quiet = disabled_2.is_some_and(disabled_phase_quiet);
+    let source_handles_released_on_disable = [disabled_1, disabled_2]
+        .into_iter()
+        .all(|phase| phase.is_some_and(|phase| phase.source_handles_released_at_start));
+    let source_handles_recreated = enabled
+        .zip(re_enabled)
+        .is_some_and(|(enabled, re_enabled)| {
+            enabled.source_generation > 0
+                && re_enabled.source_generation > enabled.source_generation
+        });
+
+    LifecycleEvaluation {
+        baseline_enabled_successful_sources,
+        re_enabled_successful_sources,
+        available_source_recovery,
+        source_handles_released_on_disable,
+        pass: enabled_observed
+            && disabled_1_quiet
+            && re_enabled_observed
+            && disabled_2_quiet
+            && available_source_recovery
+            && source_handles_released_on_disable
+            && source_handles_recreated
+            && cleanup_completed,
+    }
+}
+
+fn enabled_phase_observed(phase: &CpuSensorLifecyclePhase) -> bool {
+    phase.enabled
+        && phase.scheduler_tick_count > 0
+        && phase.sample_attempt_count > 0
+        && phase.logical_source_poll_count_delta > 0
+        && phase.source_results.total_attempted() > 0
+}
+
+fn disabled_phase_quiet(phase: &CpuSensorLifecyclePhase) -> bool {
+    !phase.enabled
+        && phase.scheduler_tick_count > 0
+        && phase.sample_attempt_count == 0
+        && phase.logical_source_poll_count_delta == 0
+        && phase.source_results.total_attempted() == 0
+        && phase.source_results.total_successful() == 0
+        && phase.source_results.total_failed() == 0
+        && phase.source_handles_released_at_start
+        && phase.no_source_polling_observed
 }
 
 #[cfg(windows)]
@@ -534,15 +752,19 @@ fn run_lifecycle_phase(
     let started = Instant::now();
     let resource_start = resource_snapshot();
     let source_poll_start = session.logical_source_poll_count();
+    let source_generation = session.enable_generation();
+    let source_handles_released_at_start = !enabled && session.is_stopped();
     let mut next_poll = started;
     let mut scheduler_tick_count = 0;
-    let mut successful_sample_count = 0;
+    let mut sample_attempt_count = 0;
+    let mut source_results = CpuSensorSourceResults::default();
     while started.elapsed() < Duration::from_millis(duration_ms) {
         let now = Instant::now();
         if now >= next_poll {
             scheduler_tick_count += 1;
-            if session.sample().is_some() {
-                successful_sample_count += 1;
+            if let Some(poll) = session.sample() {
+                sample_attempt_count += 1;
+                source_results.merge(poll.source_results);
             }
             next_poll += poll_interval;
         }
@@ -551,15 +773,22 @@ fn run_lifecycle_phase(
         }
     }
     let source_poll_end = session.logical_source_poll_count();
-    let source_poll_count_delta = source_poll_end.saturating_sub(source_poll_start);
+    let logical_source_poll_count_delta = source_poll_end.saturating_sub(source_poll_start);
     CpuSensorLifecyclePhase {
         phase: phase.to_string(),
         enabled,
         duration_ms: started.elapsed().as_millis() as u64,
         scheduler_tick_count,
-        successful_sample_count,
-        source_poll_count_delta,
-        no_source_polling_observed: !enabled && source_poll_count_delta == 0,
+        sample_attempt_count,
+        logical_source_poll_count_delta,
+        successful_source_read_count: source_results.total_successful(),
+        failed_source_read_count: source_results.total_failed(),
+        source_results,
+        source_generation,
+        source_handles_released_at_start,
+        no_source_polling_observed: !enabled
+            && logical_source_poll_count_delta == 0
+            && sample_attempt_count == 0,
         resource_start,
         resource_end: resource_snapshot(),
     }
@@ -897,18 +1126,38 @@ fn metric_definitions() -> BTreeMap<String, MetricRecord> {
 fn source_descriptions(
     session: &CpuSensorSession,
     metrics: &[MetricRecord],
+    lifecycle_source_results: Option<&CpuSensorSourceResults>,
 ) -> Vec<CpuSensorSource> {
-    let (nt_status, nt_reason) = metric_status(metrics, "cpu.os_reported_current_mhz")
+    let (nt_status, nt_reason) = lifecycle_source_results
+        .map(|results| lifecycle_source_status(results.nt_power, None))
+        .or_else(|| metric_status(metrics, "cpu.os_reported_current_mhz"))
         .unwrap_or((SupportStatus::Supported, "sample_not_attempted".to_string()));
-    let (pdh_status, pdh_reason) = metric_status(metrics, "cpu.processor_frequency_mhz")
+    let (pdh_status, pdh_reason) = lifecycle_source_results
+        .map(|results| {
+            lifecycle_source_status(
+                results.pdh,
+                Some((session.pdh_status.0, session.pdh_status.1.as_str())),
+            )
+        })
+        .or_else(|| metric_status(metrics, "cpu.processor_frequency_mhz"))
         .unwrap_or_else(|| {
             (
                 map_status(session.pdh_status.0),
                 session.pdh_status.1.clone(),
             )
         });
-    let (afterburner_status, afterburner_reason) =
-        metric_status(metrics, "reference.cpu_temperature_celsius").unwrap_or_else(|| {
+    let (afterburner_status, afterburner_reason) = lifecycle_source_results
+        .map(|results| {
+            lifecycle_source_status(
+                results.afterburner,
+                Some((
+                    session.afterburner_status.0,
+                    session.afterburner_status.1.as_str(),
+                )),
+            )
+        })
+        .or_else(|| metric_status(metrics, "reference.cpu_temperature_celsius"))
+        .unwrap_or_else(|| {
             (
                 map_status(session.afterburner_status.0),
                 session.afterburner_status.1.clone(),
@@ -955,6 +1204,25 @@ fn source_descriptions(
             ],
         },
     ]
+}
+
+#[cfg(windows)]
+fn lifecycle_source_status(
+    counts: SourceReadCounts,
+    fallback: Option<(crate::windows::ReadStatus, &str)>,
+) -> (SupportStatus, String) {
+    if counts.successful > 0 {
+        (SupportStatus::Supported, "ok".to_string())
+    } else if counts.attempted > 0 {
+        (SupportStatus::ProbeFailed, "source_read_failed".to_string())
+    } else if let Some((status, reason)) = fallback {
+        (map_status(status), reason.to_string())
+    } else {
+        (
+            SupportStatus::ProviderMissing,
+            "source_not_available".to_string(),
+        )
+    }
 }
 
 #[cfg(windows)]
@@ -1255,20 +1523,54 @@ fn render_lifecycle_markdown(report: &CpuSensorLifecycleReport) -> String {
         report.enable_disable_reenable
     ));
     output.push_str(&format!(
+        "- Available-source recovery: {}\n",
+        report.available_source_recovery
+    ));
+    output.push_str(&format!(
+        "- Baseline enabled successful sources: {}\n- Re-enabled successful sources: {}\n",
+        display_source_list(&report.baseline_enabled_successful_sources),
+        display_source_list(&report.re_enabled_successful_sources),
+    ));
+    output.push_str(&format!(
+        "- Source handles released on disable: {}\n",
+        report.source_handles_released_on_disable
+    ));
+    output.push_str(&format!(
         "- Cleanup completed: {}\n",
         report.cleanup_completed
     ));
     output.push_str(&format!("- Sleep/resume: {}\n\n", report.sleep_resume));
-    output.push_str("## Phases\n\n| Phase | Enabled | Scheduler ticks | Successful samples | Source poll delta | No source polling while disabled |\n|---|---:|---:|---:|---:|---:|\n");
+    output.push_str("## Phases\n\n| Phase | Enabled | Source generation | Scheduler ticks | Sample attempts | Logical source polls | Successful source reads | Failed source reads | No source polling while disabled | Handles released at phase start |\n|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|\n");
     for phase in &report.phases {
         output.push_str(&format!(
-            "| `{}` | {} | {} | {} | {} | {} |\n",
+            "| `{}` | {} | {} | {} | {} | {} | {} | {} | {} | {} |\n",
             phase.phase,
             phase.enabled,
+            phase.source_generation,
             phase.scheduler_tick_count,
-            phase.successful_sample_count,
-            phase.source_poll_count_delta,
+            phase.sample_attempt_count,
+            phase.logical_source_poll_count_delta,
+            phase.successful_source_read_count,
+            phase.failed_source_read_count,
             phase.no_source_polling_observed,
+            phase.source_handles_released_at_start,
+        ));
+    }
+    output.push('\n');
+    output.push_str("## Per-source results\n\n| Phase | NT power attempted/successful/failed | PDH attempted/successful/failed | Afterburner attempted/successful/failed |\n|---|---:|---:|---:|\n");
+    for phase in &report.phases {
+        output.push_str(&format!(
+            "| `{}` | {}/{}/{} | {}/{}/{} | {}/{}/{} |\n",
+            phase.phase,
+            phase.source_results.nt_power.attempted,
+            phase.source_results.nt_power.successful,
+            phase.source_results.nt_power.failed,
+            phase.source_results.pdh.attempted,
+            phase.source_results.pdh.successful,
+            phase.source_results.pdh.failed,
+            phase.source_results.afterburner.attempted,
+            phase.source_results.afterburner.successful,
+            phase.source_results.afterburner.failed,
         ));
     }
     output.push('\n');
@@ -1319,6 +1621,14 @@ fn display(value: Option<f64>) -> String {
         .unwrap_or_else(|| "n/a".to_string())
 }
 
+fn display_source_list(sources: &[String]) -> String {
+    if sources.is_empty() {
+        "none".to_string()
+    } else {
+        sources.join(", ")
+    }
+}
+
 #[cfg(windows)]
 fn map_status(status: crate::windows::ReadStatus) -> SupportStatus {
     match status {
@@ -1350,7 +1660,10 @@ fn expected_samples(duration_seconds: u64, interval_ms: u64) -> u64 {
 
 #[cfg(test)]
 mod tests {
-    use super::{expected_samples, metric_definitions, metric_summary};
+    use super::{
+        disabled_phase_quiet, evaluate_lifecycle, expected_samples, metric_definitions,
+        metric_summary, CpuSensorLifecyclePhase, CpuSensorSourceResults, SourceReadCounts,
+    };
 
     #[test]
     fn expected_samples_matches_poll_schedule() {
@@ -1378,5 +1691,102 @@ mod tests {
         let summary = metric_summary(&metric);
         assert_eq!(summary.unique_value_count, 2);
         assert_eq!(summary.repeated_sample_count, 1);
+    }
+
+    fn fake_phase(
+        phase: &str,
+        enabled: bool,
+        generation: u64,
+        scheduler_ticks: u64,
+        sample_attempts: u64,
+        logical_source_polls: u64,
+        source_results: CpuSensorSourceResults,
+        handles_released: bool,
+    ) -> CpuSensorLifecyclePhase {
+        CpuSensorLifecyclePhase {
+            phase: phase.to_string(),
+            enabled,
+            duration_ms: 1,
+            scheduler_tick_count: scheduler_ticks,
+            sample_attempt_count: sample_attempts,
+            logical_source_poll_count_delta: logical_source_polls,
+            successful_source_read_count: source_results.total_successful(),
+            failed_source_read_count: source_results.total_failed(),
+            source_results,
+            source_generation: generation,
+            source_handles_released_at_start: handles_released,
+            no_source_polling_observed: !enabled && logical_source_polls == 0,
+            resource_start: None,
+            resource_end: None,
+        }
+    }
+
+    fn counts(attempted: u64, successful: u64, failed: u64) -> SourceReadCounts {
+        SourceReadCounts {
+            attempted,
+            successful,
+            failed,
+        }
+    }
+
+    #[test]
+    fn enabled_attempt_without_success_is_not_a_successful_source_sample() {
+        let failed_source = CpuSensorSourceResults {
+            nt_power: counts(1, 0, 1),
+            ..Default::default()
+        };
+        let phases = vec![
+            fake_phase("enabled-1", true, 1, 1, 1, 1, failed_source, false),
+            fake_phase("disabled-1", false, 1, 1, 0, 0, Default::default(), true),
+            fake_phase("re-enabled-1", true, 2, 1, 1, 1, failed_source, false),
+            fake_phase("disabled-2", false, 2, 1, 0, 0, Default::default(), true),
+        ];
+        let evaluation = evaluate_lifecycle(&phases, true);
+
+        assert_eq!(phases[0].sample_attempt_count, 1);
+        assert_eq!(phases[0].successful_source_read_count, 0);
+        assert_eq!(phases[0].failed_source_read_count, 1);
+        assert!(phases[0].source_results.total_attempted() > 0);
+        assert!(!evaluation.pass);
+    }
+
+    #[test]
+    fn disabled_phase_has_ticks_but_no_attempts_or_source_polls() {
+        let phase = fake_phase("disabled-1", false, 1, 10, 0, 0, Default::default(), true);
+
+        assert!(disabled_phase_quiet(&phase));
+        assert_eq!(phase.scheduler_tick_count, 10);
+        assert_eq!(phase.sample_attempt_count, 0);
+        assert_eq!(phase.logical_source_poll_count_delta, 0);
+        assert_eq!(phase.successful_source_read_count, 0);
+        assert_eq!(phase.failed_source_read_count, 0);
+    }
+
+    #[test]
+    fn fake_reenable_recovers_each_initially_successful_source_without_optional_reference() {
+        let enabled_sources = CpuSensorSourceResults {
+            nt_power: counts(1, 1, 0),
+            pdh: counts(1, 1, 0),
+            afterburner: SourceReadCounts::default(),
+        };
+        let phases = vec![
+            fake_phase("enabled-1", true, 1, 10, 10, 10, enabled_sources, false),
+            fake_phase("disabled-1", false, 1, 10, 0, 0, Default::default(), true),
+            fake_phase("re-enabled-1", true, 2, 10, 10, 10, enabled_sources, false),
+            fake_phase("disabled-2", false, 2, 10, 0, 0, Default::default(), true),
+        ];
+        let evaluation = evaluate_lifecycle(&phases, true);
+
+        assert_eq!(
+            evaluation.baseline_enabled_successful_sources,
+            ["nt_power", "pdh"]
+        );
+        assert_eq!(
+            evaluation.re_enabled_successful_sources,
+            ["nt_power", "pdh"]
+        );
+        assert!(evaluation.available_source_recovery);
+        assert!(evaluation.source_handles_released_on_disable);
+        assert!(evaluation.pass);
     }
 }

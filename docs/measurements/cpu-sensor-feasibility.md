@@ -223,18 +223,22 @@ TDP, nominal frequency, base frequency, and maximum frequency were not used as l
 
 ## LIFECYCLE
 
-The corrected release lifecycle report used four 5-second phases at a 500-ms scheduler interval:
+The repaired release lifecycle report uses schema `cpu-sensor-spike-lifecycle/v2` and four 5-second phases at a 500-ms scheduler interval. `sample_attempt_count` means an enabled session poll was attempted; `logical_source_poll_count_delta` means the session actually entered its source-poll path; `successful_source_read_count` and `failed_source_read_count` count source results, not session objects returned by `sample()`.
 
-| Phase | Scheduler ticks | Successful samples | Source poll delta | No source polling while disabled |
-| --- | ---: | ---: | ---: | ---: |
-| enabled-1 | 10 | 10 | 10 | false |
-| disabled-1 | 10 | 0 | 0 | true |
-| re-enabled-1 | 10 | 10 | 10 | false |
-| disabled-2 | 10 | 0 | 0 | true |
+The targeted repair output is `artifacts/metric-probe/cpu-sensor-lifecycle-review-repair/lifecycle.json` and its Markdown rendering; these local artifacts remain ignored and are not committed.
 
-`ENABLE_DISABLE_REENABLE: PASS`. The final report recorded `cleanup_completed=true`, thread delta `0`, handle delta `-3`, and working-set delta `57,344 B`. The PDH query and mapped view are owned by the optional session and are dropped on disable; no worker thread is created by the probe. Re-enable reconstructs the source handles rather than reusing stale state.
+| Phase | Source generation | Scheduler ticks | Sample attempts | Logical source polls | Successful source reads | Failed source reads | Handles released at start | No source polling while disabled |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| enabled-1 | 1 | 10 | 10 | 10 | 29 | 1 | false | false |
+| disabled-1 | 1 | 10 | 0 | 0 | 0 | 0 | true | true |
+| re-enabled-1 | 2 | 10 | 10 | 10 | 29 | 1 | false | false |
+| disabled-2 | 2 | 10 | 0 | 0 | 0 | 0 | true | true |
 
-`CLEANUP: PASS` for the independent adapter. This does not yet prove a future vendor driver can resume after sleep or tolerate a driver reset.
+Per-source results were `nt_power=10/10/0`, `pdh=10/9/1`, and `afterburner=10/10/0` in each enabled phase (attempted/successful/failed). The first PDH result is the expected warm-up failure. The baseline successful source set was `nt_power`, `pdh`, `afterburner`, and the same set succeeded after re-enable. An absent optional source would have zero attempts and `provider_missing`; it is not required for recovery.
+
+`ENABLE_DISABLE_REENABLE: PASS` because both enabled phases performed source polling, both disabled phases had scheduler ticks but zero sample attempts/source polls/source results, every initially successful source recovered, source generations changed from `1` to `2`, and disable released the source handles. The final report recorded `cleanup_completed=true`, thread delta `0`, handle delta `-3`, and working-set delta `57,344 B`. No worker thread is created by the probe. This does not prove a future vendor driver can resume after sleep or tolerate a driver reset.
+
+`CLEANUP: PASS` for the independent adapter. `enable()` reconstructs the PDH query and mapped view after the prior session drops them; it does not reuse stale handles.
 
 ## FAILURE ISOLATION
 
@@ -243,12 +247,12 @@ The independent probe keeps each metric/source status separate:
 - `ProviderMissing`: a missing MAHM mapping is represented without a value; a unit test exercises a non-existent mapping name.
 - `PermissionDenied`: `OpenFileMappingW(ERROR_ACCESS_DENIED)` is mapped to `permission_denied`; no ACL was changed on the development machine, so this path was not forced in a live run.
 - `Unsupported`: missing individual sensor fields and the unsupported ACPI thermal WMI instance query retain `unsupported` rather than zero.
-- `ProbeFailed`/`Failed`: malformed MAHM headers, invalidated mappings, PDH initialization/read failures, NaN/Inf, and out-of-range temperature/power values are represented as failures. Unit coverage rejects NaN, infinity, and `FLT_MAX` sentinel values.
+- `ProbeFailed`/`Failed`: malformed MAHM headers, non-committed/no-access/guard pages, allocation-base changes, uncovered ranges, invalidated mappings, layout changes, PDH initialization/read failures, NaN/Inf, and out-of-range temperature/power values are represented as failures. Unit coverage rejects NaN, infinity, `FLT_MAX` sentinel values, malformed layout arithmetic, unsafe memory-region states/protection, and changed header/entry metadata.
 - Warm-up: the first PDH derived-counter sample is recorded as a warm-up skip/failure reason, not as a fake zero.
 - Timeout: **not exercised** in this standalone probe. The future production Provider must run source calls behind the existing ProviderHost per-operation deadline/cancellation boundary; a new adapter must not make an unbounded hardware call on the collector thread.
 - Reference absent: covered by the missing-mapping test; the current 5-minute runs had the already-running Afterburner reference available.
 
-`FAILURE_ISOLATION: PASS` for probe-level independent source/metric handling and for the fact that this branch is not on the production collector path. Production impact is intentionally not claimed because no production Provider was implemented.
+`FAILURE_ISOLATION: PASS` for probe-level independent source/metric handling and for the fact that this branch is not on the production collector path. A malformed or changed MAHM mapping returns `ReadStatus::Failed` without a value; it is never converted to synthetic zero. Production impact is intentionally not claimed because no production Provider was implemented.
 
 ## SLEEP / RESUME
 
@@ -324,12 +328,12 @@ Primary documentation reviewed:
 ## VALIDATION RECORD
 
 - `cargo build --release --manifest-path tools/metric-probe/Cargo.toml`: passed.
-- `cargo test --manifest-path tools/metric-probe/Cargo.toml`: 45 passed, 0 failed.
+- `cargo test --manifest-path tools/metric-probe/Cargo.toml`: 54 passed, 0 failed, including focused lifecycle and MAHM validation tests.
 - `cargo fmt --manifest-path tools/metric-probe/Cargo.toml -- --check`: passed.
 - 30-second cadence runs at 500 ms, 1 s, 2.5 s, and 5 s: passed.
 - 5-minute idle run: passed, 300/300 scheduled samples.
 - 5-minute representative-load run: passed, 300/300 scheduled samples; workload PIDs cleaned.
-- enable/disable/re-enable lifecycle run: passed; disabled phases observed zero source polls.
+- repaired enable/disable/re-enable lifecycle run: passed; enabled phases recorded `29` successful source reads each, disabled phases recorded zero attempts/source polls/source results, and all initially successful sources recovered.
 - Main `src-tauri` production collector was not modified and was not invoked by the probe.
 
 ## DELIVERY

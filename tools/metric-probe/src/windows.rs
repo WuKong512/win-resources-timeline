@@ -21,7 +21,8 @@ use windows::{
             },
             Memory::{
                 MapViewOfFile, OpenFileMappingW, UnmapViewOfFile, VirtualQuery, FILE_MAP_READ,
-                MEMORY_BASIC_INFORMATION, MEMORY_MAPPED_VIEW_ADDRESS,
+                MEMORY_BASIC_INFORMATION, MEMORY_MAPPED_VIEW_ADDRESS, MEM_COMMIT, PAGE_GUARD,
+                PAGE_NOACCESS,
             },
             Performance::{
                 PdhAddEnglishCounterW, PdhCloseQuery, PdhCollectQueryData,
@@ -419,15 +420,102 @@ const MAHM_GLOBAL_GPU: u32 = u32::MAX;
 const MAHM_CPU_TEMPERATURE: u32 = 0x0000_0080;
 const MAHM_CPU_CLOCK: u32 = 0x0000_00A0;
 const MAHM_CPU_POWER: u32 = 0x0000_0100;
+const MAHM_MAX_ENTRY_COUNT: usize = 1024;
+const MAHM_MAX_MAPPING_LENGTH: usize = 16 * 1024 * 1024;
 
-fn mapped_range_is_readable(view: *const u8, length: usize) -> bool {
-    if view.is_null() || length == 0 {
-        return false;
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MappingValidationError {
+    EmptyRange,
+    AddressOverflow,
+    QueryFailed,
+    InvalidRegion,
+    NotCommitted,
+    NoAccess,
+    GuardPage,
+    MissingAllocationBase,
+    AllocationBaseChanged,
+    RangeNotCovered,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct MappedMemoryRegion {
+    base_address: usize,
+    allocation_base: usize,
+    region_size: usize,
+    state: u32,
+    protection: u32,
+}
+
+fn validate_mapped_regions(
+    view_address: usize,
+    length: usize,
+    expected_allocation_base: Option<usize>,
+    regions: &[MappedMemoryRegion],
+) -> Result<usize, MappingValidationError> {
+    if view_address == 0 || length == 0 {
+        return Err(MappingValidationError::EmptyRange);
+    }
+    let range_end = view_address
+        .checked_add(length)
+        .ok_or(MappingValidationError::AddressOverflow)?;
+    let mut cursor = view_address;
+    let mut allocation_base = expected_allocation_base;
+
+    for region in regions {
+        if cursor >= range_end {
+            break;
+        }
+        let region_end = region
+            .base_address
+            .checked_add(region.region_size)
+            .ok_or(MappingValidationError::AddressOverflow)?;
+        if region.region_size == 0 || region.base_address > cursor || region_end <= cursor {
+            return Err(MappingValidationError::RangeNotCovered);
+        }
+        if region.state != MEM_COMMIT.0 {
+            return Err(MappingValidationError::NotCommitted);
+        }
+        if region.protection & PAGE_NOACCESS.0 != 0 {
+            return Err(MappingValidationError::NoAccess);
+        }
+        if region.protection & PAGE_GUARD.0 != 0 {
+            return Err(MappingValidationError::GuardPage);
+        }
+        if region.allocation_base == 0 {
+            return Err(MappingValidationError::MissingAllocationBase);
+        }
+        if let Some(expected) = allocation_base {
+            if expected != region.allocation_base {
+                return Err(MappingValidationError::AllocationBaseChanged);
+            }
+        } else {
+            allocation_base = Some(region.allocation_base);
+        }
+
+        cursor = region_end.min(range_end);
     }
 
-    let mut cursor = view as usize;
-    let mut remaining = length;
-    while remaining > 0 {
+    if cursor != range_end {
+        return Err(MappingValidationError::RangeNotCovered);
+    }
+    allocation_base.ok_or(MappingValidationError::MissingAllocationBase)
+}
+
+fn validate_virtual_mapping(
+    view: *const u8,
+    length: usize,
+    expected_allocation_base: Option<usize>,
+) -> Result<usize, MappingValidationError> {
+    if view.is_null() || length == 0 {
+        return Err(MappingValidationError::EmptyRange);
+    }
+    let view_address = view as usize;
+    let range_end = view_address
+        .checked_add(length)
+        .ok_or(MappingValidationError::AddressOverflow)?;
+    let mut cursor = view_address;
+    let mut regions = Vec::new();
+    while cursor < range_end {
         let mut region = MEMORY_BASIC_INFORMATION::default();
         let queried = unsafe {
             VirtualQuery(
@@ -436,26 +524,77 @@ fn mapped_range_is_readable(view: *const u8, length: usize) -> bool {
                 size_of::<MEMORY_BASIC_INFORMATION>(),
             )
         };
-        if queried != size_of::<MEMORY_BASIC_INFORMATION>() || region.RegionSize == 0 {
-            return false;
+        if queried != size_of::<MEMORY_BASIC_INFORMATION>() {
+            return Err(MappingValidationError::QueryFailed);
         }
-
         let region_start = region.BaseAddress as usize;
-        let Some(region_end) = region_start.checked_add(region.RegionSize) else {
-            return false;
-        };
-        if cursor < region_start || cursor >= region_end {
-            return false;
+        let region_end = region_start
+            .checked_add(region.RegionSize)
+            .ok_or(MappingValidationError::AddressOverflow)?;
+        if region.RegionSize == 0 || region_end <= cursor {
+            return Err(MappingValidationError::InvalidRegion);
         }
-
-        let available = region_end - cursor;
-        if available >= remaining {
-            return true;
-        }
-        remaining -= available;
+        regions.push(MappedMemoryRegion {
+            base_address: region_start,
+            allocation_base: region.AllocationBase as usize,
+            region_size: region.RegionSize,
+            state: region.State.0,
+            protection: region.Protect.0,
+        });
         cursor = region_end;
     }
-    true
+    validate_mapped_regions(view_address, length, expected_allocation_base, &regions)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MahmLayoutError {
+    HeaderTooSmall,
+    EntryTooSmall,
+    EntryCountTooLarge,
+    EntrySizeOverflow,
+    MappingTooLarge,
+}
+
+fn validate_mahm_layout(
+    header_size: usize,
+    entry_size: usize,
+    entry_count: usize,
+) -> Result<usize, MahmLayoutError> {
+    if header_size < size_of::<MahmSharedMemoryHeader>() {
+        return Err(MahmLayoutError::HeaderTooSmall);
+    }
+    if entry_size < size_of::<MahmSharedMemoryEntry>() {
+        return Err(MahmLayoutError::EntryTooSmall);
+    }
+    if entry_count > MAHM_MAX_ENTRY_COUNT {
+        return Err(MahmLayoutError::EntryCountTooLarge);
+    }
+    let entries_size = entry_count
+        .checked_mul(entry_size)
+        .ok_or(MahmLayoutError::EntrySizeOverflow)?;
+    let mapping_length = header_size
+        .checked_add(entries_size)
+        .ok_or(MahmLayoutError::EntrySizeOverflow)?;
+    if mapping_length > MAHM_MAX_MAPPING_LENGTH {
+        return Err(MahmLayoutError::MappingTooLarge);
+    }
+    Ok(mapping_length)
+}
+
+fn mahm_layout_matches(
+    header_size: usize,
+    entry_size: usize,
+    entry_count: usize,
+    validated_header_size: usize,
+    validated_entry_size: usize,
+    validated_entry_count: usize,
+    validated_mapping_length: usize,
+) -> bool {
+    header_size == validated_header_size
+        && entry_size == validated_entry_size
+        && entry_count == validated_entry_count
+        && validate_mahm_layout(header_size, entry_size, entry_count)
+            .is_ok_and(|length| length == validated_mapping_length)
 }
 
 /// Read-only adapter for MSI Afterburner's documented MAHM shared-memory SDK.
@@ -465,18 +604,22 @@ fn mapped_range_is_readable(view: *const u8, length: usize) -> bool {
 pub struct AfterburnerSharedMemory {
     mapping: HANDLE,
     view: *mut std::ffi::c_void,
-    header_size: usize,
-    entry_count: usize,
-    entry_size: usize,
+    validated_header_size: usize,
+    validated_entry_count: usize,
+    validated_entry_size: usize,
+    validated_mapping_length: usize,
+    allocation_base: usize,
 }
 
 impl std::fmt::Debug for AfterburnerSharedMemory {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
             .debug_struct("AfterburnerSharedMemory")
-            .field("header_size", &self.header_size)
-            .field("entry_count", &self.entry_count)
-            .field("entry_size", &self.entry_size)
+            .field("validated_header_size", &self.validated_header_size)
+            .field("validated_entry_count", &self.validated_entry_count)
+            .field("validated_entry_size", &self.validated_entry_size)
+            .field("validated_mapping_length", &self.validated_mapping_length)
+            .field("allocation_base", &self.allocation_base)
             .finish()
     }
 }
@@ -517,30 +660,23 @@ impl AfterburnerSharedMemory {
                     "afterburner_shared_memory_map_failed",
                 );
             }
-            if !mapped_range_is_readable(view as *const u8, size_of::<MahmSharedMemoryHeader>()) {
-                let _ = UnmapViewOfFile(MEMORY_MAPPED_VIEW_ADDRESS { Value: view });
-                close_handle(mapping);
-                return ReadResult::status(
-                    ReadStatus::Failed,
-                    "afterburner_shared_memory_map_bounds_invalid",
-                );
-            }
+            let header_allocation_base = match validate_virtual_mapping(
+                view as *const u8,
+                size_of::<MahmSharedMemoryHeader>(),
+                None,
+            ) {
+                Ok(allocation_base) => allocation_base,
+                Err(_) => {
+                    let _ = UnmapViewOfFile(MEMORY_MAPPED_VIEW_ADDRESS { Value: view });
+                    close_handle(mapping);
+                    return ReadResult::status(
+                        ReadStatus::Failed,
+                        "afterburner_shared_memory_map_bounds_invalid",
+                    );
+                }
+            };
             let header = &*(view as *const MahmSharedMemoryHeader);
-            let header_size = header.header_size as usize;
-            let entry_count = header.entry_count as usize;
-            let entry_size = header.entry_size as usize;
-            let mapped_size = entry_count
-                .checked_mul(entry_size)
-                .and_then(|entries_size| header_size.checked_add(entries_size));
-            let valid = header.signature == MAHM_SIGNATURE
-                && header.version >= MAHM_VERSION_2
-                && header_size >= size_of::<MahmSharedMemoryHeader>()
-                && entry_size >= size_of::<MahmSharedMemoryEntry>()
-                && entry_count <= 1024
-                && mapped_size.is_some_and(|size| {
-                    size <= 16 * 1024 * 1024 && mapped_range_is_readable(view as *const u8, size)
-                });
-            if !valid {
+            if header.signature != MAHM_SIGNATURE || header.version < MAHM_VERSION_2 {
                 let _ = UnmapViewOfFile(MEMORY_MAPPED_VIEW_ADDRESS { Value: view });
                 close_handle(mapping);
                 return ReadResult::status(
@@ -548,18 +684,69 @@ impl AfterburnerSharedMemory {
                     "afterburner_shared_memory_header_invalid",
                 );
             }
+            let header_size = header.header_size as usize;
+            let entry_count = header.entry_count as usize;
+            let entry_size = header.entry_size as usize;
+            let mapped_size = match validate_mahm_layout(header_size, entry_size, entry_count) {
+                Ok(size) => size,
+                Err(_) => {
+                    let _ = UnmapViewOfFile(MEMORY_MAPPED_VIEW_ADDRESS { Value: view });
+                    close_handle(mapping);
+                    return ReadResult::status(
+                        ReadStatus::Failed,
+                        "afterburner_shared_memory_header_invalid",
+                    );
+                }
+            };
+            let allocation_base = match validate_virtual_mapping(
+                view as *const u8,
+                mapped_size,
+                Some(header_allocation_base),
+            ) {
+                Ok(allocation_base) => allocation_base,
+                Err(_) => {
+                    let _ = UnmapViewOfFile(MEMORY_MAPPED_VIEW_ADDRESS { Value: view });
+                    close_handle(mapping);
+                    return ReadResult::status(
+                        ReadStatus::Failed,
+                        "afterburner_shared_memory_map_bounds_invalid",
+                    );
+                }
+            };
+            if allocation_base != header_allocation_base {
+                let _ = UnmapViewOfFile(MEMORY_MAPPED_VIEW_ADDRESS { Value: view });
+                close_handle(mapping);
+                return ReadResult::status(
+                    ReadStatus::Failed,
+                    "afterburner_shared_memory_map_bounds_invalid",
+                );
+            }
             ReadResult::value(Self {
                 mapping,
                 view,
-                header_size,
-                entry_count,
-                entry_size,
+                validated_header_size: header_size,
+                validated_entry_count: entry_count,
+                validated_entry_size: entry_size,
+                validated_mapping_length: mapped_size,
+                allocation_base,
             })
         }
     }
 
     pub fn sample(&self) -> ReadResult<AfterburnerSnapshot> {
         unsafe {
+            if validate_virtual_mapping(
+                self.view as *const u8,
+                self.validated_mapping_length,
+                Some(self.allocation_base),
+            )
+            .is_err()
+            {
+                return ReadResult::status(
+                    ReadStatus::Failed,
+                    "afterburner_shared_memory_mapping_invalidated",
+                );
+            }
             let header = &*(self.view as *const MahmSharedMemoryHeader);
             if header.signature != MAHM_SIGNATURE || header.version < MAHM_VERSION_2 {
                 return ReadResult::status(
@@ -567,11 +754,49 @@ impl AfterburnerSharedMemory {
                     "afterburner_shared_memory_invalidated",
                 );
             }
+            let current_header_size = header.header_size as usize;
+            let current_entry_count = header.entry_count as usize;
+            let current_entry_size = header.entry_size as usize;
+            if !mahm_layout_matches(
+                current_header_size,
+                current_entry_size,
+                current_entry_count,
+                self.validated_header_size,
+                self.validated_entry_size,
+                self.validated_entry_count,
+                self.validated_mapping_length,
+            ) {
+                return ReadResult::status(
+                    ReadStatus::Failed,
+                    "afterburner_shared_memory_layout_changed",
+                );
+            }
             let mut temperature = None;
             let mut power = None;
             let mut clock = None;
-            for index in 0..self.entry_count {
-                let offset = self.header_size + index.saturating_mul(self.entry_size);
+            for index in 0..self.validated_entry_count {
+                let offset = match self
+                    .validated_entry_size
+                    .checked_mul(index)
+                    .and_then(|entry_offset| self.validated_header_size.checked_add(entry_offset))
+                {
+                    Some(offset) => offset,
+                    None => {
+                        return ReadResult::status(
+                            ReadStatus::Failed,
+                            "afterburner_shared_memory_layout_changed",
+                        )
+                    }
+                };
+                match offset.checked_add(size_of::<MahmSharedMemoryEntry>()) {
+                    Some(entry_end) if entry_end <= self.validated_mapping_length => {}
+                    _ => {
+                        return ReadResult::status(
+                            ReadStatus::Failed,
+                            "afterburner_shared_memory_layout_changed",
+                        )
+                    }
+                }
                 let entry =
                     &*((self.view as *const u8).add(offset) as *const MahmSharedMemoryEntry);
                 let value = valid_sensor_value(entry.data);
@@ -1475,11 +1700,16 @@ fn architecture_name(system_info: SYSTEM_INFO) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        is_probeable_process_id, network_classification, summarize_process_detail,
-        AfterburnerSharedMemory, ProcessDetailSummary, ProcessMetrics, ReadResult, ReadStatus,
+        is_probeable_process_id, mahm_layout_matches, network_classification,
+        summarize_process_detail, validate_mahm_layout, validate_mapped_regions,
+        AfterburnerSharedMemory, MappedMemoryRegion, MappingValidationError, ProcessDetailSummary,
+        ProcessMetrics, ReadResult, ReadStatus,
     };
     use windows::Win32::NetworkManagement::IpHelper::{
         IF_TYPE_IEEE80211, IF_TYPE_SOFTWARE_LOOPBACK, MIB_IF_ROW2,
+    };
+    use windows::Win32::System::Memory::{
+        MEM_COMMIT, MEM_FREE, MEM_RESERVE, PAGE_GUARD, PAGE_NOACCESS, PAGE_READONLY,
     };
 
     fn empty_summary() -> ProcessDetailSummary {
@@ -1668,5 +1898,181 @@ mod tests {
         assert!(super::valid_sensor_value(f32::INFINITY).is_none());
         assert!(super::valid_sensor_value(f32::MAX).is_none());
         assert_eq!(super::valid_sensor_value(42.5), Some(42.5));
+    }
+
+    fn region(
+        base_address: usize,
+        allocation_base: usize,
+        region_size: usize,
+        state: u32,
+        protection: u32,
+    ) -> MappedMemoryRegion {
+        MappedMemoryRegion {
+            base_address,
+            allocation_base,
+            region_size,
+            state,
+            protection,
+        }
+    }
+
+    #[test]
+    fn mapped_range_accepts_committed_readable_regions_with_one_allocation_base() {
+        let allocation_base = 0x1000;
+        let regions = [
+            region(
+                0x1000,
+                allocation_base,
+                0x1000,
+                MEM_COMMIT.0,
+                PAGE_READONLY.0,
+            ),
+            region(
+                0x2000,
+                allocation_base,
+                0x1000,
+                MEM_COMMIT.0,
+                PAGE_READONLY.0,
+            ),
+        ];
+
+        assert_eq!(
+            validate_mapped_regions(0x1000, 0x1800, None, &regions),
+            Ok(allocation_base)
+        );
+    }
+
+    #[test]
+    fn mapped_range_rejects_uncommitted_regions() {
+        for state in [MEM_RESERVE.0, MEM_FREE.0] {
+            let result = validate_mapped_regions(
+                0x1000,
+                0x100,
+                None,
+                &[region(0x1000, 0x1000, 0x1000, state, PAGE_READONLY.0)],
+            );
+            assert_eq!(result, Err(MappingValidationError::NotCommitted));
+        }
+    }
+
+    #[test]
+    fn mapped_range_rejects_noaccess_and_guard_pages() {
+        let noaccess = validate_mapped_regions(
+            0x1000,
+            0x100,
+            None,
+            &[region(
+                0x1000,
+                0x1000,
+                0x1000,
+                MEM_COMMIT.0,
+                PAGE_NOACCESS.0,
+            )],
+        );
+        assert_eq!(noaccess, Err(MappingValidationError::NoAccess));
+
+        let guard = validate_mapped_regions(
+            0x1000,
+            0x100,
+            None,
+            &[region(
+                0x1000,
+                0x1000,
+                0x1000,
+                MEM_COMMIT.0,
+                PAGE_READONLY.0 | PAGE_GUARD.0,
+            )],
+        );
+        assert_eq!(guard, Err(MappingValidationError::GuardPage));
+    }
+
+    #[test]
+    fn mapped_range_rejects_allocation_base_changes_and_uncovered_ranges() {
+        let allocation_change = validate_mapped_regions(
+            0x1000,
+            0x1800,
+            None,
+            &[
+                region(0x1000, 0x1000, 0x1000, MEM_COMMIT.0, PAGE_READONLY.0),
+                region(0x2000, 0x2000, 0x1000, MEM_COMMIT.0, PAGE_READONLY.0),
+            ],
+        );
+        assert_eq!(
+            allocation_change,
+            Err(MappingValidationError::AllocationBaseChanged)
+        );
+
+        let uncovered = validate_mapped_regions(
+            0x1000,
+            0x1800,
+            None,
+            &[region(0x1000, 0x1000, 0x400, MEM_COMMIT.0, PAGE_READONLY.0)],
+        );
+        assert_eq!(uncovered, Err(MappingValidationError::RangeNotCovered));
+    }
+
+    #[test]
+    fn mahm_layout_rejects_overflow_and_oversized_entry_count() {
+        assert_eq!(
+            validate_mahm_layout(
+                usize::MAX - 1,
+                super::size_of::<super::MahmSharedMemoryEntry>(),
+                2
+            ),
+            Err(super::MahmLayoutError::EntrySizeOverflow)
+        );
+        assert_eq!(
+            validate_mahm_layout(
+                super::size_of::<super::MahmSharedMemoryHeader>(),
+                super::size_of::<super::MahmSharedMemoryEntry>(),
+                super::MAHM_MAX_ENTRY_COUNT + 1,
+            ),
+            Err(super::MahmLayoutError::EntryCountTooLarge)
+        );
+    }
+
+    #[test]
+    fn mahm_layout_changes_are_rejected_after_open_validation() {
+        let header_size = super::size_of::<super::MahmSharedMemoryHeader>();
+        let entry_size = super::size_of::<super::MahmSharedMemoryEntry>();
+        let entry_count = 3;
+        let mapping_length = validate_mahm_layout(header_size, entry_size, entry_count).unwrap();
+
+        assert!(mahm_layout_matches(
+            header_size,
+            entry_size,
+            entry_count,
+            header_size,
+            entry_size,
+            entry_count,
+            mapping_length,
+        ));
+        assert!(!mahm_layout_matches(
+            header_size + 1,
+            entry_size,
+            entry_count,
+            header_size,
+            entry_size,
+            entry_count,
+            mapping_length,
+        ));
+        assert!(!mahm_layout_matches(
+            header_size,
+            entry_size + 1,
+            entry_count,
+            header_size,
+            entry_size,
+            entry_count,
+            mapping_length,
+        ));
+        assert!(!mahm_layout_matches(
+            header_size,
+            entry_size,
+            entry_count + 1,
+            header_size,
+            entry_size,
+            entry_count,
+            mapping_length,
+        ));
     }
 }
