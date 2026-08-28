@@ -225,7 +225,7 @@ TDP, nominal frequency, base frequency, and maximum frequency were not used as l
 
 The repaired release lifecycle report uses schema `cpu-sensor-spike-lifecycle/v2` and four 5-second phases at a 500-ms scheduler interval. `sample_attempt_count` means an enabled session poll was attempted; `logical_source_poll_count_delta` means the session actually entered its source-poll path; `successful_source_read_count` and `failed_source_read_count` count source results, not session objects returned by `sample()`.
 
-The targeted repair output is `artifacts/metric-probe/cpu-sensor-lifecycle-review-repair/lifecycle.json` and its Markdown rendering; these local artifacts remain ignored and are not committed.
+The targeted repair output is `artifacts/metric-probe/cpu-sensor-lifecycle-review-repair/lifecycle.json` and its Markdown rendering; these local artifacts remain ignored and are not committed. A final-safety regression was also run at `artifacts/metric-probe/cpu-sensor-lifecycle-final-safety/` without changing the recorded lifecycle counts.
 
 | Phase | Source generation | Scheduler ticks | Sample attempts | Logical source polls | Successful source reads | Failed source reads | Handles released at start | No source polling while disabled |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
@@ -247,12 +247,12 @@ The independent probe keeps each metric/source status separate:
 - `ProviderMissing`: a missing MAHM mapping is represented without a value; a unit test exercises a non-existent mapping name.
 - `PermissionDenied`: `OpenFileMappingW(ERROR_ACCESS_DENIED)` is mapped to `permission_denied`; no ACL was changed on the development machine, so this path was not forced in a live run.
 - `Unsupported`: missing individual sensor fields and the unsupported ACPI thermal WMI instance query retain `unsupported` rather than zero.
-- `ProbeFailed`/`Failed`: malformed MAHM headers, non-committed/no-access/guard pages, allocation-base changes, uncovered ranges, invalidated mappings, layout changes, PDH initialization/read failures, NaN/Inf, and out-of-range temperature/power values are represented as failures. Unit coverage rejects NaN, infinity, `FLT_MAX` sentinel values, malformed layout arithmetic, unsafe memory-region states/protection, and changed header/entry metadata.
+- `ProbeFailed`/`Failed`: malformed MAHM headers, non-committed pages, unsupported or non-readable protection (including `PAGE_EXECUTE` and `PAGE_NOACCESS`), guard pages, allocation-base changes, uncovered ranges, invalidated mappings, layout changes, PDH initialization/read failures, NaN/Inf, and out-of-range temperature/power values are represented as failures. `VirtualQuery` regions use a readable base-protection whitelist; `PAGE_NOCACHE`/`PAGE_WRITECOMBINE` modifiers do not change that base decision, while `PAGE_GUARD` is always rejected. Unit coverage rejects NaN, infinity, `FLT_MAX` sentinel values, malformed layout arithmetic, unsafe memory-region states/protection, and changed header/entry metadata.
 - Warm-up: the first PDH derived-counter sample is recorded as a warm-up skip/failure reason, not as a fake zero.
 - Timeout: **not exercised** in this standalone probe. The future production Provider must run source calls behind the existing ProviderHost per-operation deadline/cancellation boundary; a new adapter must not make an unbounded hardware call on the collector thread.
 - Reference absent: covered by the missing-mapping test; the current 5-minute runs had the already-running Afterburner reference available.
 
-`FAILURE_ISOLATION: PASS` for probe-level independent source/metric handling and for the fact that this branch is not on the production collector path. A malformed or changed MAHM mapping returns `ReadStatus::Failed` without a value; it is never converted to synthetic zero. Production impact is intentionally not claimed because no production Provider was implemented.
+`FAILURE_ISOLATION: PASS` for probe-level independent source/metric handling and for the fact that this branch is not on the production collector path. A malformed or changed MAHM mapping returns `ReadStatus::Failed` without a value; it is never converted to synthetic zero. Header and entry structs are copied with `read_unaligned` only after current mapping/layout/bounds validation, so an externally supplied misaligned address never creates a Rust struct reference. Production impact is intentionally not claimed because no production Provider was implemented.
 
 ## SLEEP / RESUME
 
@@ -328,7 +328,7 @@ Primary documentation reviewed:
 ## VALIDATION RECORD
 
 - `cargo build --release --manifest-path tools/metric-probe/Cargo.toml`: passed.
-- `cargo test --manifest-path tools/metric-probe/Cargo.toml`: 54 passed, 0 failed, including focused lifecycle and MAHM validation tests.
+- `cargo test --manifest-path tools/metric-probe/Cargo.toml`: 57 passed, 0 failed, including focused lifecycle, readable-protection, alignment, and MAHM validation tests.
 - `cargo fmt --manifest-path tools/metric-probe/Cargo.toml -- --check`: passed.
 - 30-second cadence runs at 500 ms, 1 s, 2.5 s, and 5 s: passed.
 - 5-minute idle run: passed, 300/300 scheduled samples.

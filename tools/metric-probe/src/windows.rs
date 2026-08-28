@@ -21,8 +21,10 @@ use windows::{
             },
             Memory::{
                 MapViewOfFile, OpenFileMappingW, UnmapViewOfFile, VirtualQuery, FILE_MAP_READ,
-                MEMORY_BASIC_INFORMATION, MEMORY_MAPPED_VIEW_ADDRESS, MEM_COMMIT, PAGE_GUARD,
-                PAGE_NOACCESS,
+                MEMORY_BASIC_INFORMATION, MEMORY_MAPPED_VIEW_ADDRESS, MEM_COMMIT,
+                PAGE_EXECUTE_READ, PAGE_EXECUTE_READWRITE, PAGE_EXECUTE_WRITECOPY, PAGE_GUARD,
+                PAGE_NOACCESS, PAGE_NOCACHE, PAGE_READONLY, PAGE_READWRITE, PAGE_TARGETS_NO_UPDATE,
+                PAGE_WRITECOMBINE, PAGE_WRITECOPY,
             },
             Performance::{
                 PdhAddEnglishCounterW, PdhCloseQuery, PdhCollectQueryData,
@@ -386,6 +388,7 @@ pub struct AfterburnerSnapshot {
 }
 
 #[repr(C)]
+#[derive(Clone, Copy)]
 struct MahmSharedMemoryHeader {
     signature: u32,
     version: u32,
@@ -398,6 +401,7 @@ struct MahmSharedMemoryHeader {
 }
 
 #[repr(C)]
+#[derive(Clone, Copy)]
 struct MahmSharedMemoryEntry {
     source_name: [u8; 260],
     source_units: [u8; 260],
@@ -422,6 +426,34 @@ const MAHM_CPU_CLOCK: u32 = 0x0000_00A0;
 const MAHM_CPU_POWER: u32 = 0x0000_0100;
 const MAHM_MAX_ENTRY_COUNT: usize = 1024;
 const MAHM_MAX_MAPPING_LENGTH: usize = 16 * 1024 * 1024;
+const PAGE_PROTECTION_BASE_MASK: u32 = 0xff;
+const PAGE_PROTECTION_KNOWN_MODIFIER_MASK: u32 =
+    PAGE_GUARD.0 | PAGE_NOCACHE.0 | PAGE_WRITECOMBINE.0 | PAGE_TARGETS_NO_UPDATE.0;
+
+fn is_readable_protection(protection: u32) -> bool {
+    if protection & PAGE_GUARD.0 != 0 {
+        return false;
+    }
+    if protection & !(PAGE_PROTECTION_BASE_MASK | PAGE_PROTECTION_KNOWN_MODIFIER_MASK) != 0 {
+        return false;
+    }
+
+    matches!(
+        protection & PAGE_PROTECTION_BASE_MASK,
+        base if base == PAGE_READONLY.0
+            || base == PAGE_READWRITE.0
+            || base == PAGE_WRITECOPY.0
+            || base == PAGE_EXECUTE_READ.0
+            || base == PAGE_EXECUTE_READWRITE.0
+            || base == PAGE_EXECUTE_WRITECOPY.0
+    )
+}
+
+/// Copy a value from an external byte address without creating a reference
+/// whose alignment the producer is responsible for providing.
+unsafe fn read_shared_memory_unaligned<T: Copy>(address: *const u8) -> T {
+    std::ptr::read_unaligned(address as *const T)
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum MappingValidationError {
@@ -431,6 +463,7 @@ enum MappingValidationError {
     InvalidRegion,
     NotCommitted,
     NoAccess,
+    NotReadable,
     GuardPage,
     MissingAllocationBase,
     AllocationBaseChanged,
@@ -475,11 +508,14 @@ fn validate_mapped_regions(
         if region.state != MEM_COMMIT.0 {
             return Err(MappingValidationError::NotCommitted);
         }
-        if region.protection & PAGE_NOACCESS.0 != 0 {
-            return Err(MappingValidationError::NoAccess);
-        }
         if region.protection & PAGE_GUARD.0 != 0 {
             return Err(MappingValidationError::GuardPage);
+        }
+        if !is_readable_protection(region.protection) {
+            if region.protection & PAGE_PROTECTION_BASE_MASK == PAGE_NOACCESS.0 {
+                return Err(MappingValidationError::NoAccess);
+            }
+            return Err(MappingValidationError::NotReadable);
         }
         if region.allocation_base == 0 {
             return Err(MappingValidationError::MissingAllocationBase);
@@ -675,7 +711,7 @@ impl AfterburnerSharedMemory {
                     );
                 }
             };
-            let header = &*(view as *const MahmSharedMemoryHeader);
+            let header: MahmSharedMemoryHeader = read_shared_memory_unaligned(view as *const u8);
             if header.signature != MAHM_SIGNATURE || header.version < MAHM_VERSION_2 {
                 let _ = UnmapViewOfFile(MEMORY_MAPPED_VIEW_ADDRESS { Value: view });
                 close_handle(mapping);
@@ -747,7 +783,8 @@ impl AfterburnerSharedMemory {
                     "afterburner_shared_memory_mapping_invalidated",
                 );
             }
-            let header = &*(self.view as *const MahmSharedMemoryHeader);
+            let header: MahmSharedMemoryHeader =
+                read_shared_memory_unaligned(self.view as *const u8);
             if header.signature != MAHM_SIGNATURE || header.version < MAHM_VERSION_2 {
                 return ReadResult::status(
                     ReadStatus::Failed,
@@ -797,8 +834,8 @@ impl AfterburnerSharedMemory {
                         )
                     }
                 }
-                let entry =
-                    &*((self.view as *const u8).add(offset) as *const MahmSharedMemoryEntry);
+                let entry: MahmSharedMemoryEntry =
+                    read_shared_memory_unaligned((self.view as *const u8).add(offset));
                 let value = valid_sensor_value(entry.data);
                 if entry.gpu != MAHM_GLOBAL_GPU {
                     continue;
@@ -1700,16 +1737,19 @@ fn architecture_name(system_info: SYSTEM_INFO) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        is_probeable_process_id, mahm_layout_matches, network_classification,
-        summarize_process_detail, validate_mahm_layout, validate_mapped_regions,
-        AfterburnerSharedMemory, MappedMemoryRegion, MappingValidationError, ProcessDetailSummary,
-        ProcessMetrics, ReadResult, ReadStatus,
+        is_probeable_process_id, is_readable_protection, mahm_layout_matches,
+        network_classification, read_shared_memory_unaligned, summarize_process_detail,
+        validate_mahm_layout, validate_mapped_regions, AfterburnerSharedMemory,
+        MahmSharedMemoryEntry, MahmSharedMemoryHeader, MappedMemoryRegion, MappingValidationError,
+        ProcessDetailSummary, ProcessMetrics, ReadResult, ReadStatus,
     };
     use windows::Win32::NetworkManagement::IpHelper::{
         IF_TYPE_IEEE80211, IF_TYPE_SOFTWARE_LOOPBACK, MIB_IF_ROW2,
     };
     use windows::Win32::System::Memory::{
-        MEM_COMMIT, MEM_FREE, MEM_RESERVE, PAGE_GUARD, PAGE_NOACCESS, PAGE_READONLY,
+        MEM_COMMIT, MEM_FREE, MEM_RESERVE, PAGE_EXECUTE, PAGE_EXECUTE_READ, PAGE_EXECUTE_READWRITE,
+        PAGE_EXECUTE_WRITECOPY, PAGE_GUARD, PAGE_NOACCESS, PAGE_NOCACHE, PAGE_READONLY,
+        PAGE_READWRITE, PAGE_WRITECOMBINE, PAGE_WRITECOPY,
     };
 
     fn empty_summary() -> ProcessDetailSummary {
@@ -1900,6 +1940,83 @@ mod tests {
         assert_eq!(super::valid_sensor_value(42.5), Some(42.5));
     }
 
+    #[test]
+    fn readable_protection_accepts_all_readable_base_types() {
+        for protection in [
+            PAGE_READONLY.0,
+            PAGE_READWRITE.0,
+            PAGE_WRITECOPY.0,
+            PAGE_EXECUTE_READ.0,
+            PAGE_EXECUTE_READWRITE.0,
+            PAGE_EXECUTE_WRITECOPY.0,
+        ] {
+            assert!(is_readable_protection(protection), "0x{protection:x}");
+        }
+
+        assert!(is_readable_protection(PAGE_READONLY.0 | PAGE_NOCACHE.0));
+        assert!(is_readable_protection(
+            PAGE_READWRITE.0 | PAGE_WRITECOMBINE.0
+        ));
+    }
+
+    #[test]
+    fn readable_protection_rejects_execute_only_noaccess_and_guard() {
+        assert!(!is_readable_protection(PAGE_EXECUTE.0));
+        assert!(!is_readable_protection(PAGE_NOACCESS.0));
+        assert!(!is_readable_protection(PAGE_READONLY.0 | PAGE_GUARD.0));
+        assert!(!is_readable_protection(0x12));
+    }
+
+    #[test]
+    fn shared_memory_struct_reads_support_intentionally_misaligned_addresses() {
+        let expected_header = MahmSharedMemoryHeader {
+            signature: super::MAHM_SIGNATURE,
+            version: super::MAHM_VERSION_2,
+            header_size: 64,
+            entry_count: 1,
+            entry_size: super::size_of::<MahmSharedMemoryEntry>() as u32,
+            time: 123,
+            gpu_entry_count: 0,
+            gpu_entry_size: 0,
+        };
+        let expected_entry = MahmSharedMemoryEntry {
+            source_name: [0x11; 260],
+            source_units: [0x22; 260],
+            localized_source_name: [0x33; 260],
+            localized_source_units: [0x44; 260],
+            recommended_format: [0x55; 260],
+            data: 42.5,
+            min_limit: 1.0,
+            max_limit: 100.0,
+            flags: 7,
+            gpu: super::MAHM_GLOBAL_GPU,
+            source_id: super::MAHM_CPU_TEMPERATURE,
+        };
+        let mut header_bytes = vec![0u8; 1 + super::size_of::<MahmSharedMemoryHeader>()];
+        let mut entry_bytes = vec![0u8; 1 + super::size_of::<MahmSharedMemoryEntry>()];
+
+        unsafe {
+            std::ptr::write_unaligned(
+                header_bytes.as_mut_ptr().add(1) as *mut MahmSharedMemoryHeader,
+                expected_header,
+            );
+            std::ptr::write_unaligned(
+                entry_bytes.as_mut_ptr().add(1) as *mut MahmSharedMemoryEntry,
+                expected_entry,
+            );
+
+            let header: MahmSharedMemoryHeader =
+                read_shared_memory_unaligned(header_bytes.as_ptr().add(1));
+            let entry: MahmSharedMemoryEntry =
+                read_shared_memory_unaligned(entry_bytes.as_ptr().add(1));
+
+            assert_eq!(header.signature, expected_header.signature);
+            assert_eq!(header.time, expected_header.time);
+            assert_eq!(entry.data, expected_entry.data);
+            assert_eq!(entry.source_id, expected_entry.source_id);
+        }
+    }
+
     fn region(
         base_address: usize,
         allocation_base: usize,
@@ -1984,6 +2101,14 @@ mod tests {
             )],
         );
         assert_eq!(guard, Err(MappingValidationError::GuardPage));
+
+        let execute_only = validate_mapped_regions(
+            0x1000,
+            0x100,
+            None,
+            &[region(0x1000, 0x1000, 0x1000, MEM_COMMIT.0, PAGE_EXECUTE.0)],
+        );
+        assert_eq!(execute_only, Err(MappingValidationError::NotReadable));
     }
 
     #[test]
