@@ -1,5 +1,6 @@
 mod admission;
 mod cli;
+mod cpu_sensor;
 mod model;
 mod report;
 mod stats;
@@ -67,6 +68,18 @@ fn run_main() -> Result<(), String> {
         }
         Command::Scenarios(config) => {
             let (json_path, markdown_path) = admission::run_scenarios(config)?;
+            println!("JSON: {}", json_path.display());
+            println!("Markdown: {}", markdown_path.display());
+            Ok(())
+        }
+        Command::CpuSensors(config) => {
+            let (json_path, markdown_path) = cpu_sensor::run(config)?;
+            println!("JSON: {}", json_path.display());
+            println!("Markdown: {}", markdown_path.display());
+            Ok(())
+        }
+        Command::CpuSensorLifecycle(config) => {
+            let (json_path, markdown_path) = cpu_sensor::run_lifecycle(config)?;
             println!("JSON: {}", json_path.display());
             println!("Markdown: {}", markdown_path.display());
             Ok(())

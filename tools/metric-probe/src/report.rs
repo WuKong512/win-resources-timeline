@@ -245,7 +245,7 @@ pub fn validate_public_text(text: &str) -> Result<(), String> {
     Ok(())
 }
 
-fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), String> {
+pub(crate) fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), String> {
     let parent = path
         .parent()
         .ok_or_else(|| "output path has no parent".to_string())?;

@@ -100,3 +100,7 @@ PR-05 已在 schema v8 上实现进程与崩溃证据后端边界：
 ## PR-09 交付边界
 
 PR-09 是 PR-08 合并后的 Dashboard UI 增强：复用 schema v8、既有 `ui.dashboard.v1` 配置和 Provider/session/device capability truth，不新增 Provider、不迁移数据库，也不改写 PR-00..PR-08 历史状态。
+
+## CPU sensor spike 当前状态
+
+`CPU-SENSOR-SPIKE` 已在 `spike/cpu-sensor-feasibility` 完成独立 Windows probe、AMD 当前机器 idle/load、cadence、开销和启停证据，结论为 `PASS_WITH_DEFERRED_METRICS`：CPU package temperature、package power、effective frequency 均暂不进入 production Provider。Windows baseline 只保留现有 CPU usage/OS 状态语义；后续若有来源通过许可、驱动安全、精确 scope、长时开销和 lifecycle gate，应作为 optional CPU sensor Provider 复用既有 ProviderHost/CollectionPlan/MetricCatalog。详见 [`docs/measurements/cpu-sensor-feasibility.md`](../measurements/cpu-sensor-feasibility.md)。本 spike 未修改 Dashboard、PR-09、production collector 或 schema。

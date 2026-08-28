@@ -6,7 +6,7 @@ use windows::{
     core::{HRESULT, PCWSTR},
     Win32::{
         Foundation::{
-            CloseHandle, ERROR_ACCESS_DENIED, ERROR_INVALID_HANDLE, ERROR_INVALID_PARAMETER,
+            CloseHandle, BOOL, ERROR_ACCESS_DENIED, ERROR_INVALID_HANDLE, ERROR_INVALID_PARAMETER,
             ERROR_PARTIAL_COPY, ERROR_PROCESS_ABORTED, FILETIME, HANDLE,
         },
         NetworkManagement::IpHelper::{
@@ -18,6 +18,13 @@ use windows::{
             Diagnostics::ToolHelp::{
                 CreateToolhelp32Snapshot, Thread32First, Thread32Next, TH32CS_SNAPTHREAD,
                 THREADENTRY32,
+            },
+            Memory::{
+                MapViewOfFile, OpenFileMappingW, UnmapViewOfFile, VirtualQuery, FILE_MAP_READ,
+                MEMORY_BASIC_INFORMATION, MEMORY_MAPPED_VIEW_ADDRESS, MEM_COMMIT,
+                PAGE_EXECUTE_READ, PAGE_EXECUTE_READWRITE, PAGE_EXECUTE_WRITECOPY, PAGE_GUARD,
+                PAGE_NOACCESS, PAGE_NOCACHE, PAGE_READONLY, PAGE_READWRITE, PAGE_TARGETS_NO_UPDATE,
+                PAGE_WRITECOMBINE, PAGE_WRITECOPY,
             },
             Performance::{
                 PdhAddEnglishCounterW, PdhCloseQuery, PdhCollectQueryData,
@@ -254,6 +261,624 @@ impl Drop for DiskProvider {
             }
         }
     }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct CpuPerformanceCounters {
+    pub processor_frequency_mhz: f64,
+    pub processor_performance_percent: f64,
+    pub processor_utility_percent: f64,
+    pub percent_maximum_frequency: f64,
+}
+
+/// Windows Processor Information counters collected through one reusable PDH query.
+///
+/// This is deliberately an independent probe primitive. It is not used by the
+/// production collector and does not turn an OS counter into a hardware sensor.
+#[derive(Debug)]
+pub struct CpuPerformanceProvider {
+    query: isize,
+    processor_frequency: isize,
+    processor_performance: isize,
+    processor_utility: isize,
+    percent_maximum_frequency: isize,
+    warmed: bool,
+}
+
+impl CpuPerformanceProvider {
+    pub fn new() -> ReadResult<Self> {
+        unsafe {
+            let mut query = 0;
+            if PdhOpenQueryW(PCWSTR::null(), 0, &mut query) != 0 {
+                return ReadResult::status(
+                    ReadStatus::ProviderMissing,
+                    "pdh_processor_information_open_failed",
+                );
+            }
+            let paths = [
+                r"\Processor Information(_Total)\Processor Frequency",
+                r"\Processor Information(_Total)\% Processor Performance",
+                r"\Processor Information(_Total)\% Processor Utility",
+                r"\Processor Information(_Total)\% of Maximum Frequency",
+            ];
+            let mut counters = [0_isize; 4];
+            for (path, counter) in paths.iter().zip(counters.iter_mut()) {
+                let path = wide(path);
+                if PdhAddEnglishCounterW(query, PCWSTR::from_raw(path.as_ptr()), 0, counter) != 0 {
+                    PdhCloseQuery(query);
+                    return ReadResult::status(
+                        ReadStatus::ProviderMissing,
+                        "pdh_processor_information_counter_missing",
+                    );
+                }
+            }
+            if PdhCollectQueryData(query) != 0 {
+                PdhCloseQuery(query);
+                return ReadResult::status(
+                    ReadStatus::Failed,
+                    "pdh_processor_information_initial_collect_failed",
+                );
+            }
+            ReadResult::value(Self {
+                query,
+                processor_frequency: counters[0],
+                processor_performance: counters[1],
+                processor_utility: counters[2],
+                percent_maximum_frequency: counters[3],
+                warmed: false,
+            })
+        }
+    }
+
+    pub fn sample(&mut self) -> ReadResult<CpuPerformanceCounters> {
+        unsafe {
+            if PdhCollectQueryData(self.query) != 0 {
+                return ReadResult::status(
+                    ReadStatus::Failed,
+                    "pdh_processor_information_collect_failed",
+                );
+            }
+            let values = [
+                formatted_counter(self.processor_frequency),
+                formatted_counter(self.processor_performance),
+                formatted_counter(self.processor_utility),
+                formatted_counter(self.percent_maximum_frequency),
+            ];
+            let [Some(processor_frequency_mhz), Some(processor_performance_percent), Some(processor_utility_percent), Some(percent_maximum_frequency)] =
+                values
+            else {
+                return ReadResult::status(
+                    ReadStatus::Failed,
+                    "pdh_processor_information_read_failed",
+                );
+            };
+            if !self.warmed {
+                self.warmed = true;
+                return ReadResult::status(
+                    ReadStatus::Failed,
+                    "pdh_processor_information_warmup_sample",
+                );
+            }
+            ReadResult::value(CpuPerformanceCounters {
+                processor_frequency_mhz,
+                processor_performance_percent,
+                processor_utility_percent,
+                percent_maximum_frequency,
+            })
+        }
+    }
+}
+
+impl Drop for CpuPerformanceProvider {
+    fn drop(&mut self) {
+        unsafe {
+            if self.query != 0 {
+                PdhCloseQuery(self.query);
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct AfterburnerSnapshot {
+    pub source_timestamp_seconds: i64,
+    pub cpu_temperature_celsius: Option<f64>,
+    pub cpu_power_watts: Option<f64>,
+    pub cpu_clock_mhz: Option<f64>,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct MahmSharedMemoryHeader {
+    signature: u32,
+    version: u32,
+    header_size: u32,
+    entry_count: u32,
+    entry_size: u32,
+    time: i32,
+    gpu_entry_count: u32,
+    gpu_entry_size: u32,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct MahmSharedMemoryEntry {
+    source_name: [u8; 260],
+    source_units: [u8; 260],
+    localized_source_name: [u8; 260],
+    localized_source_units: [u8; 260],
+    recommended_format: [u8; 260],
+    data: f32,
+    min_limit: f32,
+    max_limit: f32,
+    flags: u32,
+    gpu: u32,
+    source_id: u32,
+}
+
+// The SDK documents the four-character literal `MAHM`; MSVC stores that
+// multi-character constant as the byte sequence `MHAM` in this DWORD.
+const MAHM_SIGNATURE: u32 = u32::from_le_bytes(*b"MHAM");
+const MAHM_VERSION_2: u32 = 0x0002_0000;
+const MAHM_GLOBAL_GPU: u32 = u32::MAX;
+const MAHM_CPU_TEMPERATURE: u32 = 0x0000_0080;
+const MAHM_CPU_CLOCK: u32 = 0x0000_00A0;
+const MAHM_CPU_POWER: u32 = 0x0000_0100;
+const MAHM_MAX_ENTRY_COUNT: usize = 1024;
+const MAHM_MAX_MAPPING_LENGTH: usize = 16 * 1024 * 1024;
+const PAGE_PROTECTION_BASE_MASK: u32 = 0xff;
+const PAGE_PROTECTION_KNOWN_MODIFIER_MASK: u32 =
+    PAGE_GUARD.0 | PAGE_NOCACHE.0 | PAGE_WRITECOMBINE.0 | PAGE_TARGETS_NO_UPDATE.0;
+
+fn is_readable_protection(protection: u32) -> bool {
+    if protection & PAGE_GUARD.0 != 0 {
+        return false;
+    }
+    if protection & !(PAGE_PROTECTION_BASE_MASK | PAGE_PROTECTION_KNOWN_MODIFIER_MASK) != 0 {
+        return false;
+    }
+
+    matches!(
+        protection & PAGE_PROTECTION_BASE_MASK,
+        base if base == PAGE_READONLY.0
+            || base == PAGE_READWRITE.0
+            || base == PAGE_WRITECOPY.0
+            || base == PAGE_EXECUTE_READ.0
+            || base == PAGE_EXECUTE_READWRITE.0
+            || base == PAGE_EXECUTE_WRITECOPY.0
+    )
+}
+
+/// Copy a value from an external byte address without creating a reference
+/// whose alignment the producer is responsible for providing.
+unsafe fn read_shared_memory_unaligned<T: Copy>(address: *const u8) -> T {
+    std::ptr::read_unaligned(address as *const T)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MappingValidationError {
+    EmptyRange,
+    AddressOverflow,
+    QueryFailed,
+    InvalidRegion,
+    NotCommitted,
+    NoAccess,
+    NotReadable,
+    GuardPage,
+    MissingAllocationBase,
+    AllocationBaseChanged,
+    RangeNotCovered,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct MappedMemoryRegion {
+    base_address: usize,
+    allocation_base: usize,
+    region_size: usize,
+    state: u32,
+    protection: u32,
+}
+
+fn validate_mapped_regions(
+    view_address: usize,
+    length: usize,
+    expected_allocation_base: Option<usize>,
+    regions: &[MappedMemoryRegion],
+) -> Result<usize, MappingValidationError> {
+    if view_address == 0 || length == 0 {
+        return Err(MappingValidationError::EmptyRange);
+    }
+    let range_end = view_address
+        .checked_add(length)
+        .ok_or(MappingValidationError::AddressOverflow)?;
+    let mut cursor = view_address;
+    let mut allocation_base = expected_allocation_base;
+
+    for region in regions {
+        if cursor >= range_end {
+            break;
+        }
+        let region_end = region
+            .base_address
+            .checked_add(region.region_size)
+            .ok_or(MappingValidationError::AddressOverflow)?;
+        if region.region_size == 0 || region.base_address > cursor || region_end <= cursor {
+            return Err(MappingValidationError::RangeNotCovered);
+        }
+        if region.state != MEM_COMMIT.0 {
+            return Err(MappingValidationError::NotCommitted);
+        }
+        if region.protection & PAGE_GUARD.0 != 0 {
+            return Err(MappingValidationError::GuardPage);
+        }
+        if !is_readable_protection(region.protection) {
+            if region.protection & PAGE_PROTECTION_BASE_MASK == PAGE_NOACCESS.0 {
+                return Err(MappingValidationError::NoAccess);
+            }
+            return Err(MappingValidationError::NotReadable);
+        }
+        if region.allocation_base == 0 {
+            return Err(MappingValidationError::MissingAllocationBase);
+        }
+        if let Some(expected) = allocation_base {
+            if expected != region.allocation_base {
+                return Err(MappingValidationError::AllocationBaseChanged);
+            }
+        } else {
+            allocation_base = Some(region.allocation_base);
+        }
+
+        cursor = region_end.min(range_end);
+    }
+
+    if cursor != range_end {
+        return Err(MappingValidationError::RangeNotCovered);
+    }
+    allocation_base.ok_or(MappingValidationError::MissingAllocationBase)
+}
+
+fn validate_virtual_mapping(
+    view: *const u8,
+    length: usize,
+    expected_allocation_base: Option<usize>,
+) -> Result<usize, MappingValidationError> {
+    if view.is_null() || length == 0 {
+        return Err(MappingValidationError::EmptyRange);
+    }
+    let view_address = view as usize;
+    let range_end = view_address
+        .checked_add(length)
+        .ok_or(MappingValidationError::AddressOverflow)?;
+    let mut cursor = view_address;
+    let mut regions = Vec::new();
+    while cursor < range_end {
+        let mut region = MEMORY_BASIC_INFORMATION::default();
+        let queried = unsafe {
+            VirtualQuery(
+                Some(cursor as *const std::ffi::c_void),
+                &mut region,
+                size_of::<MEMORY_BASIC_INFORMATION>(),
+            )
+        };
+        if queried != size_of::<MEMORY_BASIC_INFORMATION>() {
+            return Err(MappingValidationError::QueryFailed);
+        }
+        let region_start = region.BaseAddress as usize;
+        let region_end = region_start
+            .checked_add(region.RegionSize)
+            .ok_or(MappingValidationError::AddressOverflow)?;
+        if region.RegionSize == 0 || region_end <= cursor {
+            return Err(MappingValidationError::InvalidRegion);
+        }
+        regions.push(MappedMemoryRegion {
+            base_address: region_start,
+            allocation_base: region.AllocationBase as usize,
+            region_size: region.RegionSize,
+            state: region.State.0,
+            protection: region.Protect.0,
+        });
+        cursor = region_end;
+    }
+    validate_mapped_regions(view_address, length, expected_allocation_base, &regions)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MahmLayoutError {
+    HeaderTooSmall,
+    EntryTooSmall,
+    EntryCountTooLarge,
+    EntrySizeOverflow,
+    MappingTooLarge,
+}
+
+fn validate_mahm_layout(
+    header_size: usize,
+    entry_size: usize,
+    entry_count: usize,
+) -> Result<usize, MahmLayoutError> {
+    if header_size < size_of::<MahmSharedMemoryHeader>() {
+        return Err(MahmLayoutError::HeaderTooSmall);
+    }
+    if entry_size < size_of::<MahmSharedMemoryEntry>() {
+        return Err(MahmLayoutError::EntryTooSmall);
+    }
+    if entry_count > MAHM_MAX_ENTRY_COUNT {
+        return Err(MahmLayoutError::EntryCountTooLarge);
+    }
+    let entries_size = entry_count
+        .checked_mul(entry_size)
+        .ok_or(MahmLayoutError::EntrySizeOverflow)?;
+    let mapping_length = header_size
+        .checked_add(entries_size)
+        .ok_or(MahmLayoutError::EntrySizeOverflow)?;
+    if mapping_length > MAHM_MAX_MAPPING_LENGTH {
+        return Err(MahmLayoutError::MappingTooLarge);
+    }
+    Ok(mapping_length)
+}
+
+fn mahm_layout_matches(
+    header_size: usize,
+    entry_size: usize,
+    entry_count: usize,
+    validated_header_size: usize,
+    validated_entry_size: usize,
+    validated_entry_count: usize,
+    validated_mapping_length: usize,
+) -> bool {
+    header_size == validated_header_size
+        && entry_size == validated_entry_size
+        && entry_count == validated_entry_count
+        && validate_mahm_layout(header_size, entry_size, entry_count)
+            .is_ok_and(|length| length == validated_mapping_length)
+}
+
+/// Read-only adapter for MSI Afterburner's documented MAHM shared-memory SDK.
+///
+/// The adapter is reference-only: it never starts Afterburner, writes to the
+/// mapping, installs a driver, or treats the result as a production dependency.
+pub struct AfterburnerSharedMemory {
+    mapping: HANDLE,
+    view: *mut std::ffi::c_void,
+    validated_header_size: usize,
+    validated_entry_count: usize,
+    validated_entry_size: usize,
+    validated_mapping_length: usize,
+    allocation_base: usize,
+}
+
+impl std::fmt::Debug for AfterburnerSharedMemory {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("AfterburnerSharedMemory")
+            .field("validated_header_size", &self.validated_header_size)
+            .field("validated_entry_count", &self.validated_entry_count)
+            .field("validated_entry_size", &self.validated_entry_size)
+            .field("validated_mapping_length", &self.validated_mapping_length)
+            .field("allocation_base", &self.allocation_base)
+            .finish()
+    }
+}
+
+impl AfterburnerSharedMemory {
+    pub fn open() -> ReadResult<Self> {
+        Self::open_named("MAHMSharedMemory")
+    }
+
+    fn open_named(name: &str) -> ReadResult<Self> {
+        unsafe {
+            let name = wide(name);
+            let mapping =
+                match OpenFileMappingW(FILE_MAP_READ.0, BOOL(0), PCWSTR::from_raw(name.as_ptr())) {
+                    Ok(mapping) => mapping,
+                    Err(error) => {
+                        let access_denied =
+                            error.code() == HRESULT::from_win32(ERROR_ACCESS_DENIED.0);
+                        return ReadResult::status(
+                            if access_denied {
+                                ReadStatus::PermissionDenied
+                            } else {
+                                ReadStatus::ProviderMissing
+                            },
+                            if access_denied {
+                                "afterburner_shared_memory_access_denied"
+                            } else {
+                                "afterburner_shared_memory_missing"
+                            },
+                        );
+                    }
+                };
+            let view = MapViewOfFile(mapping, FILE_MAP_READ, 0, 0, 0).Value;
+            if view.is_null() {
+                close_handle(mapping);
+                return ReadResult::status(
+                    ReadStatus::Failed,
+                    "afterburner_shared_memory_map_failed",
+                );
+            }
+            let header_allocation_base = match validate_virtual_mapping(
+                view as *const u8,
+                size_of::<MahmSharedMemoryHeader>(),
+                None,
+            ) {
+                Ok(allocation_base) => allocation_base,
+                Err(_) => {
+                    let _ = UnmapViewOfFile(MEMORY_MAPPED_VIEW_ADDRESS { Value: view });
+                    close_handle(mapping);
+                    return ReadResult::status(
+                        ReadStatus::Failed,
+                        "afterburner_shared_memory_map_bounds_invalid",
+                    );
+                }
+            };
+            let header: MahmSharedMemoryHeader = read_shared_memory_unaligned(view as *const u8);
+            if header.signature != MAHM_SIGNATURE || header.version < MAHM_VERSION_2 {
+                let _ = UnmapViewOfFile(MEMORY_MAPPED_VIEW_ADDRESS { Value: view });
+                close_handle(mapping);
+                return ReadResult::status(
+                    ReadStatus::Failed,
+                    "afterburner_shared_memory_header_invalid",
+                );
+            }
+            let header_size = header.header_size as usize;
+            let entry_count = header.entry_count as usize;
+            let entry_size = header.entry_size as usize;
+            let mapped_size = match validate_mahm_layout(header_size, entry_size, entry_count) {
+                Ok(size) => size,
+                Err(_) => {
+                    let _ = UnmapViewOfFile(MEMORY_MAPPED_VIEW_ADDRESS { Value: view });
+                    close_handle(mapping);
+                    return ReadResult::status(
+                        ReadStatus::Failed,
+                        "afterburner_shared_memory_header_invalid",
+                    );
+                }
+            };
+            let allocation_base = match validate_virtual_mapping(
+                view as *const u8,
+                mapped_size,
+                Some(header_allocation_base),
+            ) {
+                Ok(allocation_base) => allocation_base,
+                Err(_) => {
+                    let _ = UnmapViewOfFile(MEMORY_MAPPED_VIEW_ADDRESS { Value: view });
+                    close_handle(mapping);
+                    return ReadResult::status(
+                        ReadStatus::Failed,
+                        "afterburner_shared_memory_map_bounds_invalid",
+                    );
+                }
+            };
+            if allocation_base != header_allocation_base {
+                let _ = UnmapViewOfFile(MEMORY_MAPPED_VIEW_ADDRESS { Value: view });
+                close_handle(mapping);
+                return ReadResult::status(
+                    ReadStatus::Failed,
+                    "afterburner_shared_memory_map_bounds_invalid",
+                );
+            }
+            ReadResult::value(Self {
+                mapping,
+                view,
+                validated_header_size: header_size,
+                validated_entry_count: entry_count,
+                validated_entry_size: entry_size,
+                validated_mapping_length: mapped_size,
+                allocation_base,
+            })
+        }
+    }
+
+    pub fn sample(&self) -> ReadResult<AfterburnerSnapshot> {
+        unsafe {
+            if validate_virtual_mapping(
+                self.view as *const u8,
+                self.validated_mapping_length,
+                Some(self.allocation_base),
+            )
+            .is_err()
+            {
+                return ReadResult::status(
+                    ReadStatus::Failed,
+                    "afterburner_shared_memory_mapping_invalidated",
+                );
+            }
+            let header: MahmSharedMemoryHeader =
+                read_shared_memory_unaligned(self.view as *const u8);
+            if header.signature != MAHM_SIGNATURE || header.version < MAHM_VERSION_2 {
+                return ReadResult::status(
+                    ReadStatus::Failed,
+                    "afterburner_shared_memory_invalidated",
+                );
+            }
+            let current_header_size = header.header_size as usize;
+            let current_entry_count = header.entry_count as usize;
+            let current_entry_size = header.entry_size as usize;
+            if !mahm_layout_matches(
+                current_header_size,
+                current_entry_size,
+                current_entry_count,
+                self.validated_header_size,
+                self.validated_entry_size,
+                self.validated_entry_count,
+                self.validated_mapping_length,
+            ) {
+                return ReadResult::status(
+                    ReadStatus::Failed,
+                    "afterburner_shared_memory_layout_changed",
+                );
+            }
+            let mut temperature = None;
+            let mut power = None;
+            let mut clock = None;
+            for index in 0..self.validated_entry_count {
+                let offset = match self
+                    .validated_entry_size
+                    .checked_mul(index)
+                    .and_then(|entry_offset| self.validated_header_size.checked_add(entry_offset))
+                {
+                    Some(offset) => offset,
+                    None => {
+                        return ReadResult::status(
+                            ReadStatus::Failed,
+                            "afterburner_shared_memory_layout_changed",
+                        )
+                    }
+                };
+                match offset.checked_add(size_of::<MahmSharedMemoryEntry>()) {
+                    Some(entry_end) if entry_end <= self.validated_mapping_length => {}
+                    _ => {
+                        return ReadResult::status(
+                            ReadStatus::Failed,
+                            "afterburner_shared_memory_layout_changed",
+                        )
+                    }
+                }
+                let entry: MahmSharedMemoryEntry =
+                    read_shared_memory_unaligned((self.view as *const u8).add(offset));
+                let value = valid_sensor_value(entry.data);
+                if entry.gpu != MAHM_GLOBAL_GPU {
+                    continue;
+                }
+                match entry.source_id {
+                    MAHM_CPU_TEMPERATURE => temperature = value,
+                    MAHM_CPU_POWER => power = value,
+                    MAHM_CPU_CLOCK => clock = value,
+                    _ => {}
+                }
+            }
+            if temperature.is_none() && power.is_none() && clock.is_none() {
+                return ReadResult::status(
+                    ReadStatus::Unsupported,
+                    "afterburner_cpu_sources_missing",
+                );
+            }
+            ReadResult::value(AfterburnerSnapshot {
+                source_timestamp_seconds: header.time as i64,
+                cpu_temperature_celsius: temperature,
+                cpu_power_watts: power,
+                cpu_clock_mhz: clock,
+            })
+        }
+    }
+}
+
+impl Drop for AfterburnerSharedMemory {
+    fn drop(&mut self) {
+        unsafe {
+            if !self.view.is_null() {
+                let _ = UnmapViewOfFile(MEMORY_MAPPED_VIEW_ADDRESS { Value: self.view });
+            }
+            close_handle(self.mapping);
+        }
+    }
+}
+
+fn valid_sensor_value(value: f32) -> Option<f64> {
+    value
+        .is_finite()
+        .then_some(value as f64)
+        .filter(|value| value.abs() < f32::MAX as f64)
 }
 
 pub fn machine_info() -> MachineInfo {
@@ -1112,11 +1737,19 @@ fn architecture_name(system_info: SYSTEM_INFO) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        is_probeable_process_id, network_classification, summarize_process_detail,
+        is_probeable_process_id, is_readable_protection, mahm_layout_matches,
+        network_classification, read_shared_memory_unaligned, summarize_process_detail,
+        validate_mahm_layout, validate_mapped_regions, AfterburnerSharedMemory,
+        MahmSharedMemoryEntry, MahmSharedMemoryHeader, MappedMemoryRegion, MappingValidationError,
         ProcessDetailSummary, ProcessMetrics, ReadResult, ReadStatus,
     };
     use windows::Win32::NetworkManagement::IpHelper::{
         IF_TYPE_IEEE80211, IF_TYPE_SOFTWARE_LOOPBACK, MIB_IF_ROW2,
+    };
+    use windows::Win32::System::Memory::{
+        MEM_COMMIT, MEM_FREE, MEM_RESERVE, PAGE_EXECUTE, PAGE_EXECUTE_READ, PAGE_EXECUTE_READWRITE,
+        PAGE_EXECUTE_WRITECOPY, PAGE_GUARD, PAGE_NOACCESS, PAGE_NOCACHE, PAGE_READONLY,
+        PAGE_READWRITE, PAGE_WRITECOMBINE, PAGE_WRITECOPY,
     };
 
     fn empty_summary() -> ProcessDetailSummary {
@@ -1287,5 +1920,284 @@ mod tests {
     fn pid_zero_is_excluded_from_process_detail_attempts() {
         assert!(!is_probeable_process_id(0));
         assert!(is_probeable_process_id(1));
+    }
+
+    #[test]
+    fn missing_reference_mapping_is_provider_missing() {
+        let result = AfterburnerSharedMemory::open_named(
+            "ResourceTimelineCpuSensorProbeMappingThatDoesNotExist",
+        );
+        assert_eq!(result.status, ReadStatus::ProviderMissing);
+        assert_eq!(result.reason_code, "afterburner_shared_memory_missing");
+        assert!(result.value.is_none());
+    }
+
+    #[test]
+    fn invalid_reference_values_are_not_accepted() {
+        assert!(super::valid_sensor_value(f32::NAN).is_none());
+        assert!(super::valid_sensor_value(f32::INFINITY).is_none());
+        assert!(super::valid_sensor_value(f32::MAX).is_none());
+        assert_eq!(super::valid_sensor_value(42.5), Some(42.5));
+    }
+
+    #[test]
+    fn readable_protection_accepts_all_readable_base_types() {
+        for protection in [
+            PAGE_READONLY.0,
+            PAGE_READWRITE.0,
+            PAGE_WRITECOPY.0,
+            PAGE_EXECUTE_READ.0,
+            PAGE_EXECUTE_READWRITE.0,
+            PAGE_EXECUTE_WRITECOPY.0,
+        ] {
+            assert!(is_readable_protection(protection), "0x{protection:x}");
+        }
+
+        assert!(is_readable_protection(PAGE_READONLY.0 | PAGE_NOCACHE.0));
+        assert!(is_readable_protection(
+            PAGE_READWRITE.0 | PAGE_WRITECOMBINE.0
+        ));
+    }
+
+    #[test]
+    fn readable_protection_rejects_execute_only_noaccess_and_guard() {
+        assert!(!is_readable_protection(PAGE_EXECUTE.0));
+        assert!(!is_readable_protection(PAGE_NOACCESS.0));
+        assert!(!is_readable_protection(PAGE_READONLY.0 | PAGE_GUARD.0));
+        assert!(!is_readable_protection(0x12));
+    }
+
+    #[test]
+    fn shared_memory_struct_reads_support_intentionally_misaligned_addresses() {
+        let expected_header = MahmSharedMemoryHeader {
+            signature: super::MAHM_SIGNATURE,
+            version: super::MAHM_VERSION_2,
+            header_size: 64,
+            entry_count: 1,
+            entry_size: super::size_of::<MahmSharedMemoryEntry>() as u32,
+            time: 123,
+            gpu_entry_count: 0,
+            gpu_entry_size: 0,
+        };
+        let expected_entry = MahmSharedMemoryEntry {
+            source_name: [0x11; 260],
+            source_units: [0x22; 260],
+            localized_source_name: [0x33; 260],
+            localized_source_units: [0x44; 260],
+            recommended_format: [0x55; 260],
+            data: 42.5,
+            min_limit: 1.0,
+            max_limit: 100.0,
+            flags: 7,
+            gpu: super::MAHM_GLOBAL_GPU,
+            source_id: super::MAHM_CPU_TEMPERATURE,
+        };
+        let mut header_bytes = vec![0u8; 1 + super::size_of::<MahmSharedMemoryHeader>()];
+        let mut entry_bytes = vec![0u8; 1 + super::size_of::<MahmSharedMemoryEntry>()];
+
+        unsafe {
+            std::ptr::write_unaligned(
+                header_bytes.as_mut_ptr().add(1) as *mut MahmSharedMemoryHeader,
+                expected_header,
+            );
+            std::ptr::write_unaligned(
+                entry_bytes.as_mut_ptr().add(1) as *mut MahmSharedMemoryEntry,
+                expected_entry,
+            );
+
+            let header: MahmSharedMemoryHeader =
+                read_shared_memory_unaligned(header_bytes.as_ptr().add(1));
+            let entry: MahmSharedMemoryEntry =
+                read_shared_memory_unaligned(entry_bytes.as_ptr().add(1));
+
+            assert_eq!(header.signature, expected_header.signature);
+            assert_eq!(header.time, expected_header.time);
+            assert_eq!(entry.data, expected_entry.data);
+            assert_eq!(entry.source_id, expected_entry.source_id);
+        }
+    }
+
+    fn region(
+        base_address: usize,
+        allocation_base: usize,
+        region_size: usize,
+        state: u32,
+        protection: u32,
+    ) -> MappedMemoryRegion {
+        MappedMemoryRegion {
+            base_address,
+            allocation_base,
+            region_size,
+            state,
+            protection,
+        }
+    }
+
+    #[test]
+    fn mapped_range_accepts_committed_readable_regions_with_one_allocation_base() {
+        let allocation_base = 0x1000;
+        let regions = [
+            region(
+                0x1000,
+                allocation_base,
+                0x1000,
+                MEM_COMMIT.0,
+                PAGE_READONLY.0,
+            ),
+            region(
+                0x2000,
+                allocation_base,
+                0x1000,
+                MEM_COMMIT.0,
+                PAGE_READONLY.0,
+            ),
+        ];
+
+        assert_eq!(
+            validate_mapped_regions(0x1000, 0x1800, None, &regions),
+            Ok(allocation_base)
+        );
+    }
+
+    #[test]
+    fn mapped_range_rejects_uncommitted_regions() {
+        for state in [MEM_RESERVE.0, MEM_FREE.0] {
+            let result = validate_mapped_regions(
+                0x1000,
+                0x100,
+                None,
+                &[region(0x1000, 0x1000, 0x1000, state, PAGE_READONLY.0)],
+            );
+            assert_eq!(result, Err(MappingValidationError::NotCommitted));
+        }
+    }
+
+    #[test]
+    fn mapped_range_rejects_noaccess_and_guard_pages() {
+        let noaccess = validate_mapped_regions(
+            0x1000,
+            0x100,
+            None,
+            &[region(
+                0x1000,
+                0x1000,
+                0x1000,
+                MEM_COMMIT.0,
+                PAGE_NOACCESS.0,
+            )],
+        );
+        assert_eq!(noaccess, Err(MappingValidationError::NoAccess));
+
+        let guard = validate_mapped_regions(
+            0x1000,
+            0x100,
+            None,
+            &[region(
+                0x1000,
+                0x1000,
+                0x1000,
+                MEM_COMMIT.0,
+                PAGE_READONLY.0 | PAGE_GUARD.0,
+            )],
+        );
+        assert_eq!(guard, Err(MappingValidationError::GuardPage));
+
+        let execute_only = validate_mapped_regions(
+            0x1000,
+            0x100,
+            None,
+            &[region(0x1000, 0x1000, 0x1000, MEM_COMMIT.0, PAGE_EXECUTE.0)],
+        );
+        assert_eq!(execute_only, Err(MappingValidationError::NotReadable));
+    }
+
+    #[test]
+    fn mapped_range_rejects_allocation_base_changes_and_uncovered_ranges() {
+        let allocation_change = validate_mapped_regions(
+            0x1000,
+            0x1800,
+            None,
+            &[
+                region(0x1000, 0x1000, 0x1000, MEM_COMMIT.0, PAGE_READONLY.0),
+                region(0x2000, 0x2000, 0x1000, MEM_COMMIT.0, PAGE_READONLY.0),
+            ],
+        );
+        assert_eq!(
+            allocation_change,
+            Err(MappingValidationError::AllocationBaseChanged)
+        );
+
+        let uncovered = validate_mapped_regions(
+            0x1000,
+            0x1800,
+            None,
+            &[region(0x1000, 0x1000, 0x400, MEM_COMMIT.0, PAGE_READONLY.0)],
+        );
+        assert_eq!(uncovered, Err(MappingValidationError::RangeNotCovered));
+    }
+
+    #[test]
+    fn mahm_layout_rejects_overflow_and_oversized_entry_count() {
+        assert_eq!(
+            validate_mahm_layout(
+                usize::MAX - 1,
+                super::size_of::<super::MahmSharedMemoryEntry>(),
+                2
+            ),
+            Err(super::MahmLayoutError::EntrySizeOverflow)
+        );
+        assert_eq!(
+            validate_mahm_layout(
+                super::size_of::<super::MahmSharedMemoryHeader>(),
+                super::size_of::<super::MahmSharedMemoryEntry>(),
+                super::MAHM_MAX_ENTRY_COUNT + 1,
+            ),
+            Err(super::MahmLayoutError::EntryCountTooLarge)
+        );
+    }
+
+    #[test]
+    fn mahm_layout_changes_are_rejected_after_open_validation() {
+        let header_size = super::size_of::<super::MahmSharedMemoryHeader>();
+        let entry_size = super::size_of::<super::MahmSharedMemoryEntry>();
+        let entry_count = 3;
+        let mapping_length = validate_mahm_layout(header_size, entry_size, entry_count).unwrap();
+
+        assert!(mahm_layout_matches(
+            header_size,
+            entry_size,
+            entry_count,
+            header_size,
+            entry_size,
+            entry_count,
+            mapping_length,
+        ));
+        assert!(!mahm_layout_matches(
+            header_size + 1,
+            entry_size,
+            entry_count,
+            header_size,
+            entry_size,
+            entry_count,
+            mapping_length,
+        ));
+        assert!(!mahm_layout_matches(
+            header_size,
+            entry_size + 1,
+            entry_count,
+            header_size,
+            entry_size,
+            entry_count,
+            mapping_length,
+        ));
+        assert!(!mahm_layout_matches(
+            header_size,
+            entry_size,
+            entry_count + 1,
+            header_size,
+            entry_size,
+            entry_count,
+            mapping_length,
+        ));
     }
 }
