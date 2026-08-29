@@ -332,7 +332,7 @@ Production boundary remains unchanged:
 The follow-up changes are limited to the qualification probe's loader-only diagnostic/capture path and this documentation/execution-plan status. No production collector, ProviderHost behavior, CollectionPlan contract, MetricCatalog, schema, migration, dashboard, or metric explorer was modified.
 
 - `METRIC_PROBE_FMT`: `PASS` (`cargo fmt --manifest-path tools/metric-probe/Cargo.toml -- --check`).
-- `METRIC_PROBE_TESTS`: `PASS` — `64 passed; 0 failed; 0 ignored; 0 measured`.
+- `METRIC_PROBE_TESTS`: `PASS` — `65 passed; 0 failed; 0 ignored; 0 measured`.
 - `METRIC_PROBE_RELEASE_BUILD`: `PASS`.
 - `SRC_TAURI_FMT`: `PASS` (`cargo fmt --manifest-path src-tauri/Cargo.toml -- --check`).
 - `SRC_TAURI_CHECK`: `PASS`.
@@ -341,8 +341,179 @@ The follow-up changes are limited to the qualification probe's loader-only diagn
 - `DELIVERY`: the historical qualification commit was not rewritten. The follow-up delivery commit, push state, and final clean worktree are recorded with the final report.
 - Vendor artifacts: not committed; temporary sample build outputs remain outside tracked files/under ignored diagnostic output and were cleaned where created at repository root.
 
+## ADMIN PRIVILEGE COMPARISON
+
+This is a subsequent evidence-consumption record for the controlled administrator comparison. The historical non-admin evidence above is preserved; the original zero-sample blocked result is not rewritten. No AMD test was rerun during evidence consumption.
+
+### Evidence directory and capture integrity
+
+- Evidence directory: `C:\Users\Hello\AppData\Local\Temp\resource-timeline-amd-admin-comparison-v2-20260829T031818104Z`
+- Summary: `ADMIN-COMPARISON-SUMMARY.json`, captured `2026-08-29T03:18:26.8395122Z`.
+- `ADMIN-00`: passed. The manually launched process was x64, `WindowsPrincipal.IsInRole(Administrator)=true`, integrity SID `S-1-16-12288`, and `whoami /all` exited `0` / `0x00000000`. The recorded user was `ODETOMOUNTASEAS\\Hello`; the initial current directory was `C:\Users\Hello`.
+- A, B, D0, D1, D2, and E each have an independent JSON, stdout, and stderr file. Each capture is complete, has `timed_out=false`, and has no tree-kill or fallback-kill attempt. Their stderr captures are empty; their exact stdout is preserved beside each JSON.
+- C has no `ADMIN-C-OFFICIAL-COLLECTALLCOUNTERS.json`, stdout, or stderr file. The summary has a `null` entry at the C position. `ADMIN-C = INCONCLUSIVE`; no sample result, main-entry result, or initialization result is inferred.
+- D2 generated a non-empty output tree containing `timechart.csv` (1,349 bytes, SHA-256 `D18CCC886AFC1AB40EACF7A8183BCFD3DA1D14EFA8ED21050909069191EF8BC5`) and `session.uprof` (10,883 bytes, SHA-256 `82A785C4A0BC18AFDFBAF1D89BA18229017CB7276A02FE064E20FBA017E5877F`). The `.config`, `.error`, `.log`, and `metadata` directories were present but empty.
+
+### Artifact identity
+
+The inventory found the expected paths and x64 PE architecture. The probe, CXL DLL, official sample, and CLI hashes matched their expected values. The API DLL file itself is the authoritative 64-character hash `9634020BCAF3F2E639E0EEA2D64433E3F369A80A1FC54B9220CA732F830A4277` and is AMD Authenticode-valid. The inventory's `expected_sha256` field for that one item was malformed and omitted the final `7` (`...A427`, 63 characters), so its generated `sha256_matches=false` flag is a capture-harness metadata defect, not an API file mismatch.
+
+The direct A/B controls used the same new x64 `metric-probe.exe` (`69D551BB8423823BC092605DA5C42CB21A45CACA618838B8437B080F2D659687`), exact argument vectors, explicit working directory `C:\Users\Hello\.codex\worktrees\08bd\resource-timeline`, and the same AMD DLL identities as their corresponding new administrator commands. E used the same new binary, arguments, working directory, and API DLL identity as `NONADMIN-E-RESOURCE-TIMELINE-INIT-ONLY`; elevation was the experimental variable. The historical pre-fix A/B/C probe bytes necessarily predate the required init-only child addition, so the old and new probe hashes are not claimed identical.
+
+### Non-admin versus administrator matrix
+
+| Test | Non-admin | Administrator | Changed? |
+|---|---|---|---|
+| Direct CXL load | `-1` / `0xFFFFFFFF`; debugger evidence: `KERNEL32!FatalExit(0xFFFFFFFF)` | `-1` / `0xFFFFFFFF`; `BEFORE_LOAD` only; no timeout | No |
+| Direct API DLL load | `-1` / `0xFFFFFFFF`; transitive CXL abort | `-1` / `0xFFFFFFFF`; `BEFORE_LOAD` only; no timeout | No |
+| Official `CollectAllCounters` sample | `-1` / `0xFFFFFFFF` historical result | Missing evidence files and `null` summary entry | Inconclusive |
+| Official CLI `timechart --list` | `ERROR: There is no counters avialable` in the prior non-admin control | `0` / `0x00000000`; Socket `[0]`, Core `[0-7]`, Thread `[0-15]`; Power on Socket/Core; Frequency and P-State on Thread | Yes |
+| Official CLI power | `0x80070005` / `AMDT_ERROR_ACCESSDENIED` during prior non-admin initialization; no samples | `0` / `0x00000000`; profiling started and finished; output generated | Yes |
+| Resource Timeline init-only | `-1` / `0xFFFFFFFF`; stopped before load returned and before initialize | `-1` / `0xFFFFFFFF`; `INIT_ONLY_BEFORE_LOAD` only | No |
+
+The explicit A/B working directory and arguments are consistent. The direct-load rows use the same AMD DLL paths and hashes. The missing C artifact prevents claiming byte-level or behavioral administrator comparison for that sample.
+
+### ADMIN-A — direct CXL load
+
+Command identity:
+
+```text
+C:\Users\Hello\.codex\worktrees\08bd\resource-timeline\tools\metric-probe\target\release\metric-probe.exe amd-uprof-load-only-child --path D:\apps\AMDuProf\bin\CXLBaseTools.dll
+```
+
+The child started and exited without timeout at `2026-08-29T03:18:19.4303247Z`–`03:18:19.5043896Z`. It emitted only:
+
+```text
+BEFORE_LOAD path=\\?\D:\apps\AMDuProf\bin\CXLBaseTools.dll flags=0x00000900 process_architecture=x64
+```
+
+Exit was signed `-1`, unsigned `0xFFFFFFFF`; stdout/stderr capture was complete; no loader error was returned to the parent. Administrator elevation did not resolve the direct CXL termination.
+
+`DEPENDENCY_LOAD_ABORT = PERSISTS`.
+
+### ADMIN-B — direct API DLL load
+
+Command identity:
+
+```text
+C:\Users\Hello\.codex\worktrees\08bd\resource-timeline\tools\metric-probe\target\release\metric-probe.exe amd-uprof-load-only-child --path D:\apps\AMDuProf\bin\AMDPowerProfileAPI.dll
+```
+
+The child started and exited without timeout at `2026-08-29T03:18:19.5359820Z`–`2026-08-29T03:18:19.5771077Z`. It emitted only:
+
+```text
+BEFORE_LOAD path=\\?\D:\apps\AMDuProf\bin\AMDPowerProfileAPI.dll flags=0x00000900 process_architecture=x64
+```
+
+Exit was signed `-1`, unsigned `0xFFFFFFFF`; stdout/stderr capture was complete. This is consistent with the transitive `AMDPowerProfileAPI.dll -> AMDSysUtils.dll -> CXLBaseTools.dll` load-abort path. It is not an API initialization result.
+
+`ADMIN_API_DLL_LOAD = ABORT_VIA_TRANSITIVE_CXL_PATH`.
+
+### ADMIN-C — official CollectAllCounters sample
+
+The expected independent evidence files are absent, and the summary has no result object for this test. It is therefore:
+
+`OFFICIAL_SAMPLE_CONTROL = INCONCLUSIVE`
+
+No claim is made about whether the administrator sample reached `main`, `AMDTPwrProfileInitialize`, enumeration, or a clean close.
+
+### ADMIN-D0/D1/D2 — official CLI
+
+`ADMIN-D1-OFFICIAL-CLI-VERSION` completed at `0` / `0x00000000` and printed `AMDuProfCLI.exe Version 5.3.521.0`.
+
+`ADMIN-D0-OFFICIAL-CLI-TIMECHART-LIST` completed at `0` / `0x00000000`, with complete capture and no stderr. It reported:
+
+- Devices: Socket `[0]`, Core `[0-7]`, Thread `[0-15]`.
+- Categories: Power on Socket/Core; Frequency and P-State on Thread.
+- No temperature category was reported. This does not prove temperature is unsupported by the public API under this platform configuration.
+
+`ADMIN-D2-OFFICIAL-CLI-TIMECHART-POWER` used exactly:
+
+```text
+D:\apps\AMDuProf\bin\AMDuProfCLI.exe timechart --event power --interval 1000 --duration 5 --output-dir C:\Users\Hello\AppData\Local\Temp\resource-timeline-amd-admin-comparison-v2-20260829T031818104Z\ADMIN-D2-power-output
+```
+
+It completed normally in `5,446.921 ms`, with exit `0` / `0x00000000`, no timeout, complete stdout/stderr capture, and no process-tree kill. The CLI reported `Profiling started...`, elapsed marks at approximately `0`, `1013`, `2023`, `3026`, and `4032` ms, then `Profile finished`.
+
+The generated CSV identifies:
+
+- sampling interval: `1000 milli-seconds`;
+- profile duration: `5 seconds`;
+- package descriptor: `socket0-package-power`, counter ID `48`, unit `W`, description `Socket0-Average Package Power reported in Watts`;
+- core descriptors: `core0-power` through `core7-power`, counter IDs `50` through `64`, unit `W`;
+- three records at `11:18:22:646`, `11:18:23:646`, and `11:18:24:650`;
+- package values `49.44`, `42.26`, and `40.29 W`.
+
+These are real short-run vendor CLI records, not Resource Timeline API samples and not an acceptance of a production metric. No direct public API initialization status was emitted by D2, and no frequency or temperature sample was collected.
+
+`ADMIN_OFFICIAL_CLI_POWER = PASS_FOR_SHORT_VENDOR_CLI_CONTROL`.
+
+### ADMIN-E — Resource Timeline init-only
+
+The exact command was:
+
+```text
+C:\Users\Hello\.codex\worktrees\08bd\resource-timeline\tools\metric-probe\target\release\metric-probe.exe amd-uprof-init-only-child --install-root D:\apps\AMDuProf
+```
+
+It used the strict contract:
+
+```text
+load -> resolve init/enumeration/close -> initialize once -> enumerate once if initialized -> close
+```
+
+The child emitted only:
+
+```text
+INIT_ONLY_BEFORE_LOAD path=\\?\D:\apps\AMDuProf\bin\AMDPowerProfileAPI.dll flags=0x00000900 process_architecture=x64
+```
+
+It exited without timeout at `2026-08-29T03:18:26.7856829Z`–`2026-08-29T03:18:26.8094478Z` with signed `-1` / `0xFFFFFFFF`. Capture was complete and stderr was empty. The highest reached gate was `BEFORE_LOAD`; load did not return, symbol resolution did not occur, initialize was not called, enumeration count is unavailable, and close was not called by the child. No AMD status code was returned.
+
+This was not a sampling test. No enable, timer, start, read, workload, cadence, or busy operation was entered.
+
+`ADMIN_RESOURCE_TIMELINE_INIT = ABORT_BEFORE_LOAD`.
+
+### Privilege and direct-API/CLI classification
+
+`DEPENDENCY_LOAD_ABORT = PERSISTS`.
+
+Administrator elevation did not change the direct CXL, direct API, or init-only result. The non-admin `AMDT_ERROR_ACCESSDENIED` boundary is nevertheless crossed by the official CLI's short power path: administrator CLI profiling starts and emits records. Because direct API initialization under Administrator was never reached, the permission conclusion is limited:
+
+`PERMISSION_BOUNDARY = PARTIALLY_RESOLVED` — resolved for the official CLI path, unresolved for the direct API path, which still aborts during dependency loading.
+
+`DIRECT_API_VS_VENDOR_CLI = DIVERGENT`.
+
+The evidence does not prove that the CLI uses the same public `AMDPowerProfileAPI.dll` load path. The next investigation must compare process environment, working directory, loaded modules, DLL search behavior, and the CLI's internal initialization path. No reinstall or repair is justified or performed by this record.
+
+### Revised root cause
+
+`ROOT_CAUSE = DEPENDENCY_LOAD_FAILURE`
+
+`SUBCAUSE = CXLBASETOOLS_LOAD_PATH_FATAL_EXIT`
+
+Confidence remains high for the observed boundary: direct administrator CXL loading still terminates at signed `-1` / `0xFFFFFFFF`, while the earlier debugger evidence proved `KERNEL32!FatalExit(0xFFFFFFFF)` in the CXL dependency path. The administrator comparison disproves elevation as a fix for that direct load abort and establishes a separate vendor-CLI/direct-API divergence. `EXACT_CXL_INTERNAL_CONDITION = UNPROVEN` remains unchanged. The missing C sample evidence prevents using that control to strengthen or weaken the conclusion.
+
+### Metric decisions after administrator comparison
+
+- `CPU_PACKAGE_POWER = DEFER`: the CLI produced short-run package-power records, but the Resource Timeline-owned API did not load and no API cadence/lifecycle/failure-isolation qualification was performed.
+- `AMD_CORE_EFFECTIVE_FREQUENCY = DEFER`: D0 reports Frequency on Thread identities, but no direct API descriptor semantics or repeated Resource Timeline samples were obtained.
+- `CPU_EFFECTIVE_FREQUENCY = DEFER_AGGREGATION_CONTRACT`: no product aggregation was selected or added.
+- `CPU_PACKAGE_TEMPERATURE = DEFER_UNREACHED_DUE_TO_LIBRARY_LOAD`: no temperature counter was enumerated; Hyper-V/VBS/HVCI remain unchanged and are not blamed.
+
+`SOURCE_DECISION = DEFER`.
+
+No cadence, sampling expansion, idle/load/recovery, busy/concurrency, lifecycle, overhead, or soak qualification was run after this comparison. No numeric value was synthesized for any failed or unreached API path.
+
+### Platform, mutation, and legal state
+
+- Microsoft Hypervisor: `ENABLED`; VBS: `ENABLED`; HVCI: `ENABLED`.
+- Platform, AMD installation, services, drivers, registry, PATH, boot configuration, security policy, and Afterburner/RTSS state: unchanged by this task.
+- `USER_AUTHORIZATION_REQUIRED`: none for consuming the already-authorized Administrator evidence; any installation repair/reinstall, driver/service change, security-policy change, or platform change remains a separate authorization gate.
+- Distribution remains `BLOCKED_LEGAL_DISTRIBUTION_REVIEW`; no AMD DLL, driver, installer, header, PDF, sample, or license was committed.
+
 ## Next step
 
-`USER_AUTHORIZED_ADMIN_COMPARISON_THEN_RERUN_CPU_SENSOR_AMD_LIVE_QUALIFICATION`
+`CPU-SENSOR-AMD-CLI-VS-DIRECT-API-DIVERGENCE-INVESTIGATION`
 
-Do not start `CPU-SENSOR-AMD-PROVIDER-DESIGN`. First obtain explicit authorization for the bounded administrator comparison, preserve the current platform configuration, and only resume the ordered live gates if the DLL/API load boundary is safe and initialization provides an actionable status.
+Do not start `CPU-SENSOR-AMD-PROVIDER-DESIGN`. First investigate why the installed official CLI can complete a short power profile while direct `AMDPowerProfileAPI.dll`/`CXLBaseTools.dll` loading still aborts, preserving the current platform and installation. Only if that boundary becomes safe should the original ordered live qualification resume.
