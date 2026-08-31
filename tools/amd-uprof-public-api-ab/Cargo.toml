@@ -1,0 +1,19 @@
+[package]
+name = "amd-uprof-public-api-ab"
+version = "0.1.0"
+edition = "2021"
+publish = false
+build = "build.rs"
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "amd-uprof-static-api-load-fixture"
+path = "src/bin/amd-uprof-static-api-load-fixture.rs"
+test = false
+
+[[bin]]
+name = "amd-uprof-dynamic-api-load-fixture"
+path = "src/bin/amd-uprof-dynamic-api-load-fixture.rs"
+test = false
