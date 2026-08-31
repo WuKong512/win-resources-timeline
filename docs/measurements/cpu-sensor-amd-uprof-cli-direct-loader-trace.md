@@ -359,12 +359,16 @@ No random DLL preloading or permutation test is authorized by this result.
 
 ## ROOT CAUSE REFINEMENT
 
-The direct API blocker remains:
+The inherited direct-load evidence remains the working root-cause record. It
+must not be read as though V6 independently proved the probe's termination
+path:
 
 ```text
-ROOT_CAUSE = DEPENDENCY_LOAD_FAILURE
-SUBCAUSE = CXLBASETOOLS_LOAD_PATH_FATAL_EXIT
+CURRENT_WORKING_ROOT_CAUSE = DEPENDENCY_LOAD_FAILURE
+INHERITED_SUBCAUSE_FROM_PRIOR_DIRECT_LOAD_EVIDENCE = CXLBASETOOLS_LOAD_PATH_FATAL_EXIT
 EXACT_CXL_INTERNAL_CONDITION = UNPROVEN
+V6_TRACE_RESULT = DEBUGGER_PERTURBED_SUCCESS_PATH
+V6_PROBE_TERMINATION_PATH = UNPROVEN
 ```
 
 For this instrumented comparison, the primary trace classification is:
