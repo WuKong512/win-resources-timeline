@@ -1,13 +1,18 @@
 # CPU-SENSOR-AMD PUBLIC-API STATIC VS DYNAMIC MINIMAL A/B
 
-This record covers preparation and static qualification of a minimal
-public-API static-versus-dynamic loader experiment. The runtime A/B has not
-been run. No AMD executable, AMD sample, `metric-probe`, CDB, profiling, or
-sampling command was launched while preparing this record.
+This record covers preparation and controlled runtime handoff for a minimal
+public-API static-versus-dynamic loader experiment. The first A1 target was
+actually launched, but the wrapper failed while serializing its negative exit
+code before persisting evidence. The historical attempt remains
+unclassifiable; B1 was not launched. The repaired wrapper is now waiting for
+one clean A1 repair rerun. No B1, profiling, sampling, CDB, or AMD API call is
+authorized by this record.
 
 ```text
-RESULT = ADMIN_MINIMAL_AB_REQUIRED
-RUNTIME_EXPERIMENT = NOT_RUN
+RESULT = A1_REQUALIFICATION_REQUIRED
+INITIAL_A1_RESULT = EXECUTED_BUT_UNCLASSIFIABLE_DUE_TO_HARNESS_PERSISTENCE_FAILURE
+A1_R1 = REQUIRED
+B1_EXECUTED = FALSE
 STATIC_IMPORT_RETENTION = CONFIRMED
 STATIC_FIXTURE_DIRECT_IMPORT_AMDPOWERPROFILEAPI = TRUE
 STATIC_FIXTURE_DIRECT_IMPORT_CXLBASETOOLS = FALSE
@@ -155,7 +160,7 @@ The vendor API DLL used by both controls is:
 
 ```text
 Path = D:\apps\AMDuProf\bin\AMDPowerProfileAPI.dll
-SHA-256 = 9634020BCAF3F2E639E0EEA2D64433E3F369A80A1FC54B9220CA732F830A427
+SHA-256 = 9634020BCAF3F2E639E0EEA2D64433E3F369A80A1FC54B9220CA732F830A4277
 Architecture = x64 (PE machine 0x8664)
 Authenticode = Valid, AMD signer
 Signature required = yes
@@ -205,9 +210,11 @@ The wrapper does not mutate PATH or current directory globally. It captures
 raw stdout/stderr, timestamps, signed/hex target exit status, timeout, PID,
 and owned-process-tree cleanup fields. It does not parse loader internals.
 
-The dynamic control is gated on A1. If A1 does not reach `main` and exit 0,
-the wrapper writes `STATIC_CONTROL_INVALID` and does not run B1. There is no
-retry or sampling expansion.
+The repaired wrapper supports an explicit `-A1Only` handoff for the current
+repair rerun and an explicit `-RunB1` mode for a later, separately authorized
+full A/B. The dynamic control remains gated on A1. If A1 does not reach
+`main` and exit 0, the wrapper writes `STATIC_CONTROL_INVALID` and does not
+run B1. There is no automatic retry or sampling expansion.
 
 ## CLASSIFICATION CONTRACT
 
@@ -239,6 +246,126 @@ CASE D:
 No result from this A/B would by itself approve a production provider or
 prove a specific private CXL condition.
 
+## INITIAL A1 ATTEMPT AND EVIDENCE CONSUMPTION
+
+The first real A1 invocation is preserved as:
+
+```text
+A1_ID = A1-INITIAL-20260901T021841634Z
+EVIDENCE_ROOT = C:\Users\Hello\AppData\Local\Temp\resource-timeline-amd-public-api-ab-20260901T021841634Z
+STATUS = EXECUTED_BUT_UNCLASSIFIABLE_DUE_TO_HARNESS_PERSISTENCE_FAILURE
+A1_EXECUTED = TRUE
+A1_TARGET_EXIT_SIGNED_OBSERVED = -1
+A1_TARGET_EXIT_HEX_EXPECTED = 0xFFFFFFFF
+A1_STDOUT_PERSISTED = FALSE
+A1_STDERR_PERSISTED = FALSE
+A1_RESULT_JSON_PERSISTED = FALSE
+A1_MAIN_REACHED = UNPROVEN
+STATIC_CONTROL_VALIDITY = INCONCLUSIVE
+B1_EXECUTED = FALSE
+```
+
+The evidence directory contains the Administrator proof and artifact
+preflight, but no A1 stdout, stderr, result JSON, or summary. The wrapper's
+execution order proves that `Process.Start()` occurred, `WaitForExit()`
+completed, and the signed target exit code was read as `-1`. The old wrapper
+then attempted `[uint32]$targetExitSigned` while formatting the hexadecimal
+exit code. PowerShell threw before stdout/stderr and result persistence. The
+missing streams therefore do not prove that `main` was or was not reached.
+
+B1 was not executed because the wrapper failed during A1 handling. This is a
+wrapper persistence failure, not a `STATIC_CONTROL_INVALID` classification.
+
+## HARNESS REPAIR
+
+The two pre-existing intentional fixes are retained:
+
+- `AMDPowerProfileAPI.dll` expected SHA metadata is corrected to
+  `9634020BCAF3F2E639E0EEA2D64433E3F369A80A1FC54B9220CA732F830A4277`.
+  The earlier truncated value ending in `A427` is classified as
+  `API_SHA_PREFLIGHT_BUG = EXPECTED_HASH_METADATA_TYPO`; it is not vendor
+  artifact drift. Historical evidence is not rewritten.
+- `Invoke-CapturedProcess.Arguments` accepts `@()` through
+  `[AllowEmptyCollection()]`.
+
+The wrapper now uses `Convert-ExitCodeToHex`, which preserves the signed 32-bit
+bit pattern through `BitConverter`:
+
+```text
+0  -> 0x00000000
+1  -> 0x00000001
+-1 -> 0xFFFFFFFF
+```
+
+Raw stdout and stderr are captured and persisted independently of exit-code
+formatting. A negative target exit is represented as
+`target_process_status = TARGET_PROCESS_FAILED`, not as a harness exception.
+The process object is disposed in `finally`; timeout tree-kill fields remain
+separate from target failure fields. The result JSON records persistence flags,
+`capture_complete`, target status, harness status, and `result_path`.
+
+The wrapper now requires an explicit runtime mode. `-SyntheticTest` is a
+non-AMD regression mode, `-A1Only` is the current repair rerun, and `-RunB1`
+is reserved for a later explicit full A/B authorization. No default mode can
+silently launch B1.
+
+## NON-AMD SYNTHETIC REGRESSION
+
+The repaired wrapper was executed only in `-SyntheticTest` mode. It launched
+the current PowerShell host for synthetic child processes and `whoami.exe` for
+the empty-argument check; no AMD artifact was loaded and no AMD executable,
+profiling, CDB, or sampling command was run.
+
+```text
+RESULT = SYNTHETIC_REGRESSION_PASS
+AMD_RUNTIME_EXECUTED = FALSE
+NEGATIVE_EXIT = -1 / 0xFFFFFFFF
+NEGATIVE_CAPTURE_COMPLETE = TRUE
+NEGATIVE_STDOUT_PERSISTED = TRUE
+NEGATIVE_STDERR_PERSISTED = TRUE
+ZERO_EXIT = 0 / 0x00000000
+ZERO_CAPTURE_COMPLETE = TRUE
+ZERO_STDERR_BYTES = 0
+EMPTY_ARGUMENTS_EXIT = 0
+EMPTY_ARGUMENTS_CAPTURE_COMPLETE = TRUE
+RESULT_JSON_PERSISTED = TRUE
+TIMEOUT = FALSE
+KILL_TREE = FALSE
+```
+
+The negative fixture persisted both known stdout/stderr markers and its result
+JSON. The zero-exit fixture persisted a non-empty stdout marker and a
+zero-length stderr file, proving that an empty string is a valid captured
+stream. The `whoami.exe` invocation used `Arguments = @()` and completed with
+exit 0, retaining coverage for the empty-array binding fix.
+
+## A1-R1 REPAIR RERUN
+
+Because the first A1 target did execute but its decisive streams were lost,
+A1-R1 is an authorized repair rerun rather than a duplicate qualification. It
+must use the same static fixture/API artifact identities, manually elevated
+x64 PowerShell, AMD-bin CWD, inherited environment, no debugger, no API calls,
+no sampling, and the 20-second wrapper timeout. Only A1 is permitted in this
+step; B1 must not be added.
+
+Required A1-R1 evidence is `STATIC_FIXTURE_MAIN_REACHED=true` or `false`,
+signed and hexadecimal target exit, timeout, stdout/stderr paths, persistence
+flags, and result JSON. The classification gate is:
+
+```text
+main marker = TRUE, exit = 0, timeout = FALSE
+  -> STATIC_CONTROL_REQUALIFIED = PASS
+
+complete capture, exit = -1 / 0xFFFFFFFF, no main marker
+  -> STATIC_CONTROL_INVALID = CONFIRMED
+     STATIC_PUBLIC_API_CHAIN_ABORTS_BEFORE_MAIN = SUPPORTED
+
+main marker = TRUE, nonzero exit
+  -> STATIC_MAIN_REACHED_BUT_TARGET_FAILED
+```
+
+No A1-R1 runtime evidence exists yet.
+
 ## SECONDARY VENDOR CONTROL
 
 The previously audited `D:\apps\AMDuProf\bin\AMDuProf.exe` remains a
@@ -249,25 +376,25 @@ run automatically if the primary A/B is ambiguous.
 
 ## USER AUTHORIZATION BOUNDARY
 
-Preparation and static qualification were performed without AMD runtime
+Preparation and the synthetic regression were performed without AMD runtime
 execution. The next runtime step requires the user to manually open an
 Administrator PowerShell. Codex must not invoke UAC, use `runas`, create an
 elevated helper, or execute the wrapper on the user's behalf.
 
-The exact manual wrapper is:
+The exact manual A1-R1 wrapper is:
 
 ```powershell
 $ErrorActionPreference = 'Stop'
 $repoRoot = 'F:\File\codex\codex-worktrees\08bd\resource-timeline'
 Set-Location -LiteralPath $repoRoot
-& "$repoRoot\tools\amd-uprof-public-api-ab\run-admin-minimal-ab.ps1"
+& "$repoRoot\tools\amd-uprof-public-api-ab\run-admin-minimal-ab.ps1" -A1Only
 ```
 
 The script first proves the Administrator token and x64 PowerShell, verifies
 the exact fixture/API hashes (repository fixture signatures are recorded but
-not required; the AMD DLL signature is required), runs A1 once, gates B1 on
-A1 success, and writes the evidence root. It does not run profiling,
-sampling, initialize any AMD API, or modify system state.
+not required; the AMD DLL signature is required), runs exactly A1, and writes
+the evidence root. It does not run B1, profiling, sampling, initialize any AMD
+API, or modify system state.
 
 ## VALIDATION
 
@@ -277,9 +404,12 @@ sampling, initialize any AMD API, or modify system state.
 - Static PE import assertion: PASS — static direct API `true`, static direct
   CXL `false`, dynamic direct API `false`, dynamic direct CXL `false`; both
   x64.
-- Administrator wrapper PowerShell parse: PASS; it was not invoked.
-- No AMD runtime command, CDB, profiling, sampling, or user workload was
-  run.
+- Administrator wrapper PowerShell parse: PASS.
+- Non-AMD synthetic regression: PASS, including signed exit `-1`, signed exit
+  `0`, stdout/stderr persistence, empty stderr, result JSON, and `Arguments =
+  @()`.
+- No A1-R1, B1, AMD runtime command, CDB, profiling, sampling, or user
+  workload was run after the repair.
 - No production provider/catalog/schema/UI code changed.
 
 ## DELIVERY
@@ -289,12 +419,13 @@ sampling, initialize any AMD API, or modify system state.
 - Added this design/evidence record.
 - Execution plan records the runtime handoff as pending; it does not mark the
   A/B completed.
-- Runtime evidence: not yet available.
+- First A1 runtime evidence: preserved but unclassifiable as documented above.
+- A1-R1 runtime evidence: not yet available; manual handoff is ready.
 - System mutations: none.
 
 ## NEXT STEP
 
-`ADMIN_MINIMAL_AB_COMMANDS_READY`: the user may run the exact wrapper once
-from a manually elevated PowerShell. After the evidence is returned, consume
-the raw A1/B1 records and classify the public API chain. Do not start
+`A1_R1_COMMANDS_READY`: the user may run the exact `-A1Only` wrapper once
+from a manually elevated PowerShell. After the clean A1-R1 evidence is
+returned, consume it before authorizing any B1 run. Do not start
 `CPU-SENSOR-AMD-PROVIDER-DESIGN`.
