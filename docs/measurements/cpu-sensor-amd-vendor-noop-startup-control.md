@@ -7,8 +7,9 @@ a bounded startup window. It does not explain the vendor behavior and does
 not authorize `CPU-SENSOR-AMD-PROVIDER-DESIGN`.
 
 ```text
-RESULT = ADMIN_VENDOR_STARTUP_CONTROL_REQUIRED
-RUNTIME_EXECUTION = NOT_PERFORMED
+RESULT = PASS
+PREPARATION_RESULT = ADMIN_VENDOR_STARTUP_CONTROL_REQUIRED
+RUNTIME_EXECUTION = COMPLETED
 PROFILING = NOT_PERFORMED
 ```
 
@@ -185,6 +186,82 @@ PowerShell parser validation passed before and during the synthetic run. The
 synthetic survivor never used a timeout watchdog; its exact-PID force cleanup
 was an explicit test-only option, not the production/vendor command path.
 
+## RUNTIME EVIDENCE CLOSURE
+
+The manual Administrator run is preserved at:
+
+```text
+EVIDENCE_ROOT = C:\Users\Hello\AppData\Local\Temp\resource-timeline-amd-vendor-noop-20260901T064515209Z
+QUALIFICATION_SNAPSHOT = VENDOR-NOOP-STARTUP.qualification-before-cleanup.json
+```
+
+The qualification snapshot was written before cleanup and is the authoritative
+startup result. Its exact recorded facts are:
+
+```text
+RESULT = PASS
+VENDOR_STARTUP_CONTROL = PASS
+PROCESS_STARTED = true
+TARGET_PID = 41460
+TARGET = D:\apps\AMDuProf\bin\AMDuProf.exe
+ARGUMENTS = none
+WORKING_DIRECTORY = D:\apps\AMDuProf\bin
+OBSERVATION_WINDOW_MS = 3000
+OBSERVATION_ELAPSED_MS = 3048.247
+ROOT_ALIVE_AT_DEADLINE = true
+WAIT_FOR_EXIT_RETURNED = false
+TIMEOUT = false
+TARGET_PROCESS_FAILED = false
+HARNESS_FAILED = false
+QUALIFICATION_BEFORE_CLEANUP = VALID
+```
+
+The target artifact preflight matched the expected x64 AMD-signed binary:
+
+```text
+TARGET_SHA256 = 8F1195F9900CFF6A5E18AA33127C83DF74622CA7BB68C0C532C3776F6FFD762
+FILE_VERSION = 5.3.521.0
+AUTHENTICODE = Valid
+SIGNER = Advanced Micro Devices
+```
+
+The one-level child snapshot observed `AMDProfilerService.exe` (PID 44488)
+under the launched PID, with command line
+`--bypass-auth --cleanup --parent-pid 41460`; the child was alive at the
+observation deadline. This establishes `VENDOR_SERVICE_BOOTSTRAP_OBSERVED =
+CONFIRMED`, but does not establish that the service caused CXL survival.
+The vendor log also records UI/runtime bootstrap milestones, writable AMD temp
+path discovery, OpenGL initialization, REST-client creation/connection, and
+logging-session closure. Therefore:
+
+```text
+VENDOR_EXECUTABLE_SURVIVAL_DIVERGENCE = CONFIRMED
+VENDOR_EXECUTABLE_SPECIFIC_CONTEXT = RUNTIME_SUPPORTED
+VENDOR_APPLICATION_BOOTSTRAP_REACHED = CONFIRMED
+VENDOR_SERVICE_BOOTSTRAP_OBSERVED = CONFIRMED
+EXACT_VENDOR_EXECUTABLE_REQUIREMENT = UNPROVEN
+STARTUP_CONTEXT_CAUSALITY = UNPROVEN
+```
+
+The final after-cleanup record reports that graceful close was attempted and
+returned, but did not succeed; force cleanup was not attempted and the target
+was still alive when cleanup bookkeeping completed. No later exit is inferred:
+
+```text
+CLEANUP_RESULT = VENDOR_PROCESS_REMAINED_ALIVE
+GRACEFUL_CLOSE_ATTEMPTED = true
+GRACEFUL_CLOSE_SUCCEEDED = false
+FORCE_CLEANUP_ATTEMPTED = false
+TARGET_ALIVE_AFTER_CLEANUP = true
+```
+
+This is compared only with the preserved M1 evidence (`~45.6 ms`, signed
+`-1 / 0xFFFFFFFF`, capture complete, zero-byte stdout). The comparison confirms
+native startup-survival divergence, not its cause. In particular, the prior
+M1 record retains `MAIN_MARKER_RELIABILITY = BUFFERING_AMBIGUITY` and
+`STATIC_FAILURE_STAGE = PRE_MAIN_OR_PROCESS_SHUTDOWN`; it does not prove that
+M1 failed before `main`.
+
 ## AUTHORIZATION BOUNDARY
 
 Codex did not launch `AMDuProf.exe`, `AMDuProfCLI.exe`, AMD samples, or any
@@ -214,8 +291,12 @@ rerun solely to repair formatting; preserve the first runtime evidence root.
 ## CURRENT DELIVERY STATE
 
 ```text
-VENDOR_STARTUP_CONTROL = NOT_RUN
-ADMIN_VENDOR_STARTUP_CONTROL = REQUIRED
+VENDOR_STARTUP_CONTROL = PASS
+VENDOR_EXECUTABLE_SURVIVAL_DIVERGENCE = CONFIRMED
+VENDOR_APPLICATION_BOOTSTRAP_REACHED = CONFIRMED
+VENDOR_SERVICE_BOOTSTRAP_OBSERVED = CONFIRMED
+EXACT_VENDOR_EXECUTABLE_REQUIREMENT = UNPROVEN
+STARTUP_CONTEXT_CAUSALITY = UNPROVEN
 PROFILING = false
 SAMPLING = false
 SYSTEM_MUTATIONS = false
@@ -227,7 +308,8 @@ UI = unchanged
 
 ## NEXT STEP
 
-After the user supplies the one runtime evidence root, consume its raw JSON
-and classify only the vendor startup survival result against M1. Do not
-automatically run a second vendor executable, B1, profiling, sampling,
-debugger tracing, or provider design.
+Prepare and manually authorize the separate
+`CPU-SENSOR-AMD-STATIC-FIXTURE-LIFETIME-SHUTDOWN-DISCRIMINATOR`. It must use a
+new hold fixture and distinguish pre-main startup failure from process-shutdown
+or detach failure. Do not rerun M1, run B1, start profiling/sampling, or begin
+provider design as part of this record.
