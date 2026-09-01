@@ -17,7 +17,7 @@ PRODUCTION_INTEGRATION = false
 ```text
 REPOSITORY = WuKong512/win-resources-timeline
 BRANCH = spike/cpu-sensor-amd-uprof-live-qualification
-START_HEAD = 4c03a31956797d82c5f1e8f34d635cd564387799
+START_HEAD = b9045d304bf36adc988fda6a839b7385d020ee13
 ORIGIN_MAIN = 0c470c48b4e60bd94dfe720ec8981f919db8b1c1
 WORKING_TREE_AT_ENTRY = CLEAN
 ENTRY_GATE = PASS
@@ -119,6 +119,45 @@ implementation reached by `quick_exit` is outside this DLL's import/call
 graph, so a subsequent CRT-to-`FatalExit` edge cannot be proven statically
 from this artifact.
 
+## INDIRECT STATUS SLOT RESOLUTION
+
+The two predecessor calls use `RVA 0x12378`. This address is not an opaque
+vendor-global function pointer: it is an import-address-table slot.
+
+```text
+INDIRECT_STATUS_SLOT_RVA = 0x12378
+INDIRECT_STATUS_SLOT_SECTION = .rdata
+SECTION_CHARACTERISTICS = 0x40000040 (Initialized Data, Read Only)
+FILE_OFFSET = 0x11578
+INDIRECT_STATUS_SLOT_KIND = IAT
+INDIRECT_STATUS_IMPORTED_DLL = api-ms-win-crt-string-l1-1-0.dll
+INDIRECT_STATUS_IMPORTED_SYMBOL = _wcsicmp
+IMPORT_DIRECTORY_OVERLAP = false
+IAT_DIRECTORY_OVERLAP = true (RVA 0x12000, size 0x3A8)
+BASE_RELOCATION_AT_RVA_0x12378 = not observed
+RELOCATION_STATUS = no base-relocation entry observed for this IAT slot
+```
+
+Two independent static checks support this resolution. `dumpbin /imports`
+reports the string-runtime IAT at `RVA 0x12318` with the ordered imports
+including `_wcsicmp` at zero-based slot 12; `0x12318 + 12 * 8 = 0x12378`.
+The raw slot bytes at file offset `0x11578` are `58 C5 01 00 00 00 00 00`,
+which is the on-disk import-name RVA `0x1C558`; the corresponding
+`IMAGE_IMPORT_BY_NAME` bytes contain the `_wcsicmp` name. The loader resolves
+that slot to the CRT string function at runtime.
+
+The independent disassembly/raw-reference check found exactly two code reads,
+both indirect calls, at `RVA 0x1A5A` and `RVA 0x1A6F`. No code writer to this
+IAT slot or static initializer writer was observed in the image; its value is
+initialized by normal PE import resolution.
+
+```text
+READ_XREFS = 2
+CALL_XREFS = 2
+WRITE_XREFS = 0 observed in image code
+INITIALIZER_XREFS = loader-resolved IAT, not an in-image value initializer
+```
+
 ## STATICAL IDENTIFIABLE TERMINATION CANDIDATES
 
 The two real code callsites are CRT `quick_exit` callsites, not direct
@@ -169,18 +208,40 @@ sequence is:
 0x19D9  use "bin"
 0x1A0E  use "\\AMDPerf"
 0x1A45  call imported MultiByteToWideChar
-0x1A5A  indirect call through [0x180012378], test EAX
-0x1A6F  same indirect call, test EAX
+0x1A5A  _wcsicmp(RCX=RBX, RDX=R14), test EAX
+0x1A6F  _wcsicmp(RCX=[rsp+38], RDX=R14), test EAX
 0x1A79  [0x1D942] = 0 only if both tests are nonzero
 0x1A80  ECX = EDI
 0x1A82  quick_exit(0xFFFFFFFF)
 ```
 
-If either of the two indirect calls returns zero, control branches to
+Both calls are to the imported `api-ms-win-crt-string-l1-1-0.dll!_wcsicmp`.
+The first uses the string data held by the path object at `[rsp+30]` after the
+`bin` operation. After that call, `RBX` is reloaded from `[rsp+38]`; the
+second path object has been copied and extended with the `\\AMDPerf` literal.
+`R14` is the wide-character output buffer populated by the preceding
+`MultiByteToWideChar` call from the module-directory buffer. If either
+comparison returns zero (case-insensitive equality), control branches to
 `0x1A89`, sets `[0x1D942] = 1`, and follows the normal return/cleanup path.
-The indirect target at `[0x180012378]` is not a PE import resolved by this
-audit; its semantic identity is unknown. Thus the static evidence identifies
-the boolean gate but not what the vendor routine checks.
+Only when both `_wcsicmp` results are nonzero does the code clear
+`[0x1D942]` and reach QE-1. The exact private string-object ownership and
+separator normalization are not symbolized, but the operands, comparison
+polarity, and literals are directly visible.
+
+```text
+QE1_CHECK_1:
+  target = api-ms-win-crt-string-l1-1-0.dll!_wcsicmp
+  arguments = RCX=RBX ([rsp+30] path after "bin"), RDX=R14 (module-directory buffer)
+  return = EAX (signed comparison result)
+  comparison = TEST EAX,EAX; JE 0x1A89
+  fatal polarity = nonzero mismatch permits check 2; zero equality is normal
+QE1_CHECK_2:
+  target = api-ms-win-crt-string-l1-1-0.dll!_wcsicmp
+  arguments = RCX=[rsp+38] (copied path after "\\AMDPerf"), RDX=R14
+  return = EAX (signed comparison result)
+  comparison = TEST EAX,EAX; JE 0x1A89
+  fatal polarity = nonzero mismatch reaches QE-1; zero equality is normal
+```
 
 ### QE-2: RVA 0x1B64
 
@@ -196,6 +257,78 @@ The second candidate is a state fallback in the same runtime function:
 QE-2 is reached from the earlier `[0x1D941] != 0` path when the second state
 byte is still zero. It is not independently attributable to a particular
 file, registry value, or process property from static evidence.
+
+## MODULE AND PROCESS PATH OPERAND
+
+The module-path helper at `RVA 0x1670` does not ask for the CXL module. At
+`RVA 0x16B1` it clears `ECX` and calls the KERNEL32 IAT slot resolved as
+`GetModuleHandleW`; this is `GetModuleHandleW(NULL)`, whose documented target
+is the calling process executable. At `RVA 0x16C7` it moves that return value
+into `RCX` for `GetModuleFileNameW` at `RVA 0x16CA`.
+
+```text
+GETMODULEHANDLE_TARGET = NULL_CURRENT_EXE
+GETMODULEHANDLE_ARGUMENT = RCX = 0
+GETMODULEFILENAME_HMODULE = return value of GetModuleHandleW(NULL)
+MODULE_FILENAME_SOURCE = PROCESS_EXE_PATH
+```
+
+The bounded transformation is visible in the same helper:
+
+```text
+wide_module_path[0x104] = zeroed buffer
+GetModuleFileNameW(GetModuleHandleW(NULL), wide_module_path, 0x104)
+wcstombs(multibyte_buffer[0x105], wide_module_path, 0x105)
+scan multibyte_buffer for the last '\\'
+copy the prefix before that separator to the caller's output
+write a NUL at the separator position
+```
+
+Thus the resulting operand is the directory of the process executable, not
+`CXLBaseTools.dll`'s own path. No parent-directory traversal or
+`GetCurrentDirectoryW` call is visible in this bounded helper. The conversion
+and last-separator scan are visible; the private string-object ownership is
+not symbolized.
+
+## REGISTRY OPERAND
+
+The helper at `RVA 0x1780` uses:
+
+```text
+REGISTRY_API_OPEN = ADVAPI32!RegOpenKeyW at RVA 0x17CC
+REGISTRY_API_QUERY = ADVAPI32!RegQueryValueExW at RVA 0x17FC
+REGISTRY_HIVE = HKLM (RCX = 0xFFFFFFFF80000002)
+REGISTRY_KEY = SOFTWARE\WOW6432Node\AMD\AMDProfiler
+REGISTRY_VALUE = InstallationPath
+REGISTRY_ACCESS_FLAGS = none explicit (RegOpenKeyW, default read access)
+WOW64_SELECTION = literal WOW6432Node in the key; no KEY_WOW64_* flag observed
+REGISTRY_BUFFER = 0x800-byte data buffer; lpType is NULL; size returned separately
+```
+
+The read-only machine query was performed twice, with PowerShell registry
+access and `reg.exe query`, without modification:
+
+```text
+REGISTRY_VALUE_PRESENT = true
+REGISTRY_INSTALLATION_PATH = D:\apps\AMDuProf\
+ACTUAL_AMD_INSTALL_ROOT = D:\apps\AMDuProf
+REGISTRY_INSTALL_ROOT_MATCH = MATCH (case-insensitive, trailing separator normalized)
+REGISTRY_INSTALL_ROOT_EXISTS = true
+REGISTRY_VALUE_TYPE = REG_SZ (observed by reg.exe; the DLL does not request lpType)
+```
+
+The relevant read-only filesystem checks were:
+
+| Derived/candidate path | Exists |
+|---|---|
+| `D:\apps\AMDuProf` | yes |
+| `D:\apps\AMDuProf\bin` (`InstallationPath` + `bin`) | yes |
+| `D:\apps\AMDuProf\bin\AMDPerf` (the preceding path + `\AMDPerf`) | yes |
+| hold fixture executable directory (the `GetModuleFileNameW` directory operand) | yes |
+| `D:\apps\AMDuProf\AMDPerf` | no; not the observed append order |
+
+The registry root therefore does not currently show a stale/mismatched install
+root. This does not prove that every vendor bootstrap state is valid.
 
 ## LOCAL DATA AND API SOURCES
 
@@ -217,44 +350,43 @@ The immediately reachable path/registry helper at `RVA 0x1780` calls:
 0x17FC -> ADVAPI32!RegQueryValueExW
 ```
 
-The module-path helper at `RVA 0x1670`, called before QE-1, calls:
-
-```text
-0x16B3 -> KERNEL32!GetModuleHandleW(NULL)
-0x16CA -> KERNEL32!GetModuleFileNameW(...)
-```
-
 The bounded fatal predecessor also calls `KERNEL32!MultiByteToWideChar` at
-`RVA 0x1A45` before the two unknown indirect checks. These calls prove that
-module-path, registry/install-root, and string/encoding state are touched on
-the path leading to the candidate block. They do not prove which returned
-value makes either indirect check nonzero.
+`RVA 0x1A45` before the two `_wcsicmp` checks. The exact arguments are
+`RCX=0`, `RDX=0`, `R8=&[rsp+60]` (the multibyte module-directory buffer),
+`R9=0xFFFFFFFF`, `stack+0x20=R14` (the wide output buffer), and
+`stack+0x28=0x104` (capacity). The return value is not used as the
+`_wcsicmp` result; `R14` is subsequently passed as the right-hand comparison
+operand.
 
 ### DATA-SOURCE CLASSIFICATION
 
 ```text
-PROCESS_IMAGE_OR_PATH = SUPPORTED_AS_REACHABLE_INPUT_SURFACE,
-  exact fatal comparison unproven
-MODULE_PATH = SUPPORTED_AS_REACHABLE_INPUT_SURFACE,
-  GetModuleHandleW/GetModuleFileNameW are in the called helper
+PROCESS_IMAGE_OR_PATH = RESOLVED_AS_PROCESS_EXE_PATH_DIRECTORY
+MODULE_PATH = RESOLVED_AS_PROCESS_EXE_PATH_DIRECTORY,
+  GetModuleHandleW(NULL) -> GetModuleFileNameW(hExe, ...)
 CURRENT_DIRECTORY = NO_DIRECT_SUPPORT_IN_BOUNDED_PATH
 ENVIRONMENT = NO_DIRECT_SUPPORT_OBSERVED
 REGISTRY = SUPPORTED_AS_REACHABLE_INPUT_SURFACE,
-  RegOpenKeyW/RegQueryValueExW precede the candidate block
+  RegOpenKeyW/RegQueryValueExW precede the candidate block; actual root matches
 VERSION = NO_DIRECT_SUPPORT_IN_BOUNDED_FATAL_REGION
 INSTALL_ROOT = SUPPORTED_AS_REACHABLE_INPUT_SURFACE,
   InstallationPath + AMDProfiler key + bin/AMDPerf construction
 COMMAND_LINE = NO_DIRECT_SUPPORT_OBSERVED
 SIGNATURE_OR_TRUST = NO_DIRECT_SUPPORT_OBSERVED
 CONFIG_FILE = NO_DIRECT_SUPPORT_OBSERVED
-STRING_TOKENIZATION = PLAUSIBLE, not a proven private semantic identity
+STRING_TOKENIZATION = NOT_REQUIRED_FOR_THE_RESOLVED_QE1_COMPARISONS
 LOADER_STATE = SUPPORTED, via process-attach dispatcher and D941/D942 state
-UNKNOWN = the indirect target at [0x180012378] and CRT quick_exit behavior
+UNKNOWN = private string-object semantics, indirect CRT quick_exit transition,
+  and the earlier state-setting function's broader purpose
 ```
 
 The `SUPPORTED_AS_REACHABLE_INPUT_SURFACE` wording means the API/string is
-on the bounded static path; it does not mean that the path's exact branch
-condition has been reconstructed.
+on the bounded static path. `PROCESS_IMAGE_OR_PATH` is now narrowed because
+the operand is resolved to the process executable's directory; it is not a
+claim that an executable basename comparison was observed. The two QE-1
+comparisons are resolved to this directory versus two registry/install-derived
+path variants; only private helper naming and the downstream CRT transition
+remain opaque.
 
 ## ENTRYPOINT AND PROCESS-ATTACH REACHABILITY
 
@@ -314,41 +446,81 @@ historically observed termination, not to a statically visible direct
 `FatalExit` call. `gtStringTokenizer::getNextToken+0x2f96` is retained only
 as a prior debugger label; it is not accepted as a private function identity.
 
+## QE-1 BOUNDED PSEUDOCODE
+
+The narrowest defensible reconstruction is:
+
+```text
+install_path = Registry[HKLM\SOFTWARE\WOW6432Node\AMD\AMDProfiler]
+               .InstallationPath
+path_bin = internal_path_object_after_registry_assignment(install_path)
+path_bin = append(path_bin, "bin")
+
+exe_path = GetModuleFileNameW(GetModuleHandleW(NULL))
+exe_dir = prefix_before_last_backslash(
+              wcstombs(exe_path)
+          )
+
+path_amdperf = copy(path_bin)
+path_amdperf = append(path_amdperf, "\\AMDPerf")
+
+if (_wcsicmp(path_bin, exe_dir) != 0) {
+    if (_wcsicmp(path_amdperf, exe_dir) != 0) {
+        [0x1D942] = 0
+        quick_exit(0xFFFFFFFF)       // QE-1
+    }
+}
+```
+
+This pseudocode names no private vendor function. The two comparison operands,
+the `TEST EAX,EAX` / `JE 0x1A89` polarity, the registry strings, and the
+process-executable path source are directly supported by the disassembly.
+The exact separator normalization and internal object-copy operations remain
+unresolved. On the observed machine the normalized candidate directories are
+`D:\apps\AMDuProf\bin` and
+`D:\apps\AMDuProf\bin\AMDPerf`; the hold fixture's executable directory
+is the repository release directory, so it matches neither candidate by
+static path comparison.
+
 ## CONTROL-FLOW CONCLUSIONS
 
 ```text
-FATAL_CONDITION_FAMILY = INITIALIZATION_STATE_FAILURE
-  (supported by D941/D942 state gates and status tests)
-PATH_REGISTRY_STRING_PROCESSING = REACHABLE_PREDECESSOR_SURFACE
-  (supported; exact branch dependency unproven)
-EXACT_CXL_INTERNAL_CONDITION = UNPROVEN
+FATAL_CONDITION_FAMILY = MODULE_IDENTITY_FAILURE
+  (process executable directory matches neither install_path\bin nor
+   install_path\bin\AMDPerf)
+EXACT_CXL_INTERNAL_CONDITION = SUPPORTED_VISIBLE_PREDICATE:
+  _wcsicmp(install_path + "bin", process_executable_directory) != 0
+  AND _wcsicmp(install_path + "bin" + "\AMDPerf",
+               process_executable_directory) != 0
+PATH_REGISTRY_STRING_PROCESSING = REACHABLE_AND_OPERAND_RESOLVED
+REGISTRY_INSTALL_ROOT_MISMATCH = NOT_SUPPORTED (observed value matches)
+PROCESS_IMAGE_PATH_EXPERIMENT_RELEVANCE = HIGH
 EXACT_CRT_QUICK_EXIT_TO_KERNEL32_FATAL_EXIT = UNPROVEN
 ```
 
 The static audit cannot say whether QE-1 or QE-2 was the particular source of
 the historical `FatalExit` without runtime evidence that does not alter the
-successful vendor control. It also cannot identify the semantic target of
-the indirect pointer at `[0x180012378]`. No assertion is made that
-`R8/lpvReserved`, the current directory, the process name, signing, or a
-specific registry value directly causes the branch.
+successful vendor control. The formerly unresolved pointer is now resolved to
+`_wcsicmp`, and the visible QE-1 predicate is resolved to two path-equality
+checks. The remaining uncertainty is the private string-object plumbing, the
+runtime branch actually taken, and the CRT transition after `quick_exit`.
 
 ## UPDATED HYPOTHESIS RANKING
 
 Only three primary candidate families remain:
 
-1. **CXL initialization-state failure** — high confidence as the immediate
-   static control-flow family. The function gates on global state and has two
-   explicit `quick_exit(-1)` paths, but the vendor state predicate is unknown.
-2. **Path/registry/string bootstrap prerequisite** — medium confidence as an
-   input family. `GetModuleFileNameW`, the AMDProfiler registry key,
-   `InstallationPath`, `bin`, `\\AMDPerf`, and string conversion are all on
-   the bounded predecessor path; their influence on the final indirect checks
-   is not proven.
-3. **Vendor executable/bootstrap topology** — low-to-medium inherited
-   hypothesis. The native vendor executable survives while the minimal static
-   fixture fails, and earlier import audits show different parent topology, but
-   this static DLL alone does not establish which vendor bootstrap difference
-   changes the state.
+1. **Process executable-directory identity mismatch** — high confidence as the
+   visible QE-1 fatal predicate. The process directory is compared
+   case-insensitively with `InstallationPath\\bin` and then
+   `InstallationPath\\bin\\AMDPerf`; the hold fixture directory matches
+   neither, while the installed vendor `bin` directory matches the first.
+2. **Path/registry/string bootstrap construction** — medium confidence as a
+   residual implementation risk. The registry value is present and matches
+   the known install root, but private string-object copying and separator
+   handling are not symbolized.
+3. **Remaining CXL initialization/CRT state** — low-to-medium confidence as
+   the unresolved residual. QE-2, global state bytes, the exact runtime branch,
+   and the CRT transition remain outside the statically resolved predicate.
 
 The earlier static-vs-dynamic load theory remains low priority: static import
 alone failed in the hold fixture, while the vendor executable has additional
@@ -358,14 +530,14 @@ family.
 ## RECOMMENDED NEXT EXPERIMENT
 
 ```text
-RECOMMENDED_NEXT_EXPERIMENT = NATIVE_PROCESS_IMAGE_PATH_ONLY_CONTROL
-WHY_THIS_ONE = The bounded predecessor demonstrably queries the current
-  module image path before the candidate checks, while prior cwd and child-PATH
-  controls were negative. Use byte-identical diagnostic-fixture content at a
-  second executable path/name, with the same Administrator token, CWD,
-  inherited environment, AMD DLLs, and no debugger; compare only the durable
-  startup marker and exit. This changes one supported process-context surface
-  without changing AMD installation state.
+RECOMMENDED_NEXT_EXPERIMENT = PROCESS_BASENAME_ONLY_CONTROL
+WHY_THIS_ONE = The bounded predecessor demonstrably resolves the process
+  executable path and strips to its directory before the visible comparisons.
+  A byte-identical fixture at a second basename in the same directory would
+  isolate any residual hidden basename dependence without changing the visible
+  directory predicate, registry, AMD installation, token, CWD, environment,
+  or debugger state. This is design-only; do not change both filename and
+  directory in one experiment.
 EXECUTION_STATUS = DESIGN_ONLY / NOT_RUN
 ```
 
@@ -379,8 +551,8 @@ is justified by this audit.
 
 ```text
 1. Which CRT implementation is reached by quick_exit on this installation?
-2. Which target does [0x180012378] resolve to at runtime?
-3. Which value(s) make the two indirect checks in QE-1 return nonzero?
+2. Which exact private string-object operations normalize the two path variants?
+3. What runtime `_wcsicmp` results were returned for the two comparisons?
 4. Whether QE-1 or QE-2 produced the historical FatalExit event.
 5. Which vendor executable/bootstrap state supplies the successful predicate.
 ```
@@ -397,9 +569,12 @@ DUMPBIN_IMPORT_EXPORT_HEADER_CHECK = PASS
 RAW_BYTE_XREF_CROSS_CHECK = PASS
 RVA_FILE_OFFSET_SANITY = PASS
 FATALEXIT_LITERAL_SCAN = PASS (none found)
+INDIRECT_STATUS_SLOT_RESOLUTION = PASS (_wcsicmp)
+REGISTRY_READ_ONLY_CROSS_CHECK = PASS (PowerShell + reg.exe)
+PATH_EXISTENCE_CHECK = PASS
 AMD_RUNTIME_EXECUTED_FOR_THIS_AUDIT = false
 SYSTEM_MUTATIONS = none
-GIT_DIFF_CHECK = pending delivery check
+GIT_DIFF_CHECK = PASS
 ```
 
 No repository source or production code was changed for the analysis. The
@@ -421,7 +596,7 @@ temporary analysis artifact is committed.
 
 ## NEXT STEP
 
-`NATIVE_PROCESS_IMAGE_PATH_ONLY_CONTROL` remains design-only. It must be
+`PROCESS_BASENAME_ONLY_CONTROL` remains design-only. It must be
 separately authorized before execution. Do not start
 `CPU-SENSOR-AMD-PROVIDER-DESIGN`, B1, profiling, sampling, or a broad vendor
 context matrix.
