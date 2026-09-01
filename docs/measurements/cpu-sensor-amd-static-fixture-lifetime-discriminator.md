@@ -1,9 +1,11 @@
 # CPU-SENSOR-AMD STATIC FIXTURE LIFETIME / SHUTDOWN DISCRIMINATOR
 
-This record prepares a new, separately built diagnostic fixture to distinguish
-the two unresolved interpretations of the original minimal static fixture
-failure. It does not rerun the original fixture, run B1, start profiling, or
-begin `CPU-SENSOR-AMD-PROVIDER-DESIGN`.
+This record prepared, and now closes the evidence for, a separately built
+diagnostic fixture intended to distinguish the two unresolved interpretations
+of the original minimal static fixture failure. The fixture was run exactly
+once under the authorized Administrator control documented below. It does not
+rerun the original fixture, run B1, start profiling, or begin
+`CPU-SENSOR-AMD-PROVIDER-DESIGN`.
 
 ## BASELINE
 
@@ -209,7 +211,7 @@ TIMEOUT = true; owned kill-tree cleanup succeeded; no harness failure
 This validates the capture machinery and marker/lifetime model without
 executing the AMD-linked fixture. PowerShell parser validation also passed.
 
-## PRE-RUNTIME STATUS
+## QUALIFICATION STATUS
 
 ```text
 STATIC_FIXTURE_BUILD = PASS
@@ -217,34 +219,88 @@ PE_IMPORT_ASSERTION = PASS
 NO_AMD_API_INVOCATION_FROM_MAIN_AUDIT = PASS
 MARKER_AUDIT = PASS
 SYNTHETIC_HARNESS = PASS
-AMD_RUNTIME_EXPERIMENT = NOT_RUN
+AMD_RUNTIME_EXPERIMENT = COMPLETED_ONCE
 ```
 
-No Administrator execution is authorized by this preparation record. The
-original M1 is not rerun, and B1 is not run.
+The AMD-linked hold fixture was run once using the exact artifact and API
+preflight described below. The original M1 is not rerun, and B1 is not run.
 
-## ADMINISTRATOR COMMANDS READY
+The separate vendor no-op control remains closed as:
 
-After manually opening an elevated x64 PowerShell, run exactly one target
-invocation from the AMD `bin` directory. Replace only the checkout root:
-
-```powershell
-$repoRoot = '<LOCAL_CHECKOUT_ROOT>'
-Set-Location 'D:\apps\AMDuProf\bin'
-& (Join-Path $repoRoot 'tools\amd-uprof-public-api-ab\run-admin-static-api-hold.ps1') `
-    -InstallRoot 'D:\apps\AMDuProf' `
-    -OutputRoot (Join-Path $env:TEMP ('resource-timeline-amd-static-hold-' + (Get-Date).ToUniversalTime().ToString('yyyyMMddTHHmmssfffZ')))
+```text
+VENDOR_STARTUP_CONTROL = PASS
+VENDOR_EXECUTABLE_SURVIVAL_DIVERGENCE = CONFIRMED
+VENDOR_EXECUTABLE_SPECIFIC_CONTEXT = RUNTIME_SUPPORTED
+VENDOR_EXECUTABLE_SPECIFIC_STARTUP_CONTEXT = HIGH_PRIORITY
+VENDOR_APPLICATION_BOOTSTRAP_REACHED = CONFIRMED
+VENDOR_SERVICE_BOOTSTRAP_OBSERVED = CONFIRMED
+EXACT_VENDOR_EXECUTABLE_REQUIREMENT = UNPROVEN
 ```
 
-The command does not elevate itself, modify PATH, alter services/drivers,
-change hypervisor/VBS/HVCI state, or invoke profiling. Do not run the fixture
-from Codex and do not repeat the run solely to repair formatting; preserve the
-first evidence root.
+These facts establish a runtime-supported vendor executable context, not the
+causal role of its process identity, import topology, bootstrap DLLs, runtime,
+manifest, or service.
+
+## ADMINISTRATOR EXECUTION AND EVIDENCE CLOSURE
+
+The one authorized Administrator execution produced:
+
+```text
+EVIDENCE_ROOT = C:\Users\Hello\AppData\Local\Temp\resource-timeline-amd-static-hold-20260901T084518601Z
+QUALIFICATION_RESULT = CAPTURE_COMPLETE_ANALYZE_RAW_EVIDENCE
+FIXTURE = amd-uprof-static-api-hold-fixture.exe
+FIXTURE_SHA256 = B680E7761FC3E64193E7140B57326154A64AB702C62763C7693EA97234DC1676
+PROCESS_STARTED = true
+TARGET_PID = 34120
+STARTED_AT_UTC = 2026-09-01T08:45:18.8653248Z
+FINISHED_AT_UTC = 2026-09-01T08:45:18.9285211Z
+DURATION_MS = 63.1963 (approximately)
+WORKING_DIRECTORY = D:\apps\AMDuProf\bin
+TIMEOUT = false
+TARGET_EXIT_SIGNED = -1
+TARGET_EXIT_HEX = 0xFFFFFFFF
+STDOUT_BYTES = 0
+STDERR_BYTES = 0
+STDOUT_PERSISTED = true
+STDERR_PERSISTED = true
+CAPTURE_COMPLETE = true
+TARGET_PROCESS_FAILED = true
+HARNESS_FAILED = false
+KILL_TREE_ATTEMPTED = false
+AMD_API_CALLED_FROM_FIXTURE_MAIN = false
+PROFILING = false
+SAMPLING = false
+```
+
+Both durable markers were absent from the persisted zero-byte stdout/stderr
+files. Because the fixture's marker path uses checked synchronous `WriteFile`
+and the capture completed, the evidence supports:
+
+```text
+RESULT = STARTUP_FAILURE_SUPPORTED
+M1_FAILURE_FAMILY = STARTUP
+STARTUP_FAILURE_SUPPORTED = CONFIRMED
+DURABLE_MAIN_MARKER_REACHED = false
+STABLE_MAIN_WINDOW_REACHED = false
+BEFORE_RETURN_MARKER_REACHED = false
+STATIC_FAILURE_STAGE = BEFORE_DURABLE_MAIN_MARKER
+SHUTDOWN_OR_DETACH_HYPOTHESIS = DOWNGRADED
+RUST_MAIN_ENTRY_ITSELF = UNPROVEN
+```
+
+The last line is intentional: the fixture reads the retained import pointer
+before attempting the first marker, so the evidence does not prove that Rust
+`main` was never entered. The duration also proves that the 3,000 ms hold was
+not reached.
+
+The command was manual Administrator execution; it did not elevate itself,
+modify PATH, alter services/drivers, change hypervisor/VBS/HVCI state, or
+invoke profiling. The raw evidence root is preserved and is not overwritten.
 
 ## AUTHORIZATION BOUNDARY
 
 ```text
-USER_AUTHORIZATION_REQUIRED = MANUAL_ADMINISTRATOR_RUN_OF_ONE_HOLD_FIXTURE
+USER_AUTHORIZATION_REQUIRED = SATISFIED_FOR_ONE_HOLD_FIXTURE_RUN
 SYSTEM_MUTATIONS_PERFORMED = false
 AMD_INSTALLATION_MUTATIONS = none
 HYPER_V_VBS_HVCI_MUTATIONS = none
@@ -256,7 +312,18 @@ UI = unchanged
 
 ## NEXT STEP
 
-`ADMIN_STATIC_LIFETIME_DISCRIMINATOR_REQUIRED`. Consume the one resulting raw
-evidence set and classify `M1_FAILURE_FAMILY` as `STARTUP`, `STABLE_MAIN`,
-`SHUTDOWN_OR_DETACH`, `NO_FAILURE`, or `INCONCLUSIVE`. Do not run B1, extend
-into profiling/sampling, or start provider design before that classification.
+`CPU-SENSOR-AMD-CXL-FATALEXIT-STATIC-AUDIT` consumes the closed startup result
+and examines only the exact installed `CXLBaseTools.dll` PE/import/control-flow
+data. It must not load the DLL. Do not run B1, extend into profiling/sampling,
+or start provider design before the vendor termination path is understood.
+
+## STATIC HOLD EVIDENCE CLOSURE
+
+The hold run is not a shutdown discriminator success: neither the durable
+entry marker nor the before-return marker was reached. Accordingly, it closes
+the startup-vs-shutdown ambiguity in favor of the supported boundary
+`BEFORE_DURABLE_MAIN_MARKER`, while preserving the narrower limitation that
+the pre-marker retained-pointer read occurs before the marker.
+
+The corresponding static CXL control-flow audit is recorded in
+[`cpu-sensor-amd-cxl-fatalexit-static-audit.md`](cpu-sensor-amd-cxl-fatalexit-static-audit.md).
