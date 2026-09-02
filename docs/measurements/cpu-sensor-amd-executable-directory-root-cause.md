@@ -140,7 +140,7 @@ CRT-to-Kernel32 transition remains unproven statically.
 ~~~text
 FATAL_CONDITION_FAMILY = MODULE_IDENTITY_FAILURE
 ROOT_CAUSE = CXL_PROCESS_EXECUTABLE_DIRECTORY_POLICY_MISMATCH
-ROOT_CAUSE_CONFIDENCE = HIGH
+ROOT_CAUSE_CONFIDENCE = CONFIRMED_BY_STATIC_AND_RUNTIME_COUNTERFACTUAL
 CRT_TO_KERNEL32_FATAL_EXIT_TRANSITION = UNPROVEN_STATICALLY_BUT_STRONGLY_RUNTIME_CORRELATED
 ~~~
 
@@ -148,17 +148,20 @@ CRT_TO_KERNEL32_FATAL_EXIT_TRANSITION = UNPROVEN_STATICALLY_BUT_STRONGLY_RUNTIME
 
 The M1 directory differs from both visible allowed directories, while the
 surviving vendor executable directory equals the first allowed directory.
-Together with the accepted M1 startup failure and vendor survival evidence,
-this explains the observed divergence in substantial part. It does not prove
-that the directory predicate is the only vendor bootstrap requirement, nor
-that all processes placed in an allowed directory will survive.
+The subsequent byte-identical directory counterfactual moved only the hold
+fixture's executable directory to the first allowed directory and changed the
+outcome from an early `0xFFFFFFFF` termination to two durable main markers and
+normal exit. This closes the recovered directory predicate as the causal
+explanation for this incident. It does not prove that every other vendor build
+or unrelated CXL policy has the same behavior.
 
 ~~~text
-STATIC_VS_DYNAMIC_LOAD_HYPOTHESIS = DEPRIORITIZED
-VENDOR_EXECUTABLE_SPECIFIC_CONTEXT = EXPLAINED_IN_SUBSTANTIAL_PART_BY_EXECUTABLE_DIRECTORY
-VENDOR_IMPORT_TOPOLOGY_HYPOTHESIS = DOWNGRADED_AS_PRIMARY_CAUSE
+STATIC_VS_DYNAMIC_LOAD_HYPOTHESIS = CLOSED_AS_PRIMARY_CAUSE
+VENDOR_EXECUTABLE_SPECIFIC_CONTEXT = REFINED_TO_EXECUTABLE_DIRECTORY_POLICY
+VENDOR_IMPORT_TOPOLOGY_HYPOTHESIS = CLOSED_AS_PRIMARY_CAUSE
 PROCESS_IDENTITY_HYPOTHESIS = REFINED_TO_PROCESS_EXECUTABLE_DIRECTORY_POLICY
-SIGNATURE_HYPOTHESIS = NO_SUPPORT
+SIGNATURE_HYPOTHESIS = CLOSED_NO_SUPPORT
+SHUTDOWN_OR_DETACH_HYPOTHESIS = CLOSED_AS_PRIMARY_CAUSE
 ~~~
 
 ## BASENAME HYPOTHESIS
@@ -173,18 +176,24 @@ PROCESS_BASENAME_ONLY_CONTROL = CANCELLED_NO_DISCRIMINATING_POWER
 
 No basename experiment was run.
 
-## OPTIONAL DIRECTORY-ONLY CONFIRMATION
+## DIRECTORY-ONLY RUNTIME CONFIRMATION
 
-A future byte-identical hold-fixture run from an allowed CXL directory could
-provide runtime confirmation, but it would require placing a diagnostic file
-under the AMD installation tree. That is a separate deliberate mutation and
-was not performed here.
+The previously planned byte-identical hold-fixture run was subsequently
+performed by the user under the separately authorized installation-tree
+mutation protocol. It used the exact source binary from the failing directory,
+copied it without modification to `D:\apps\AMDuProf\bin`, and removed only that
+exact diagnostic copy after qualification had been persisted. The complete
+evidence is recorded in
+[`cpu-sensor-amd-executable-directory-runtime-confirmation.md`](cpu-sensor-amd-executable-directory-runtime-confirmation.md).
 
 ~~~text
 PROCESS_DIRECTORY_HYPOTHESIS = STRONGLY_SUPPORTED
-PROCESS_DIRECTORY_RUNTIME_CONFIRMATION = OPTIONAL_NOT_REQUIRED_FOR_PRIMARY_ROOT_CAUSE
-OPTIONAL_DIRECTORY_ONLY_CONFIRMATION = DESIGN_ONLY / NOT_RUN
-USER_AUTHORIZATION_REQUIRED = REQUIRED_BEFORE_ANY_INSTALL-TREE_COPY
+PROCESS_DIRECTORY_RUNTIME_CONFIRMATION = PASS
+BYTE_IDENTICAL_DIRECTORY_COUNTERFACTUAL = CONFIRMED
+CXL_EXECUTABLE_DIRECTORY_POLICY_CAUSALITY = RUNTIME_CONFIRMED
+ROOT_CAUSE_CONFIDENCE = CONFIRMED_BY_STATIC_AND_RUNTIME_COUNTERFACTUAL
+TEMPORARY_DIAGNOSTIC_COPY_CLEANUP = PASS
+VERIFIED_VENDOR_DLL_INTEGRITY = UNCHANGED
 ~~~
 
 ## ARCHITECTURAL CONSTRAINT
@@ -197,17 +206,19 @@ PROCESS_GLOBAL_CWD_MUTATION = NOT_ACCEPTABLE_AS_DEFAULT_WORKAROUND
 
 This is an evidence-backed constraint, not a production provider decision.
 No registry spoofing, PATH change, DLL replacement, patch, or bypass is
-recommended.
+recommended. The exact vendor executable-directory requirement is now closed
+for this incident; the CRT-to-`KERNEL32!FatalExit` transition and QE2 private
+role remain implementation details that are not needed before architecture
+work.
 
 ## REMAINING UNCERTAINTY
 
-Only these residuals remain:
+Only these residuals remain, and none is required before architecture work:
 
-1. CRT_TO_KERNEL32_FATAL_EXIT_TRANSITION.
-2. PRIVATE_IMPLEMENTATION_DETAILS_AROUND_QE1, including string-object
-   ownership/normalization and the runtime branch result.
-3. QE2_EXACT_ROLE.
-4. ANY_OTHER_INDEPENDENT_VENDOR_BOOTSTRAP_REQUIREMENTS.
+1. `CRT_TO_KERNEL32_FATAL_EXIT_TRANSITION` — unproven statically but strongly
+   runtime correlated.
+2. `QE2_EXACT_PRIVATE_ROLE` — unresolved.
+3. Other private vendor internals — not required for the closed root cause.
 
 ## VALIDATION AND DELIVERY
 
@@ -219,8 +230,10 @@ VENDOR_PATH_CROSS_CHECK = PASS
 WINDOWS_CASE_INSENSITIVE_COMPARISON_SANITY = PASS
 QE1_PREDICATE_CONSISTENCY = PASS
 HISTORICAL_RUNTIME_EVIDENCE_CROSS_CHECK = PASS
-AMD_RUNTIME_EXECUTED_FOR_THIS_CLOSURE = false
-SYSTEM_MUTATIONS = none
+AMD_RUNTIME_EXECUTED_BY_CODEX_FOR_THIS_STATIC_CLOSURE = false
+FINAL_USER_RUNTIME_EVIDENCE_CONSUMED = true
+TEMPORARY_DIRECTORY_COPY_MUTATION = AUTHORIZED_AND_REMOVED
+CHECKED_VENDOR_DLLS = UNCHANGED
 ~~~
 
 Updated the existing CXL audit and execution plan; this closure record is new.
@@ -229,7 +242,8 @@ Documentation-only closure commit: this audit's delivery commit.
 
 ## NEXT STEP
 
-No basename control is justified. If additional confirmation is required,
-separately authorize one native directory-only confirmation with an explicit
-install-tree copy/cleanup protocol. Do not run B1 or start
-CPU-SENSOR-AMD-PROVIDER-DESIGN.
+The directory-only root-cause confirmation is complete. The next decision is
+the separate architecture record
+[`cpu-sensor-amd-provider-architecture.md`](../architecture/cpu-sensor-amd-provider-architecture.md).
+No basename control, B1 run, or process-global CWD workaround is justified.
+Provider implementation remains a separate, explicitly gated task.

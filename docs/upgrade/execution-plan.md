@@ -154,3 +154,55 @@ wrapper 的非 AMD synthetic validation 和静态 PE/hash/signature preflight �
 通过；本目录确认仍为 `prepared / awaiting human authorization`，不能视为
 runtime complete。不得运行 B1 或开始 `CPU-SENSOR-AMD-PROVIDER-DESIGN`。
 详见 [`docs/measurements/cpu-sensor-amd-executable-directory-runtime-confirmation.md`](../measurements/cpu-sensor-amd-executable-directory-runtime-confirmation.md)。
+
+## CPU-SENSOR-AMD-ROOT-CAUSE-FINAL-CLOSURE 当前状态
+
+`CPU-SENSOR-AMD-ROOT-CAUSE-FINAL-CLOSURE` 已消费用户生成的最终
+directory counterfactual evidence。未修改的 hold fixture 从 repository
+build directory 复制到 `D:\apps\AMDuProf\bin` 后保持相同 SHA，正常存活约
+3 秒、写出两个 durable main markers 并以 `0x00000000` 退出；原目录运行仍
+为约 63.2 ms、`0xFFFFFFFF` 且 marker 缺失。因此：
+
+```text
+PROCESS_DIRECTORY_RUNTIME_CONFIRMATION = PASS
+BYTE_IDENTICAL_DIRECTORY_COUNTERFACTUAL = CONFIRMED
+CXL_EXECUTABLE_DIRECTORY_POLICY_CAUSALITY = RUNTIME_CONFIRMED
+ROOT_CAUSE = CXL_PROCESS_EXECUTABLE_DIRECTORY_POLICY_MISMATCH
+ROOT_CAUSE_CONFIDENCE = CONFIRMED_BY_STATIC_AND_RUNTIME_COUNTERFACTUAL
+```
+
+精确临时 copy 已在 qualification 持久化后删除并核验不存在；本次核验的
+`AMDPowerProfileAPI.dll` 与 `CXLBaseTools.dll` hash 未变化。该结果关闭
+static/dynamic load、basename、signature、import topology、shutdown/detach
+作为本 incident primary cause 的假设，并将 vendor executable-specific
+context 收敛为 executable-directory policy；CRT 到 Kernel32 的 termination
+transition 与 QE2 private role 仍是无需在 architecture work 前解析的内部
+细节。详见 [`docs/measurements/cpu-sensor-amd-executable-directory-runtime-confirmation.md`](../measurements/cpu-sensor-amd-executable-directory-runtime-confirmation.md)
+与 [`docs/measurements/cpu-sensor-amd-executable-directory-root-cause.md`](../measurements/cpu-sensor-amd-executable-directory-root-cause.md)。
+
+## CPU-SENSOR-AMD-PROVIDER-ARCHITECTURE 当前状态
+
+根因 investigation 已完成；provider implementation 尚未开始。基于官方
+CLI 在已允许的 AMD 安装目录中成功产生真实短时 package-power evidence，且
+直接 main-process API 不能从任意应用目录安全加载，当前架构方向为：
+
+```text
+AMD_PROVIDER_ARCHITECTURE = CLI_SUBPROCESS
+DECISION_CONFIDENCE = MEDIUM
+DECISION_STATUS = PROVISIONAL / NOT_PRODUCTION_ADMITTED
+```
+
+这不是全应用永久提权的决定，也不是把 CLI 短时结果直接批准为 production
+metric。all-day lifecycle、输出稳定性、cadence、privilege deployment、
+distribution/license、overhead 和 metric scope 仍须在单独 spike 中通过。
+vendor-tree helper 因安装树 mutation/support/legal 风险未选为默认方向；
+direct API 对 arbitrary install location 不兼容；alternative backend 尚无
+足够 evidence 被选定。未来实现必须复用现有 `MetricProvider`、`ProviderHost`、
+`CollectionPlan`、health/capability 和 failure-isolation seam，不得修改
+Windows baseline 的基本 CPU usage 语义来承载 AMD 失败。
+
+下一项且仅下一项实现/qualification 任务为
+`CPU-SENSOR-AMD CLI PROVIDER SPIKE`。它保持为未开始状态，需先定义手工
+Administrator boundary、外部安装依赖、长生命周期模型、解析与恢复、
+overhead gates 及 package/temp/frequency 的独立语义验收。详见
+[`docs/architecture/cpu-sensor-amd-provider-architecture.md`](../architecture/cpu-sensor-amd-provider-architecture.md)。

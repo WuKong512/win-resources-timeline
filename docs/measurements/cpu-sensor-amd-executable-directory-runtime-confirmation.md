@@ -1,8 +1,9 @@
 # CPU-SENSOR-AMD EXECUTABLE-DIRECTORY FINAL RUNTIME CONFIRMATION
 
-This record prepares one manual, native runtime counterfactual. It does not
-run the fixture, load an AMD DLL, start an AMD executable, or change the AMD
-installation. The runtime result remains pending human authorization.
+This record originally prepared one manual, native runtime counterfactual. The
+subsequent user-supplied evidence is now consumed below; Codex did not execute
+the AMD runtime. The experiment remains a diagnostic counterfactual, not a
+production-provider approval.
 
 ## BASELINE
 
@@ -12,7 +13,8 @@ BRANCH = spike/cpu-sensor-amd-uprof-live-qualification
 START_HEAD = 060cd82f2aff0bac0d3a1e93d76fc6b2f73633dd
 ORIGIN_MAIN = 0c470c48b4e60bd94dfe720ec8981f919db8b1c1
 WORKING_TREE_AT_ENTRY = CLEAN
-RESULT = ADMIN_DIRECTORY_COUNTERFACTUAL_REQUIRED
+RESULT = PROCESS_DIRECTORY_RUNTIME_CONFIRMATION_PASS
+PREPARATION_RESULT = ADMIN_DIRECTORY_COUNTERFACTUAL_REQUIRED
 ```
 
 The accepted static closure identifies a visible CXL process-executable
@@ -25,13 +27,13 @@ neither candidate.
 
 ```text
 ROOT_CAUSE = CXL_PROCESS_EXECUTABLE_DIRECTORY_POLICY_MISMATCH
-ROOT_CAUSE_CONFIDENCE = HIGH_FROM_STATIC_ANALYSIS_AND_PRIOR_RUNTIME_DIVERGENCE
-RUNTIME_COUNTERFACTUAL_STATUS = NOT_RUN
+ROOT_CAUSE_CONFIDENCE = CONFIRMED_BY_STATIC_AND_RUNTIME_COUNTERFACTUAL
+RUNTIME_COUNTERFACTUAL_STATUS = CONFIRMED
 ```
 
-The directory-only run is a confirmation experiment, not a replacement for
-the accepted static/evidence-based closure. It must not be described as
-completed until the copied fixture produces real runtime evidence.
+The directory-only run was a confirmation experiment, not a replacement for
+the accepted static/evidence-based closure. Its result is recorded in the
+final evidence section below.
 
 ## WHY THE BASENAME CONTROL WAS CANCELLED
 
@@ -198,7 +200,7 @@ the installed vendor API/CXL artifacts, including x64 and PE import assertions.
 The repository-built source is intentionally allowed to be unsigned; its hash
 and x64/import identity are locked. Vendor DLL signatures remain required.
 
-## AUTHORIZATION STATUS
+## PREPARATION-ERA AUTHORIZATION STATUS
 
 ```text
 ADMIN_DIRECTORY_COUNTERFACTUAL = NOT_EXECUTED
@@ -207,19 +209,134 @@ SYSTEM_MUTATIONS_PERFORMED_BY_CODEX = none
 AMD_RUNTIME_EXECUTED_BY_CODEX = false
 ```
 
-The only authorized future mutation is the exact temporary diagnostic EXE
-copy described above, performed from a manually launched Administrator x64
-PowerShell and cleaned after durable evidence is written. No automatic UAC,
-elevation, retry, profiling, sampling, or provider integration is permitted.
+At preparation time, the only authorized future mutation was the exact
+temporary diagnostic EXE copy described above, performed from a manually
+launched Administrator x64 PowerShell and cleaned after durable evidence was
+written. No automatic UAC, elevation, retry, profiling, sampling, or provider
+integration was permitted.
 
-## NEXT STEP
+## PREPARATION-ERA NEXT STEP (SUPERSEDED)
 
-Run the one prepared Administrator command block exactly once. Consume the
-resulting raw stdout/stderr, qualification JSON, cleanup record, and vendor
-DLL re-hashes in a separate evidence-closure task. Do not run B1 or begin
+The prepared command block was later run by the user. The resulting raw
+stdout/stderr, qualification JSON, cleanup record, and vendor DLL re-hashes
+are consumed in the final section below. Do not run B1 or begin
 `CPU-SENSOR-AMD-PROVIDER-DESIGN`.
 
 ```text
-RESULT = ADMIN_DIRECTORY_COUNTERFACTUAL_REQUIRED
+PREPARATION_RESULT = ADMIN_DIRECTORY_COUNTERFACTUAL_REQUIRED
 ADMIN_DIRECTORY_COUNTERFACTUAL_COMMANDS_READY
 ```
+
+## FINAL RUNTIME EVIDENCE CLOSURE
+
+The authoritative user-generated evidence root is:
+
+```text
+C:\Users\Hello\AppData\Local\Temp\resource-timeline-amd-directory-confirmation-20260902T072548689Z
+```
+
+The run was valid: `ADMIN-00` recorded an x64 PowerShell with Administrator
+membership, `whoami /groups` exit `0`, and integrity SID `S-1-16-12288`;
+preflight passed for every checked artifact. The source fixture was not
+rebuilt, and the destination copy was absent before creation and byte-identical
+after creation.
+
+```text
+SOURCE_SHA256 = B680E7761FC3E64193E7140B57326154A64AB702C62763C7693EA97234DC1676
+DESTINATION_SHA256 = B680E7761FC3E64193E7140B57326154A64AB702C62763C7693EA97234DC1676
+BYTE_IDENTICAL_COPY = true
+SOURCE_EXE_DIRECTORY = F:\File\codex\codex-worktrees\08bd\resource-timeline\tools\amd-uprof-public-api-ab\target\release
+DESTINATION_EXE_DIRECTORY = D:\apps\AMDuProf\bin
+TARGET_PATH = D:\apps\AMDuProf\bin\resource-timeline-amd-static-hold-confirm.exe
+PROCESS_STARTED = true
+TARGET_PID = 36188
+STARTED_AT_UTC = 2026-09-02T07:25:49.0589398Z
+FINISHED_AT_UTC = 2026-09-02T07:25:52.1480808Z
+DURATION_MS = 3089.141
+HOLD_WINDOW_MS = 3000
+TIMEOUT_MS = 10000
+TIMEOUT = false
+TARGET_EXIT_SIGNED = 0
+TARGET_EXIT_HEX = 0x00000000
+STDOUT_BYTES = 65
+STDERR_BYTES = 0
+CAPTURE_COMPLETE = true
+HARNESS_FAILED = false
+TARGET_PROCESS_FAILED = false
+QUALIFICATION = PROCESS_DIRECTORY_RUNTIME_CONFIRMATION_PASS
+```
+
+The persisted raw stdout was:
+
+```text
+HOLD_FIXTURE_MAIN_REACHED=true
+HOLD_FIXTURE_BEFORE_RETURN=true
+```
+
+This is the requested byte-identical directory counterfactual. The historical
+run used the same fixture bytes from the repository build directory and ended
+after approximately `63.2 ms` with `-1 / 0xFFFFFFFF`, without either durable
+marker. Its working directory was already `D:\apps\AMDuProf\bin`, so the
+contrast is not attributable to current working directory alone. The closest
+native independent variable is the process executable directory; placement
+also naturally participates in Windows loader/search context, so this is not a
+claim of laboratory-perfect isolation.
+
+```text
+PROCESS_DIRECTORY_RUNTIME_CONFIRMATION = PASS
+BYTE_IDENTICAL_DIRECTORY_COUNTERFACTUAL = CONFIRMED
+CXL_EXECUTABLE_DIRECTORY_POLICY_CAUSALITY = RUNTIME_CONFIRMED
+ROOT_CAUSE = CXL_PROCESS_EXECUTABLE_DIRECTORY_POLICY_MISMATCH
+ROOT_CAUSE_CONFIDENCE = CONFIRMED_BY_STATIC_AND_RUNTIME_COUNTERFACTUAL
+```
+
+Cleanup was evaluated only after qualification had been persisted. The exact
+temporary destination was removed and verified absent. The API and CXL vendor
+DLLs retained their pre-run hashes:
+
+```text
+TEMPORARY_DIAGNOSTIC_COPY_CLEANUP = PASS
+CLEANUP_STATUS = REMOVED
+DESTINATION_FILE_EXISTS_AFTER_CLEANUP = false
+VERIFIED_VENDOR_DLL_INTEGRITY = UNCHANGED
+AMDPowerProfileAPI_SHA_BEFORE_AFTER = 9634020BCAF3F2E639E0EEA2D64433E3F369A80A1FC54B9220CA732F830A4277
+CXLBaseTools_SHA_BEFORE_AFTER = 4815D4631BCA9C051DC4293538DF8D402BD848E705228F497DF718EDCA1F8931
+```
+
+`system_mutations_performed = true` in the summary refers to the explicitly
+authorized temporary diagnostic copy. It does not establish that the entire
+AMD installation tree was unchanged; only the exact copied file and the two
+checked vendor DLL identities were verified.
+
+## FINAL ROOT-CAUSE STATUS
+
+The static predicate and runtime counterfactual now agree:
+
+```text
+allowed_1 = D:\apps\AMDuProf\bin
+allowed_2 = D:\apps\AMDuProf\bin\AMDPerf
+exe_dir = directory(GetModuleFileNameW(GetModuleHandleW(NULL)))
+if (_wcsicmp(allowed_1, exe_dir) != 0 &&
+    _wcsicmp(allowed_2, exe_dir) != 0) {
+    quick_exit(0xFFFFFFFF)
+}
+```
+
+The remaining private details are not required for root-cause closure:
+
+```text
+STATIC_VS_DYNAMIC_LOAD_HYPOTHESIS = CLOSED_AS_PRIMARY_CAUSE
+PROCESS_BASENAME_HYPOTHESIS = CLOSED_NO_SUPPORT
+SIGNATURE_HYPOTHESIS = CLOSED_NO_SUPPORT
+VENDOR_IMPORT_TOPOLOGY_HYPOTHESIS = CLOSED_AS_PRIMARY_CAUSE
+SHUTDOWN_OR_DETACH_HYPOTHESIS = CLOSED_AS_PRIMARY_CAUSE
+VENDOR_EXECUTABLE_SPECIFIC_CONTEXT = REFINED_TO_EXECUTABLE_DIRECTORY_POLICY
+CRT_TO_KERNEL32_FATAL_EXIT_TRANSITION = UNPROVEN_STATICALLY_BUT_STRONGLY_RUNTIME_CORRELATED
+QE2_EXACT_PRIVATE_ROLE = UNRESOLVED
+OTHER_PRIVATE_VENDOR_INTERNALS = NOT_REQUIRED_FOR_ROOT_CAUSE
+```
+
+No claim is made that these closed factors can never matter in another vendor
+build or process context; they are closed only as the primary explanation for
+this incident. No provider implementation, elevation path, B1 run, or new AMD
+profiling was performed by Codex.
