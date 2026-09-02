@@ -16,7 +16,9 @@ ROOT_CAUSE_CONFIDENCE = CONFIRMED_BY_STATIC_AND_RUNTIME_COUNTERFACTUAL
 AMD_PROVIDER_ARCHITECTURE = CLI_SUBPROCESS
 DECISION_CONFIDENCE = MEDIUM
 DECISION_STATUS = PROVISIONAL_DIRECTION / NOT_PRODUCTION_ADMITTED
-SPIKE_IMPLEMENTATION = PREPARED / AWAITING RUNTIME QUALIFICATION
+SPIKE_IMPLEMENTATION = PREPARED / BOUNDED_RUNTIME_TECHNICALLY_QUALIFIED
+CPU_PACKAGE_POWER_W_RUNTIME_QUALIFIED = true
+CPU_PACKAGE_POWER_W_PRODUCTION_QUALIFIED = false
 PRODUCTION_IMPLEMENTATION = NOT_STARTED
 ```
 
@@ -260,13 +262,16 @@ whole application and does not make the CLI a production provider today.
 
 ## SPIKE IMPLEMENTATION STATUS
 
-The spike-only implementation is now prepared in
+The spike-only implementation is prepared in
 `src-tauri/src/collector/amd_uprof_cli.rs` and the manually authorized runtime
 wrapper is `tools/amd-uprof-cli-spike/run-admin-amd-cli-spike.ps1`. The module
 is exported for focused tests and future adapter work, but `collector::manager`
 does not register it. That deliberate registration gate keeps the current
-collector and schema unchanged while the bounded Administrator qualification
-is pending.
+collector and schema unchanged after the bounded Administrator qualification
+passed for one recovered ten-second package-power session. The target result
+and raw artifacts were preserved before the wrapper's post-runtime parsing
+exception; the result was recovered offline, with no AMD rerun. Details are in
+[`cpu-sensor-amd-cli-spike-runtime.md`](../measurements/cpu-sensor-amd-cli-spike-runtime.md).
 
 The implementation includes registry-derived discovery, x64/signature/version
 metadata, a direct argument-vector runner, bounded cancellation/timeout and
@@ -274,37 +279,39 @@ failure mapping, a file-producing session state machine, and a header-driven
 package-power CSV parser. It does not perform an AMD call in-process, request
 elevation, expose settings, or write a metric value into production storage.
 
-## NEXT IMPLEMENTATION TASK (RUNTIME QUALIFICATION ONLY)
+## NEXT IMPLEMENTATION TASK (PRIVILEGE DEPLOYMENT)
 
 ```text
-TASK = CPU-SENSOR-AMD CLI SPIKE RUNTIME QUALIFICATION
+TASK = AMD_CLI_PRIVILEGE_DEPLOYMENT_ARCHITECTURE
 ```
 
-Goal: establish whether the prepared boundary can consume one supported,
-bounded installed-CLI session without vendor-tree mutation or production-wide
-elevation. This is not yet a production provider implementation.
+Goal: select a legitimate unattended deployment model for the known
+Administrator-only CLI path while keeping the main application non-elevated by
+default. This is not yet a production provider implementation.
 
 Scope:
 
-- inspect the installed version and supported output contract;
-- design a process-owned subprocess/session boundary in the existing
-  `MetricProvider`/`ProviderHost` seam;
-- qualify privilege, capability discovery, power/temperature/frequency scope,
-  cadence, lifecycle, concurrency, crash/timeout recovery, and cleanup;
-- define additive DTO/catalog mapping only after the source contract passes;
-- perform legal/distribution and security review for the external dependency.
+- compare a disabled/no-privilege fallback, user-mediated elevation, and a
+  separately installed privileged helper/service at the architecture level;
+- define capability/status behavior when privilege, driver/service, or the CLI
+  is unavailable;
+- preserve subprocess crash isolation and bounded recovery from this spike;
+- identify the additional security, installation, and support review required
+  before all-day collection.
 
 Required tests include absent/unsupported installation, non-admin permission
-denial, Administrator success where manually authorized, malformed output,
-child crash/timeout, disable/re-enable, provider restart, concurrent-session
-busy behavior, sleep/resume, long-run overhead, and UI/input responsiveness.
-No test may silently elevate, modify the vendor tree, install a driver/service,
-or substitute a CLI value for an unqualified Resource Timeline metric.
+denial, and explicit fallback behavior. Later runtime qualification must also
+cover malformed output, child crash/timeout, disable/re-enable,
+provider restart, concurrent-session busy behavior, sleep/resume, long-run
+overhead, and UI/input responsiveness. No test may silently elevate, modify
+the vendor tree, install a driver/service, or substitute a CLI value for an
+unqualified Resource Timeline metric.
 
-Success requires a documented supported long-lived or explicitly acceptable
-collection model, stable parsing, bounded failure isolation, approved
-privilege/distribution posture, and all metric-specific semantic and overhead
-gates. This task is not executed here.
+The bounded session already established package-power parsing for one
+Administrator run, but success for this next task requires a documented
+privilege/fallback posture. Long-lived collection, timestamp/storage semantics,
+temperature/frequency, distribution, and production admission remain deferred.
+This task is not executed here.
 
 ## DEFERRED / EXPLICITLY NOT DONE
 

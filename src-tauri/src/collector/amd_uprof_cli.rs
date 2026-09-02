@@ -1521,24 +1521,8 @@ mod tests {
         sync::Mutex,
     };
 
-    const VALID_CSV: &str = r#"AMDPROFILER POWER PROFILE REPORT
-
-PROFILE DETAILS
-Sampling Interval:,1000 milli-seconds
-Profile Duration:,5 seconds
-Profile Start Time:,Aug-29-2026_11-18-21
-
-PROFILED COUNTERS
-COUNTER ID,NAME,CATEGORY,UNIT,DESCRIPTION
-48.,socket0-package-power,Power,W,Socket0-Average Package Power reported in Watts.
-50.,core0-power,Power,W,Core0-Average Power reported in Watts.
-
-PROFILE RECORDS
-RecordId,Timestamp,socket0-package-power,core0-power
-1,11:18:22:646,49.44,8.10
-2,11:18:23:646,42.26,7.90
-3,11:18:24:650,40.29,7.75
-"#;
+    const VALID_CSV: &str =
+        include_str!("../../../tools/amd-uprof-cli-spike/test-fixtures/package-power.csv");
 
     fn successful_process() -> AmdCliProcessResult {
         AmdCliProcessResult {

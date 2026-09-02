@@ -19,6 +19,8 @@ $cliName = 'AMDuProfCLI.exe'
 $installRegistryPath = 'Registry::HKEY_LOCAL_MACHINE\SOFTWARE\WOW6432Node\AMD\AMDProfiler'
 $installRegistryValue = 'InstallationPath'
 
+. (Join-Path $PSScriptRoot 'postprocess.ps1')
+
 function Get-UtcTimestamp {
     (Get-Date).ToUniversalTime().ToString('o')
 }
@@ -450,84 +452,6 @@ function Invoke-CapturedCli {
     }
 }
 
-function Normalize-Header {
-    param([Parameter(Mandatory = $true)][string]$Value)
-    ($Value.Trim().ToLowerInvariant() -replace '[ _]', '-')
-}
-
-function Parse-PackagePowerCsv {
-    param([string]$Path)
-
-    if ([string]::IsNullOrWhiteSpace($Path) -or -not (Test-Path -LiteralPath $Path -PathType Leaf)) {
-        return [pscustomobject]@{ status = 'NOT_FOUND'; error = 'timechart.csv was not found'; sample_count = 0; samples = @() }
-    }
-    $lines = [System.IO.File]::ReadAllLines($Path)
-    $recordsIndex = -1
-    for ($index = 0; $index -lt $lines.Length; $index++) {
-        if ($lines[$index].Trim() -ieq 'PROFILE RECORDS') { $recordsIndex = $index; break }
-    }
-    if ($recordsIndex -lt 0) {
-        return [pscustomobject]@{ status = 'PARSE_FAILED'; error = 'PROFILE RECORDS section missing'; sample_count = 0; samples = @() }
-    }
-    $headerIndex = $recordsIndex + 1
-    while ($headerIndex -lt $lines.Length -and [string]::IsNullOrWhiteSpace($lines[$headerIndex])) { $headerIndex++ }
-    if ($headerIndex -ge $lines.Length) {
-        return [pscustomobject]@{ status = 'PARSE_FAILED'; error = 'record header missing'; sample_count = 0; samples = @() }
-    }
-    $headers = $lines[$headerIndex].Split(',') | ForEach-Object { Normalize-Header -Value $_ }
-    $powerIndex = -1
-    for ($index = 0; $index -lt $headers.Count; $index++) {
-        if ($headers[$index] -eq 'socket0-package-power' -or $headers[$index].Contains('package-power')) {
-            $powerIndex = $index
-            break
-        }
-    }
-    if ($powerIndex -lt 0) {
-        return [pscustomobject]@{ status = 'COUNTER_UNAVAILABLE'; error = 'package-power column missing'; sample_count = 0; samples = @() }
-    }
-    $samples = @()
-    for ($index = $headerIndex + 1; $index -lt $lines.Length; $index++) {
-        if ([string]::IsNullOrWhiteSpace($lines[$index])) { continue }
-        $fields = $lines[$index].Split(',')
-        if ($fields.Count -ne $headers.Count) {
-            return [pscustomobject]@{ status = 'PARSE_FAILED'; error = "record column count mismatch at line $($index + 1)"; sample_count = 0; samples = @() }
-        }
-        $rawValue = $fields[$powerIndex].Trim()
-        $value = 0.0
-        if (-not [double]::TryParse($rawValue, [Globalization.NumberStyles]::Float, [Globalization.CultureInfo]::InvariantCulture, [ref]$value)) {
-            return [pscustomobject]@{ status = 'PARSE_FAILED'; error = "package-power value is not invariant numeric at line $($index + 1)"; sample_count = 0; samples = @() }
-        }
-        if ([double]::IsNaN($value) -or [double]::IsInfinity($value) -or $value -lt 0) {
-            return [pscustomobject]@{ status = 'PARSE_FAILED'; error = "package-power value is invalid at line $($index + 1)"; sample_count = 0; samples = @() }
-        }
-        $timestampIndex = [array]::IndexOf($headers, 'timestamp')
-        $recordIdIndex = [array]::IndexOf($headers, 'record-id')
-        $samples += [pscustomobject]@{
-            record_id = if ($recordIdIndex -ge 0) { $fields[$recordIdIndex].Trim() } else { $null }
-            timestamp = if ($timestampIndex -ge 0) { $fields[$timestampIndex].Trim() } else { $null }
-            raw_value = $rawValue
-            value_watts = $value
-            unit = 'W'
-        }
-    }
-    if ($samples.Count -eq 0) {
-        return [pscustomobject]@{ status = 'PARSE_FAILED'; error = 'no package-power records'; sample_count = 0; samples = @() }
-    }
-    [pscustomobject]@{ status = 'PASS'; error = $null; sample_count = $samples.Count; samples = $samples }
-}
-
-function Get-OutputInventory {
-    param([Parameter(Mandatory = $true)][string]$Root)
-    @(Get-ChildItem -LiteralPath $Root -File -Recurse -ErrorAction SilentlyContinue | ForEach-Object {
-        [pscustomobject]@{
-            path = $_.FullName
-            relative_path = $_.FullName.Substring($Root.TrimEnd('\').Length).TrimStart('\')
-            size_bytes = [long]$_.Length
-            sha256 = (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash.ToUpperInvariant()
-        }
-    })
-}
-
 if ($DurationSeconds -le 0 -or $SampleIntervalMs -le 0 -or $TimeoutMs -le 0) {
     throw 'duration, sample interval, and timeout must be greater than zero'
 }
@@ -605,32 +529,17 @@ $run = Invoke-CapturedCli -FilePath $cliPath -Arguments $arguments -WorkingDirec
 
 # Persist the raw process capture before interpreting vendor output.
 Write-JsonFile -Path (Join-Path $outputRootFull 'AMD-CLI-PROCESS-RESULT.json') -Value $run
-$csvFile = Get-ChildItem -LiteralPath $sessionDirectory -File -Recurse -ErrorAction SilentlyContinue |
-    Where-Object { $_.Name -ieq 'timechart.csv' } | Select-Object -First 1
-$uprofFile = Get-ChildItem -LiteralPath $sessionDirectory -File -Recurse -ErrorAction SilentlyContinue |
-    Where-Object { $_.Name -ieq 'session.uprof' } | Select-Object -First 1
-$parsed = Parse-PackagePowerCsv -Path (if ($null -ne $csvFile) { $csvFile.FullName } else { $null })
-$inventory = Get-OutputInventory -Root $sessionDirectory
+$postRuntime = Invoke-AmdCliPostRuntimePipeline -SessionDirectory $sessionDirectory -Run $run
+$csvPath = $postRuntime.timechart_csv_path
+$uprofPath = $postRuntime.session_uprof_path
+$parsed = $postRuntime.parsed_package_power
+$inventory = $postRuntime.output_artifacts
+$qualification = $postRuntime.qualification
 $childrenAfter = if ($null -ne $run.target_pid) {
     Start-Sleep -Milliseconds 500
     Get-DirectChildren -ParentPid ([int]$run.target_pid)
 } else {
     [pscustomobject]@{ query_succeeded = $false; children = @(); error = 'target PID unavailable' }
-}
-
-$qualification = if ($run.process_started -and -not $run.timeout -and $run.target_exit_signed -eq 0 -and
-    $run.capture_complete -and $null -ne $csvFile -and $null -ne $uprofFile -and $parsed.status -eq 'PASS') {
-    'PASS'
-} elseif ($run.harness_error) {
-    'HARNESS_FAILED'
-} elseif ($run.timeout) {
-    'TIMEOUT'
-} elseif ($parsed.status -eq 'PARSE_FAILED') {
-    'PARSE_FAILED'
-} elseif ($null -eq $csvFile -or $null -eq $uprofFile) {
-    'OUTPUT_ARTIFACT_MISSING'
-} else {
-    'TARGET_FAILED'
 }
 
 $summary = [pscustomobject]@{
@@ -648,8 +557,8 @@ $summary = [pscustomobject]@{
     timeout_ms = $TimeoutMs
     process_result = $run
     output_directory = $sessionDirectory
-    timechart_csv = if ($null -ne $csvFile) { $csvFile.FullName } else { $null }
-    session_uprof = if ($null -ne $uprofFile) { $uprofFile.FullName } else { $null }
+    timechart_csv = $csvPath
+    session_uprof = $uprofPath
     output_artifacts = $inventory
     parsed_package_power = $parsed
     direct_children_after = $childrenAfter

@@ -12,7 +12,10 @@ BRANCH = spike/cpu-sensor-amd-uprof-live-qualification
 START_HEAD = 62d699111e0bf35f421d0da1de83640fdc753693
 AMD_PROVIDER_ARCHITECTURE = CLI_SUBPROCESS
 DECISION_CONFIDENCE = MEDIUM
-STATUS = SPIKE_PREPARED / NOT_PRODUCTION_ADMITTED
+STATUS = BOUNDED_SESSION_TECHNICALLY_QUALIFIED / NOT_PRODUCTION_ADMITTED
+AMD_CLI_SPIKE_RUNTIME = PASS_RECOVERED_FROM_RAW_EVIDENCE
+CPU_PACKAGE_POWER_W_RUNTIME_QUALIFIED = true
+CPU_PACKAGE_POWER_W_PRODUCTION_QUALIFIED = false
 ROOT_CAUSE = CXL_PROCESS_EXECUTABLE_DIRECTORY_POLICY_MISMATCH
 ROOT_CAUSE_CONFIDENCE = CONFIRMED_BY_STATIC_AND_RUNTIME_COUNTERFACTUAL
 ```
@@ -31,9 +34,11 @@ DIRECT_IN_PROCESS_AMD_UPROF_API_FROM_ARBITRARY_APP_DIRECTORY = NOT_VIABLE
 MAIN_APP_PROCESS = NON_ELEVATED_BY_DEFAULT
 ```
 
-The existing Administrator CLI control produced real package-power records,
-but that short control did not establish all-day lifecycle, privilege
-deployment, output stability, or production metric semantics.
+The single manually authorized Administrator CLI control produced nine
+parseable socket package-power records at approximately one-second cadence,
+and its target process exited successfully. It did not establish all-day
+lifecycle, privilege deployment, output stability across versions, or
+production metric semantics.
 
 ## EXISTING PROVIDER SEAM
 
@@ -270,10 +275,28 @@ Existing `collector::provider` tests remain the regression evidence for
 healthy-provider continuity when another provider fails. No production
 collector test was changed to register AMD.
 
-## FUTURE RUNTIME QUALIFICATION
+## RECOVERED BOUNDED RUNTIME QUALIFICATION
 
-Runtime qualification is intentionally still pending. It must be one short,
-manual Administrator x64 PowerShell session, without CDB/debugger, with:
+The first and only real runtime session was completed once by the user on
+2026-09-02. The wrapper persisted the target process result and raw streams,
+then failed during post-runtime CSV-path processing. The target had already
+completed successfully, so the qualification was recovered offline from the
+authoritative raw evidence rather than rerun. See
+[`cpu-sensor-amd-cli-spike-runtime.md`](../measurements/cpu-sensor-amd-cli-spike-runtime.md).
+
+```text
+REAL_RUNTIME_COUNT = 1
+RERUN_PERFORMED = false
+RERUN_REQUIRED = false
+ORIGINAL_WRAPPER_RESULT = BLOCKED_POST_RUNTIME_HARNESS
+HARNESS_ROOT_CAUSE = POWERSHELL_IF_USED_AS_COMMAND_ARGUMENT_EXPRESSION
+AMD_CLI_SPIKE_RUNTIME = PASS_RECOVERED_FROM_RAW_EVIDENCE
+PACKAGE_POWER_RUNTIME_PARSE = PASS
+AMD_CLI_PROVIDER_SPIKE = TECHNICALLY_QUALIFIED_FOR_BOUNDED_SESSION
+```
+
+The recovered session used one manual Administrator x64 PowerShell context,
+without CDB/debugger, with:
 
 - discovered CLI identity/version/signature and exact arguments;
 - same `InstallationPath\bin` working directory and unchanged inherited
@@ -287,15 +310,6 @@ manual Administrator x64 PowerShell session, without CDB/debugger, with:
 - explicit result when privilege, driver/service, counter, parser, or timeout
   fails.
 
-The prepared command is intentionally not executed in this task:
-
-```powershell
-$ErrorActionPreference = 'Stop'
-Set-Location 'D:\apps\AMDuProf\bin'
-& 'F:\File\codex\codex-worktrees\08bd\resource-timeline\tools\amd-uprof-cli-spike\run-admin-amd-cli-spike.ps1' `
-  -ExpectedCliSha256 'D0812D64963DD98F7C339CAC72F650461F95FF84E757A99767C7981B4111FBAC'
-```
-
 The wrapper derives the installation root from the observed registry value,
 refuses output under the AMD tree, checks for an already-running exact CLI,
 captures a single bounded package-power session, and leaves its Resource
@@ -303,8 +317,16 @@ Timeline-owned evidence directory for analysis. It does not modify persistent
 PATH/environment/registry state and does not self-elevate.
 
 ```text
-RESULT = ADMIN_AMD_CLI_SPIKE_RUNTIME_REQUIRED
+CPU_PACKAGE_POWER_W_RUNTIME_QUALIFIED = true
+CPU_PACKAGE_POWER_W_PRODUCTION_QUALIFIED = false
+PRODUCTION_ADMISSION = DEFERRED
 ```
+
+The repaired wrapper remains available for a separately authorized future
+qualification, but this task performed no second AMD run. The recovered run
+reported nine samples (`49.69`–`58.04 W`, arithmetic mean `54.503333 W`),
+1000.375 ms mean cadence, 93.75 ms target CPU time, and a 43,040,768-byte
+peak working set. These are bounded-run measurements, not all-day budgets.
 
 ## OVERHEAD AND PRODUCTION-ADMISSION BLOCKERS
 
@@ -343,13 +365,17 @@ telemetry interface. No private IPC/authentication surface is used.
 
 ## NEXT TASK
 
-The only next runtime task is:
+The next implementation/design task is:
 
 ```text
-CPU-SENSOR-AMD CLI SPIKE RUNTIME QUALIFICATION
+AMD_CLI_PRIVILEGE_DEPLOYMENT_ARCHITECTURE
 ```
 
-It has one bounded ten-second package-power session and the evidence contract
-above. It must not begin temperature/frequency qualification, all-day soak,
-provider registration, user-facing settings, or production admission until
-the runtime result and product privilege decision are reviewed.
+The bounded session is technically qualified for package-power parsing, but
+the historical non-administrator access-denied result leaves unattended
+privilege deployment as the most immediate product blocker. That task must
+evaluate a legitimate deployment model while keeping the main app
+non-elevated by default. Long-lived session behavior, restart/recovery,
+timestamp mapping, temperature/frequency, provider registration, user-facing
+settings, and production admission remain deferred and must not be inferred
+from this run.

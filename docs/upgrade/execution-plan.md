@@ -212,11 +212,14 @@ AMD 根因调查已完成：
 ```text
 AMD_ROOT_CAUSE_INVESTIGATION = completed
 AMD_PROVIDER_ARCHITECTURE = completed / provisional CLI_SUBPROCESS
-AMD_CLI_PROVIDER_SPIKE = implementation prepared / awaiting runtime qualification
+AMD_CLI_PROVIDER_SPIKE = technically qualified for bounded session / production admission deferred
+CPU_PACKAGE_POWER_W_RUNTIME_QUALIFIED = true
+CPU_PACKAGE_POWER_W_PRODUCTION_QUALIFIED = false
 AMD_PRODUCTION_PROVIDER = not completed / not registered
 ```
 
-本 spike 已在不启动 AMD runtime 的前提下准备可测试的 CLI boundary：
+本 spike 已在不修改 production registration 的前提下准备可测试的 CLI
+boundary：
 `src-tauri/src/collector/amd_uprof_cli.rs` 复用现有
 `MetricProvider`/`ProviderHost`/`CollectionPlan` 语义，提供 registry-derived
 CLI discovery、x64/signature/version identity、直接 argument-vector subprocess
@@ -224,10 +227,17 @@ runner、bounded timeout/cancellation、session state、failure mapping 和
 header-driven package-power CSV parser。`collector::manager` 没有注册 AMD，当前
 `SystemSample`/生产 value path 也未被修改，因此默认 collector 行为保持不变。
 
-首个真实 qualification 仍未运行，且不得由本条目推断 production metric
-approval。下一步只允许一次手工 Administrator x64 PowerShell 的 bounded
-`timechart --event power --interval 1000 --duration 10 --format csv` session，
-用于验证 privilege、输出/timestamp contract、process isolation、cadence、
-overhead 和 cleanup；temperature/frequency、all-day soak、provider registration、
+用户随后仅运行了一次手工 Administrator x64 PowerShell 的 bounded
+`timechart --event power --interval 1000 --duration 10 --format csv` session。
+目标进程以 exit 0 完成，生成可解析的 9 条 socket package-power 数据，
+wrapper 的 post-runtime summary 因 PowerShell `if` argument-expression 缺陷
+未完成；目标结果和 raw artifacts 已离线恢复，未进行重跑。该证据只将
+package power spike 提升到 bounded-session technical qualification，不能
+推断 production metric approval。详见
+[`cpu-sensor-amd-cli-spike-runtime.md`](../measurements/cpu-sensor-amd-cli-spike-runtime.md)。
+
+下一项实现/架构任务是 `AMD_CLI_PRIVILEGE_DEPLOYMENT_ARCHITECTURE`，用于
+解决已观察到的 Administrator privilege boundary；temperature/frequency、
+long-lived/all-day session、timestamp/storage contract、provider registration、
 schema/UI 和永久提权均保持 deferred。详见
 [`cpu-sensor-amd-cli-provider-spike.md`](../architecture/cpu-sensor-amd-cli-provider-spike.md)。
