@@ -505,6 +505,35 @@ successful vendor control. The formerly unresolved pointer is now resolved to
 checks. The remaining uncertainty is the private string-object plumbing, the
 runtime branch actually taken, and the CRT transition after `quick_exit`.
 
+## ROOT-CAUSE CLOSURE
+
+The resolved process-path operand permits a direct counterfactual evaluation
+without running the DLL. The hold fixture directory is the repository
+release directory; the surviving vendor control uses the installed uProf bin
+directory. The registry value and derived paths were checked read-only.
+
+~~~text
+M1_EXE_DIRECTORY = F:\File\codex\codex-worktrees\08bd\resource-timeline\tools\amd-uprof-public-api-ab\target\release
+CXL_ALLOWED_DIRECTORY_1 = D:\apps\AMDuProf\bin
+CXL_ALLOWED_DIRECTORY_2 = D:\apps\AMDuProf\bin\AMDPerf
+M1_COMPARE_BIN = NONZERO
+M1_COMPARE_AMDPERF = NONZERO
+M1_QE1_VISIBLE_PREDICATE = TRUE
+VENDOR_EXE_DIRECTORY = D:\apps\AMDuProf\bin
+VENDOR_COMPARE_BIN = ZERO
+VENDOR_COMPARE_AMDPERF = NONZERO
+VENDOR_QE1_VISIBLE_PREDICATE = FALSE
+ROOT_CAUSE = CXL_PROCESS_EXECUTABLE_DIRECTORY_POLICY_MISMATCH
+ROOT_CAUSE_CONFIDENCE = HIGH
+PROCESS_DIRECTORY_HYPOTHESIS = STRONGLY_SUPPORTED
+PROCESS_DIRECTORY_RUNTIME_CONFIRMATION = OPTIONAL_NOT_REQUIRED_FOR_PRIMARY_ROOT_CAUSE
+~~~
+
+This establishes the visible predicate as the primary root-cause explanation
+for the M1 failure, but does not prove that the private vendor branch is the
+only CXL requirement or that every process in an allowed directory survives.
+The historical Kernel32 observation remains a CRT-transition correlation.
+
 ## UPDATED HYPOTHESIS RANKING
 
 Only three primary candidate families remain:
@@ -514,30 +543,41 @@ Only three primary candidate families remain:
    case-insensitively with `InstallationPath\\bin` and then
    `InstallationPath\\bin\\AMDPerf`; the hold fixture directory matches
    neither, while the installed vendor `bin` directory matches the first.
-2. **Path/registry/string bootstrap construction** — medium confidence as a
-   residual implementation risk. The registry value is present and matches
-   the known install root, but private string-object copying and separator
-   handling are not symbolized.
-3. **Remaining CXL initialization/CRT state** — low-to-medium confidence as
-   the unresolved residual. QE-2, global state bytes, the exact runtime branch,
-   and the CRT transition remain outside the statically resolved predicate.
+2. **CRT-to-Kernel32 termination transition** — unresolved residual. The
+   historical Kernel32 observation correlates strongly with QE-1, but the CRT
+   implementation behind quick_exit is outside this DLL's static graph.
+3. **QE-2 role or independent vendor bootstrap requirements** — low residual
+   uncertainty. The alternate quick_exit path and any additional vendor
+   bootstrap state are not resolved by this bounded audit.
 
 The earlier static-vs-dynamic load theory remains low priority: static import
 alone failed in the hold fixture, while the vendor executable has additional
 context. The lifetime evidence downgrades shutdown/detach as the primary
 family.
 
+The hypothesis reconciliation is:
+
+~~~text
+STATIC_VS_DYNAMIC_LOAD_HYPOTHESIS = DEPRIORITIZED
+VENDOR_EXECUTABLE_SPECIFIC_CONTEXT = EXPLAINED_IN_SUBSTANTIAL_PART_BY_EXECUTABLE_DIRECTORY
+VENDOR_IMPORT_TOPOLOGY_HYPOTHESIS = DOWNGRADED_AS_PRIMARY_CAUSE
+PROCESS_IDENTITY_HYPOTHESIS = REFINED_TO_PROCESS_EXECUTABLE_DIRECTORY_POLICY
+SIGNATURE_HYPOTHESIS = NO_SUPPORT
+PROCESS_BASENAME_HYPOTHESIS = NOT_SUPPORTED_BY_VISIBLE_FATAL_PREDICATE
+PROCESS_BASENAME_ONLY_CONTROL = CANCELLED_NO_DISCRIMINATING_POWER
+~~~
+
 ## RECOMMENDED NEXT EXPERIMENT
 
 ```text
-RECOMMENDED_NEXT_EXPERIMENT = PROCESS_BASENAME_ONLY_CONTROL
-WHY_THIS_ONE = The bounded predecessor demonstrably resolves the process
-  executable path and strips to its directory before the visible comparisons.
-  A byte-identical fixture at a second basename in the same directory would
-  isolate any residual hidden basename dependence without changing the visible
-  directory predicate, registry, AMD installation, token, CWD, environment,
-  or debugger state. This is design-only; do not change both filename and
-  directory in one experiment.
+RECOMMENDED_NEXT_EXPERIMENT = OPTIONAL_PROCESS_DIRECTORY_ONLY_CONFIRMATION
+WHY_THIS_ONE = The visible predicate has already isolated the process
+  executable directory as the relevant counterfactual. If confirmation is
+  desired, one byte-identical hold fixture run from an allowed CXL directory
+  would change only that directory variable. It is not required for the
+  primary root-cause closure and would require explicit authorization because
+  placing the diagnostic artifact under the AMD install tree is a mutation.
+PROCESS_BASENAME_ONLY_CONTROL = CANCELLED_NO_DISCRIMINATING_POWER
 EXECUTION_STATUS = DESIGN_ONLY / NOT_RUN
 ```
 
@@ -550,11 +590,11 @@ is justified by this audit.
 ## UNRESOLVED POINTS
 
 ```text
-1. Which CRT implementation is reached by quick_exit on this installation?
-2. Which exact private string-object operations normalize the two path variants?
-3. What runtime `_wcsicmp` results were returned for the two comparisons?
-4. Whether QE-1 or QE-2 produced the historical FatalExit event.
-5. Which vendor executable/bootstrap state supplies the successful predicate.
+1. CRT_TO_KERNEL32_FATAL_EXIT_TRANSITION remains unproven statically.
+2. PRIVATE_IMPLEMENTATION_DETAILS_AROUND_QE1: exact string-object ownership,
+   normalization, and runtime comparison results are not directly observed.
+3. QE2_EXACT_ROLE remains unresolved.
+4. ANY_OTHER_INDEPENDENT_VENDOR_BOOTSTRAP_REQUIREMENTS remain unqualified.
 ```
 
 These are deliberately not answered by guessing from export names, module
@@ -572,6 +612,10 @@ FATALEXIT_LITERAL_SCAN = PASS (none found)
 INDIRECT_STATUS_SLOT_RESOLUTION = PASS (_wcsicmp)
 REGISTRY_READ_ONLY_CROSS_CHECK = PASS (PowerShell + reg.exe)
 PATH_EXISTENCE_CHECK = PASS
+M1_PATH_CROSS_CHECK = PASS
+VENDOR_PATH_CROSS_CHECK = PASS
+VISIBLE_PREDICATE_EVALUATION = PASS (case-insensitive model)
+ROOT_CAUSE_CLOSURE = PASS
 AMD_RUNTIME_EXECUTED_FOR_THIS_AUDIT = false
 SYSTEM_MUTATIONS = none
 GIT_DIFF_CHECK = PASS
@@ -596,7 +640,8 @@ temporary analysis artifact is committed.
 
 ## NEXT STEP
 
-`PROCESS_BASENAME_ONLY_CONTROL` remains design-only. It must be
-separately authorized before execution. Do not start
+`PROCESS_BASENAME_ONLY_CONTROL` is cancelled because the visible predicate
+uses the executable directory, not its basename. The optional directory-only
+confirmation remains design-only and requires separate authorization. Do not start
 `CPU-SENSOR-AMD-PROVIDER-DESIGN`, B1, profiling, sampling, or a broad vendor
 context matrix.
