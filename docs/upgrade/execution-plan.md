@@ -182,7 +182,7 @@ transition 与 QE2 private role 仍是无需在 architecture work 前解析的�
 
 ## CPU-SENSOR-AMD-PROVIDER-ARCHITECTURE 当前状态
 
-根因 investigation 已完成；provider implementation 尚未开始。基于官方
+根因 investigation 已完成；该架构记录在 spike 实现前建立。基于官方
 CLI 在已允许的 AMD 安装目录中成功产生真实短时 package-power evidence，且
 直接 main-process API 不能从任意应用目录安全加载，当前架构方向为：
 
@@ -201,8 +201,33 @@ direct API 对 arbitrary install location 不兼容；alternative backend 尚无
 `CollectionPlan`、health/capability 和 failure-isolation seam，不得修改
 Windows baseline 的基本 CPU usage 语义来承载 AMD 失败。
 
-下一项且仅下一项实现/qualification 任务为
-`CPU-SENSOR-AMD CLI PROVIDER SPIKE`。它保持为未开始状态，需先定义手工
-Administrator boundary、外部安装依赖、长生命周期模型、解析与恢复、
-overhead gates 及 package/temp/frequency 的独立语义验收。详见
+该架构方向随后进入独立的 `CPU-SENSOR-AMD CLI PROVIDER SPIKE`；当前状态
+以本文件下方的专项条目为准。详见
 [`docs/architecture/cpu-sensor-amd-provider-architecture.md`](../architecture/cpu-sensor-amd-provider-architecture.md)。
+
+## CPU-SENSOR-AMD-CLI-PROVIDER-SPIKE 当前状态
+
+AMD 根因调查已完成：
+
+```text
+AMD_ROOT_CAUSE_INVESTIGATION = completed
+AMD_PROVIDER_ARCHITECTURE = completed / provisional CLI_SUBPROCESS
+AMD_CLI_PROVIDER_SPIKE = implementation prepared / awaiting runtime qualification
+AMD_PRODUCTION_PROVIDER = not completed / not registered
+```
+
+本 spike 已在不启动 AMD runtime 的前提下准备可测试的 CLI boundary：
+`src-tauri/src/collector/amd_uprof_cli.rs` 复用现有
+`MetricProvider`/`ProviderHost`/`CollectionPlan` 语义，提供 registry-derived
+CLI discovery、x64/signature/version identity、直接 argument-vector subprocess
+runner、bounded timeout/cancellation、session state、failure mapping 和
+header-driven package-power CSV parser。`collector::manager` 没有注册 AMD，当前
+`SystemSample`/生产 value path 也未被修改，因此默认 collector 行为保持不变。
+
+首个真实 qualification 仍未运行，且不得由本条目推断 production metric
+approval。下一步只允许一次手工 Administrator x64 PowerShell 的 bounded
+`timechart --event power --interval 1000 --duration 10 --format csv` session，
+用于验证 privilege、输出/timestamp contract、process isolation、cadence、
+overhead 和 cleanup；temperature/frequency、all-day soak、provider registration、
+schema/UI 和永久提权均保持 deferred。详见
+[`cpu-sensor-amd-cli-provider-spike.md`](../architecture/cpu-sensor-amd-cli-provider-spike.md)。

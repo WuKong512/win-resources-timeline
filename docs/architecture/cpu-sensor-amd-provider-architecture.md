@@ -16,6 +16,7 @@ ROOT_CAUSE_CONFIDENCE = CONFIRMED_BY_STATIC_AND_RUNTIME_COUNTERFACTUAL
 AMD_PROVIDER_ARCHITECTURE = CLI_SUBPROCESS
 DECISION_CONFIDENCE = MEDIUM
 DECISION_STATUS = PROVISIONAL_DIRECTION / NOT_PRODUCTION_ADMITTED
+SPIKE_IMPLEMENTATION = PREPARED / AWAITING RUNTIME QUALIFICATION
 PRODUCTION_IMPLEMENTATION = NOT_STARTED
 ```
 
@@ -69,9 +70,10 @@ long-lived output contract, stable machine-readable schema, all-day behavior,
 or whether the CLI can expose the required three metrics in one continuous
 session.
 
-The next spike must treat the CLI as an external installed dependency. It must
-not copy or redistribute AMD binaries and must not assume that a five-second
-control is production approval.
+The CLI spike treats the CLI as an external installed dependency. It does not
+copy or redistribute AMD binaries and does not treat a short control as
+production approval. The implementation details and test boundary are recorded
+in [`cpu-sensor-amd-cli-provider-spike.md`](cpu-sensor-amd-cli-provider-spike.md).
 
 ### B — Resource Timeline helper in the AMD installation directory
 
@@ -202,7 +204,7 @@ qualification, but no value is admitted by this architecture decision.
 ## OVERHEAD AND STABILITY ACCEPTANCE FRAMEWORK
 
 The repository does not define AMD-uProf-specific numeric thresholds. Before
-implementation, the next spike must agree provisional gates and record the
+implementation, the CLI spike must agree provisional gates and record the
 baseline and source attribution for:
 
 1. startup and capability-probe latency;
@@ -256,15 +258,31 @@ locations; an alternative backend is not evidence-backed enough to choose.
 This decision does not justify permanently requiring Administrator for the
 whole application and does not make the CLI a production provider today.
 
-## NEXT IMPLEMENTATION TASK (DESIGN ONLY)
+## SPIKE IMPLEMENTATION STATUS
+
+The spike-only implementation is now prepared in
+`src-tauri/src/collector/amd_uprof_cli.rs` and the manually authorized runtime
+wrapper is `tools/amd-uprof-cli-spike/run-admin-amd-cli-spike.ps1`. The module
+is exported for focused tests and future adapter work, but `collector::manager`
+does not register it. That deliberate registration gate keeps the current
+collector and schema unchanged while the bounded Administrator qualification
+is pending.
+
+The implementation includes registry-derived discovery, x64/signature/version
+metadata, a direct argument-vector runner, bounded cancellation/timeout and
+failure mapping, a file-producing session state machine, and a header-driven
+package-power CSV parser. It does not perform an AMD call in-process, request
+elevation, expose settings, or write a metric value into production storage.
+
+## NEXT IMPLEMENTATION TASK (RUNTIME QUALIFICATION ONLY)
 
 ```text
-TASK = CPU-SENSOR-AMD CLI PROVIDER SPIKE
+TASK = CPU-SENSOR-AMD CLI SPIKE RUNTIME QUALIFICATION
 ```
 
-Goal: establish whether the supported installed CLI can be wrapped as an
-optional, long-lived, low-overhead provider without vendor-tree mutation or
-production-wide elevation.
+Goal: establish whether the prepared boundary can consume one supported,
+bounded installed-CLI session without vendor-tree mutation or production-wide
+elevation. This is not yet a production provider implementation.
 
 Scope:
 
