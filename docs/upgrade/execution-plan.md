@@ -142,3 +142,15 @@ PR-09 是 PR-08 合并后的 Dashboard UI 增强：复用 schema v8、既有 `ui
 `CPU-SENSOR-AMD-CXL-EXECUTABLE-DIRECTORY-ROOT-CAUSE-CLOSURE` 已完成只读根因闭合。根据 `CXLBaseTools.dll` 的可见 QE-1 谓词，M1 hold fixture 的进程 EXE 目录为 `F:\File\codex\codex-worktrees\08bd\resource-timeline\tools\amd-uprof-public-api-ab\target\release`，与 `D:\apps\AMDuProf\bin` 和 `D:\apps\AMDuProf\bin\AMDPerf` 均为非零不相等；存活的 `AMDuProf.exe` 目录为 `D:\apps\AMDuProf\bin`，与第一候选为零相等。只读注册表 `HKLM\SOFTWARE\WOW6432Node\AMD\AMDProfiler\InstallationPath` 与已知安装根匹配。因此当前 `ROOT_CAUSE = CXL_PROCESS_EXECUTABLE_DIRECTORY_POLICY_MISMATCH`、置信度 HIGH；`PROCESS_BASENAME_ONLY_CONTROL` 已取消，目录-only confirmation 仍为可选、未运行且需要单独授权的安装树临时写入。详见 [`docs/measurements/cpu-sensor-amd-executable-directory-root-cause.md`](../measurements/cpu-sensor-amd-executable-directory-root-cause.md)。
 
 该结论不宣称 CXL 直接调用 `KERNEL32!FatalExit`，也不改变历史记录、B1 门或生产 provider 计划。
+
+## CPU-SENSOR-AMD-EXECUTABLE-DIRECTORY-FINAL-RUNTIME-CONFIRMATION 当前状态
+
+已准备但尚未执行一次严格的 byte-identical directory counterfactual：复用
+未修改的 `amd-uprof-static-api-hold-fixture.exe`，只将其临时复制到
+`D:\apps\AMDuProf\bin\resource-timeline-amd-static-hold-confirm.exe`，从同一
+手工管理员 x64 PowerShell、同一 `bin` 工作目录、无参数、无 debugger、无
+profiling/sampling 启动，并在持久化 qualification 后删除且校验该精确文件。
+wrapper 的非 AMD synthetic validation 和静态 PE/hash/signature preflight 已
+通过；本目录确认仍为 `prepared / awaiting human authorization`，不能视为
+runtime complete。不得运行 B1 或开始 `CPU-SENSOR-AMD-PROVIDER-DESIGN`。
+详见 [`docs/measurements/cpu-sensor-amd-executable-directory-runtime-confirmation.md`](../measurements/cpu-sensor-amd-executable-directory-runtime-confirmation.md)。
