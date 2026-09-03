@@ -388,3 +388,27 @@ install a production privileged component or use per-sample UAC. Long-lived
 session behavior, restart/recovery, timestamp mapping, temperature/frequency,
 provider registration, user-facing settings, and production admission remain
 deferred.
+
+## PRIVILEGE-CONTEXT QUALIFICATION PREPARATION
+
+The next single qualification is now prepared as
+`AMD_CLI_SERVICE_CONTEXT_QUALIFICATION`. It uses a separate
+qualification-only genuine SCM service harness under
+[`tools/amd-cli-service-context-qualification`](../../tools/amd-cli-service-context-qualification/README.md)
+and the first feasibility account is LocalSystem. The harness derives the
+registry-installed `AMDuProfCLI.exe`, launches exactly one fixed ten-second
+package-power session in `InstallationPath\\bin`, and persists Session 0,
+token, service-status, raw-process, and output evidence under a protected
+ProgramData run root. It uses the existing PowerShell package-power parser
+after the target exits.
+
+```text
+RESULT = ADMIN_SERVICE_CONTEXT_QUALIFICATION_REQUIRED
+SERVICE_BROKER_CANDIDATE = LEADING_PENDING_RUNTIME_QUALIFICATION
+SERVICE_SESSION0_AMD_CLI_QUALIFIED = false
+AMD_PRIVILEGE_ARCHITECTURE = DEFER_INSUFFICIENT_EVIDENCE
+LONG_LIVED_SESSION_ORDERING = AFTER_PRIVILEGE_CONTEXT_QUALIFICATION
+```
+
+No service registration, AMD CLI launch, profiling, IPC, installer change, or
+production provider registration was performed while preparing this harness.

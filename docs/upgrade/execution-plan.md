@@ -256,3 +256,26 @@ long-lived/all-day session qualification；temperature/frequency、timestamp/
 storage contract、provider registration、schema/UI 和 production admission
 仍保持 deferred。详见
 [`cpu-sensor-amd-cli-provider-spike.md`](../architecture/cpu-sensor-amd-cli-provider-spike.md)。
+
+## CPU-SENSOR-AMD-CLI-SERVICE-CONTEXT-QUALIFICATION 当前状态
+
+`AMD_CLI_SERVICE_CONTEXT_QUALIFICATION` 已完成准备，尚未运行：
+
+```text
+AMD_CLI_SERVICE_CONTEXT_QUALIFICATION = prepared / awaiting explicit Administrator authorization
+RESULT = ADMIN_SERVICE_CONTEXT_QUALIFICATION_REQUIRED
+SERVICE_BROKER_CANDIDATE = LEADING_PENDING_RUNTIME_QUALIFICATION
+AMD_PRIVILEGE_ARCHITECTURE = DEFER_INSUFFICIENT_EVIDENCE
+SERVICE_SESSION0_AMD_CLI_QUALIFIED = false
+MINIMUM_REQUIRED_WINDOWS_PRIVILEGES = UNPROVEN
+LONG_LIVED_SESSION_ORDERING = AFTER_PRIVILEGE_CONTEXT_QUALIFICATION
+```
+
+已新增独立 qualification-only SCM service harness：它不属于生产
+Provider、没有 IPC/installer/autostart，不注册服务，也不接受任意可执行文件、
+argv、cwd、环境或输出路径。未来人工运行仅创建一个 manual LocalSystem
+service，执行一次固定的 10 秒 package-power CLI session，持久化 Session 0
+和原始结果后删除同名注册。非 AMD Rust/PowerShell tests 已通过；不标记
+Service/Session 0、least privilege、IPC、long-lived 或 production provider
+为完成。详见
+[`cpu-sensor-amd-service-context-qualification.md`](../measurements/cpu-sensor-amd-service-context-qualification.md)。

@@ -564,9 +564,41 @@ responsiveness, restart/sleep/reboot behavior, version/update policy, legal
 and licensing review, and an additive package-power storage/DTO contract.
 Temperature and frequency remain deferred and are not part of this decision.
 
+## SERVICE-CONTEXT QUALIFICATION PREPARATION
+
+The leading service-broker candidate now has a separate qualification-only
+SCM harness in
+[`tools/amd-cli-service-context-qualification`](../../tools/amd-cli-service-context-qualification/README.md).
+It is a genuine Windows Service executable, but it is not a production broker:
+it has no IPC, installer, autostart, service registration, or application
+dependency. It accepts only a controlled ProgramData run-root, derives the
+AMD CLI from the observed registry installation path, and uses one fixed
+ten-second package-power command. The existing package-power post-processor
+remains the single parser.
+
+The prepared future run uses a manually registered `LocalSystem` service with
+manual/demand start, Session 0 proof, a bounded 30-second CLI timeout, and
+qualification-before-cleanup evidence. The run must prove the service account
+SID, Session 0, x64 process, token integrity/elevation, CLI identity, raw
+capture, typed parser result, cadence, final SCM status, and exact service
+deletion. It must not change AMD files, registry, PATH, drivers, services, or
+security settings beyond the exact temporary qualification registration.
+
+```text
+SERVICE_BROKER_CANDIDATE = LEADING_PENDING_RUNTIME_QUALIFICATION
+SERVICE_SESSION0_AMD_CLI_QUALIFIED = false
+NEXT_RUNTIME_QUALIFICATION = AMD_CLI_SERVICE_CONTEXT_QUALIFICATION
+LONG_LIVED_SESSION_ORDERING = AFTER_PRIVILEGE_CONTEXT_QUALIFICATION
+```
+
+The qualification package's non-AMD Rust and PowerShell tests passed without
+registering a service or launching an AMD executable. The exact future
+Administrator command is documented in
+[`cpu-sensor-amd-service-context-qualification.md`](../measurements/cpu-sensor-amd-service-context-qualification.md).
+
 ## NOT DONE
 
-- No Windows Service was implemented or registered.
+- No production Windows Service was implemented or registered.
 - No Scheduled Task was registered.
 - No IPC endpoint, ACL, installer, elevation flow, or service account was
   created.
