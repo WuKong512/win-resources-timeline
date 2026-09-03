@@ -117,6 +117,7 @@ try {
     [void](New-Item -ItemType Directory -Path $runtimeEvidenceRoot -Force)
     $beforeLaunch = Get-AmdCliExecutionEvidence -EvidenceRoot $runtimeEvidenceRoot
     Assert-True -Condition (-not $beforeLaunch.amd_runtime_executed) -Message 'runtime was reported before launch evidence'
+    Assert-True -Condition (-not $beforeLaunch.process_spawned) -Message 'pre-launch process state mismatch'
     Assert-True -Condition ($beforeLaunch.execution_state -eq 'NOT_LAUNCHED') -Message 'pre-launch execution state mismatch'
     Write-JsonFile -Path (Join-Path $runtimeEvidenceRoot 'AMD-CLI-LAUNCH.json') -Value ([pscustomobject]@{
         process_started = $true
@@ -134,9 +135,63 @@ try {
         process_started = $true
         target_exit_signed = 1
     })
+    Write-JsonFile -Path (Join-Path $runtimeEvidenceRoot 'SERVICE-RUN-RESULT.json') -Value ([pscustomobject]@{
+        process_spawned = $true
+        target_pid = 1234
+        launch_evidence_persisted = $true
+        complete_result_persisted = $true
+        amd_runtime_executed = $true
+        cli_execution_state = 'LAUNCHED_COMPLETE_RESULT'
+    })
     $afterComplete = Get-AmdCliExecutionEvidence -EvidenceRoot $runtimeEvidenceRoot
     Assert-True -Condition $afterComplete.amd_runtime_executed -Message 'completed synthetic launch reported false runtime'
     Assert-True -Condition ($afterComplete.execution_state -eq 'LAUNCHED_COMPLETE_RESULT') -Message 'complete launch state mismatch'
+
+    $postSpawnFailureRoot = Join-Path $root 'post-spawn-evidence-failure'
+    [void](New-Item -ItemType Directory -Path $postSpawnFailureRoot -Force)
+    Write-JsonFile -Path (Join-Path $postSpawnFailureRoot 'SERVICE-HARNESS-ERROR.json') -Value ([pscustomobject]@{
+        process_spawned = $true
+        target_pid = 5678
+        launch_evidence_persisted = $false
+        complete_result_persisted = $false
+        amd_runtime_executed = $true
+        amd_cli_execution_state = 'LAUNCHED_INCOMPLETE_RESULT'
+    })
+    $postSpawnFailure = Get-AmdCliExecutionEvidence -EvidenceRoot $postSpawnFailureRoot
+    Assert-True -Condition $postSpawnFailure.amd_runtime_executed -Message 'post-spawn persistence failure lost runtime fact'
+    Assert-True -Condition ($postSpawnFailure.process_spawned -and $postSpawnFailure.execution_state -eq 'LAUNCHED_INCOMPLETE_RESULT') -Message 'post-spawn persistence failure was reported as not launched'
+    Assert-True -Condition (-not $postSpawnFailure.launch_evidence_present) -Message 'post-spawn fixture unexpectedly has launch file'
+
+    $completePersistenceRoot = Join-Path $root 'complete-persistence-state'
+    [void](New-Item -ItemType Directory -Path $completePersistenceRoot -Force)
+    Write-JsonFile -Path (Join-Path $completePersistenceRoot 'AMD-CLI-LAUNCH.json') -Value ([pscustomobject]@{
+        process_started = $true
+        target_pid = 9876
+    })
+    Write-JsonFile -Path (Join-Path $completePersistenceRoot 'AMD-SERVICE-CLI-PROCESS-RESULT.json') -Value ([pscustomobject]@{
+        process_started = $true
+        target_exit_signed = 0
+    })
+    Write-JsonFile -Path (Join-Path $completePersistenceRoot 'SERVICE-RUN-RESULT.json') -Value ([pscustomobject]@{
+        process_spawned = $true
+        target_pid = 9876
+        launch_evidence_persisted = $true
+        complete_result_persisted = $false
+        amd_runtime_executed = $true
+        cli_execution_state = 'LAUNCHED_INCOMPLETE_RESULT'
+    })
+    $persistenceFailure = Get-AmdCliExecutionEvidence -EvidenceRoot $completePersistenceRoot
+    Assert-True -Condition ($persistenceFailure.execution_state -eq 'LAUNCHED_INCOMPLETE_RESULT') -Message 'failed process-result persistence was upgraded by file presence'
+    Write-JsonFile -Path (Join-Path $completePersistenceRoot 'SERVICE-RUN-RESULT.json') -Value ([pscustomobject]@{
+        process_spawned = $true
+        target_pid = 9876
+        launch_evidence_persisted = $true
+        complete_result_persisted = $true
+        amd_runtime_executed = $true
+        cli_execution_state = 'LAUNCHED_COMPLETE_RESULT'
+    })
+    $persistenceSuccess = Get-AmdCliExecutionEvidence -EvidenceRoot $completePersistenceRoot
+    Assert-True -Condition ($persistenceSuccess.execution_state -eq 'LAUNCHED_COMPLETE_RESULT') -Message 'persisted process-result state was not recognized'
 
     $csvDir = Join-Path $fixtureRoot 'timechart-output'
     [void](New-Item -ItemType Directory -Path $csvDir -Force)
@@ -191,6 +246,8 @@ RecordId,Timestamp,socket0-package-power
     Write-Output 'AMD_RUNTIME_FALSE_BEFORE_LAUNCH=PASS'
     Write-Output 'AMD_RUNTIME_TRUE_AFTER_SYNTHETIC_LAUNCH_RECORD=PASS'
     Write-Output 'FAILED_POST_LAUNCH_PATH_DOES_NOT_REPORT_FALSE=PASS'
+    Write-Output 'POST_SPAWN_EVIDENCE_FAILURE_NEVER_REPORTS_NOT_LAUNCHED=PASS'
+    Write-Output 'COMPLETE_RESULT_STATE_REQUIRES_PERSISTENCE=PASS'
     Write-Output 'AMD_RUNTIME_EXECUTED=false'
 } finally {
     if (Test-Path -LiteralPath $root) {

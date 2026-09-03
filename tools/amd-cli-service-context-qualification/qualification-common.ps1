@@ -44,22 +44,108 @@ function Get-AmdCliExecutionEvidence {
 
     $launchPath = Join-Path $EvidenceRoot 'AMD-CLI-LAUNCH.json'
     $completeResultPath = Join-Path $EvidenceRoot 'AMD-SERVICE-CLI-PROCESS-RESULT.json'
+    $serviceRunResultPath = Join-Path $EvidenceRoot 'SERVICE-RUN-RESULT.json'
+    $fallbackErrorPath = Join-Path $EvidenceRoot 'SERVICE-HARNESS-ERROR.json'
     $launchPresent = Test-Path -LiteralPath $launchPath -PathType Leaf
     $completeResultPresent = Test-Path -LiteralPath $completeResultPath -PathType Leaf
-    $executionState = if (-not $launchPresent) {
+
+    $serviceRunResult = $null
+    if (Test-Path -LiteralPath $serviceRunResultPath -PathType Leaf) {
+        try {
+            $serviceRunResult = Get-Content -LiteralPath $serviceRunResultPath -Raw | ConvertFrom-Json
+        } catch {
+            $serviceRunResult = $null
+        }
+    }
+    $fallbackError = $null
+    if (Test-Path -LiteralPath $fallbackErrorPath -PathType Leaf) {
+        try {
+            $fallbackError = Get-Content -LiteralPath $fallbackErrorPath -Raw | ConvertFrom-Json
+        } catch {
+            $fallbackError = $null
+        }
+    }
+
+    $processSpawned = $launchPresent
+    $targetPid = $null
+    $launchEvidencePersisted = $launchPresent
+    $completeResultPersisted = $completeResultPresent
+    $evidenceSource = 'file-presence-fallback'
+
+    if ($null -ne $serviceRunResult -and
+        $serviceRunResult.PSObject.Properties.Name -contains 'process_spawned') {
+        $processSpawned = [bool]$serviceRunResult.process_spawned
+        $targetPid = $serviceRunResult.target_pid
+        $launchEvidencePersisted = if ($serviceRunResult.PSObject.Properties.Name -contains 'launch_evidence_persisted') {
+            [bool]$serviceRunResult.launch_evidence_persisted
+        } else {
+            $launchPresent
+        }
+        $completeResultPersisted = if ($serviceRunResult.PSObject.Properties.Name -contains 'complete_result_persisted') {
+            [bool]$serviceRunResult.complete_result_persisted
+        } else {
+            $completeResultPresent
+        }
+        $evidenceSource = 'SERVICE-RUN-RESULT.json'
+    } elseif ($null -ne $fallbackError -and
+        (($fallbackError.PSObject.Properties.Name -contains 'process_spawned') -or
+            ($fallbackError.PSObject.Properties.Name -contains 'amd_runtime_executed'))) {
+        $processSpawned = if ($fallbackError.PSObject.Properties.Name -contains 'process_spawned') {
+            [bool]$fallbackError.process_spawned
+        } else {
+            [bool]$fallbackError.amd_runtime_executed
+        }
+        $targetPid = if ($fallbackError.PSObject.Properties.Name -contains 'target_pid') {
+            $fallbackError.target_pid
+        } else {
+            $null
+        }
+        $launchEvidencePersisted = if ($fallbackError.PSObject.Properties.Name -contains 'launch_evidence_persisted') {
+            [bool]$fallbackError.launch_evidence_persisted
+        } else {
+            $launchPresent
+        }
+        $completeResultPersisted = if ($fallbackError.PSObject.Properties.Name -contains 'complete_result_persisted') {
+            [bool]$fallbackError.complete_result_persisted
+        } else {
+            $completeResultPresent
+        }
+        $evidenceSource = 'SERVICE-HARNESS-ERROR.json'
+    }
+
+    if ($null -eq $targetPid -and $launchPresent) {
+        try {
+            $launch = Get-Content -LiteralPath $launchPath -Raw | ConvertFrom-Json
+            $targetPid = $launch.target_pid
+        } catch {
+            $targetPid = $null
+        }
+    }
+
+    # A complete execution state requires both the service's positive persistence fact and
+    # the durable process-result file.  A partial file must not upgrade an incomplete run.
+    $completeResultPersisted = $completeResultPersisted -and $completeResultPresent
+    $executionState = if (-not $processSpawned) {
         'NOT_LAUNCHED'
-    } elseif ($completeResultPresent) {
+    } elseif ($completeResultPersisted) {
         'LAUNCHED_COMPLETE_RESULT'
     } else {
         'LAUNCHED_INCOMPLETE_RESULT'
     }
     [pscustomobject]@{
-        amd_runtime_executed = $launchPresent
+        amd_runtime_executed = $processSpawned
+        process_spawned = $processSpawned
+        target_pid = $targetPid
         execution_state = $executionState
         launch_evidence_path = $launchPath
         launch_evidence_present = $launchPresent
+        launch_evidence_persisted = $launchEvidencePersisted
         complete_result_path = $completeResultPath
         complete_result_present = $completeResultPresent
+        complete_result_persisted = $completeResultPersisted
+        service_run_result_path = $serviceRunResultPath
+        fallback_error_path = $fallbackErrorPath
+        evidence_source = $evidenceSource
     }
 }
 

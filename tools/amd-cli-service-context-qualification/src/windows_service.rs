@@ -1,5 +1,5 @@
 use amd_cli_service_context_probe::{
-    cli_execution_state, exit_code_hex, fixed_cli_arguments, write_json, CliArtifactIdentity,
+    exit_code_hex, fixed_cli_arguments, write_json, CliArtifactIdentity, CliExecutionEvidence,
     CliLaunchEvidence, CliProcessResult, ServiceContextEvidence, ServiceQualificationResult,
     ServiceState, ServiceStatusJournal, AMD_CLI_NAME, AMD_INSTALL_REGISTRY_KEY,
     AMD_INSTALL_REGISTRY_VALUE, CLI_TIMEOUT_MS, EXPECTED_AMD_CLI_SHA256, EXPECTED_AMD_CLI_VERSION,
@@ -156,12 +156,14 @@ unsafe extern "system" fn service_main(_argc: u32, _argv: *mut PWSTR) {
         "LocalSystem Session 0 context verified",
     );
 
+    let mut cli_identity_validated = false;
     let result = match discover_cli() {
         Ok((cli_path, artifact)) => {
+            cli_identity_validated = true;
             let _ = write_json(&run_root.join("CLI-ARTIFACT-IDENTITY.json"), &artifact);
             run_cli(&run_root, &cli_path)
         }
-        Err(error) => Err(error),
+        Err(error) => Err(CliRunError::not_launched(error)),
     };
 
     let (exit_code, detail) = match result {
@@ -172,55 +174,74 @@ unsafe extern "system" fn service_main(_argc: u32, _argv: *mut PWSTR) {
                 && cli_result.target_exit_signed == Some(0)
                 && cli_result.capture_complete
                 && !cli_result.harness_failed;
-            let code = if success { 0 } else { 1 };
-            let _ = write_json(
-                &run_root.join("AMD-SERVICE-CLI-PROCESS-RESULT.json"),
+            let process_result_path = run_root.join("AMD-SERVICE-CLI-PROCESS-RESULT.json");
+            let launch_evidence_path = run_root.join("AMD-CLI-LAUNCH.json");
+            let launch_evidence_persisted = launch_evidence_path.is_file();
+            let mut execution = CliExecutionEvidence::from_process_result(
                 &cli_result,
+                launch_evidence_persisted,
+                false,
             );
-            let qualification = if success {
+            let complete_result_persisted = match write_json(&process_result_path, &cli_result) {
+                Ok(()) => true,
+                Err(error) => {
+                    persist_execution_error(
+                        &run_root,
+                        format!("AMD-SERVICE-CLI-PROCESS-RESULT.json persistence failed: {error}"),
+                        &execution,
+                    );
+                    false
+                }
+            };
+            execution.complete_result_persisted = complete_result_persisted;
+            let qualification = if !complete_result_persisted {
+                "EVIDENCE_INCOMPLETE"
+            } else if success {
                 "TARGET_COMPLETED"
             } else {
                 "TARGET_FAILED"
             };
-            let launch_evidence_path = run_root.join("AMD-CLI-LAUNCH.json");
-            let launch_evidence_present = launch_evidence_path.is_file();
-            let execution_state = cli_execution_state(launch_evidence_present, true);
-            let summary = ServiceQualificationResult {
-                schema: "cpu-sensor-amd-service-context/v1".to_owned(),
-                service_name: SERVICE_NAME.to_owned(),
-                qualification_only: QUALIFICATION_ONLY,
-                service_context_valid: context_valid,
-                cli_identity_validated_by_wrapper: true,
-                amd_runtime_executed: launch_evidence_present,
-                cli_execution_state: execution_state.to_owned(),
-                cli_launch_evidence_path: launch_evidence_path.to_string_lossy().into_owned(),
-                cli_process_result_path: run_root
-                    .join("AMD-SERVICE-CLI-PROCESS-RESULT.json")
-                    .to_string_lossy()
-                    .into_owned(),
-                qualification: qualification.to_owned(),
-                created_at_utc_unix_ms: amd_cli_service_context_probe::unix_time_millis(),
+            let code = if success && complete_result_persisted {
+                0
+            } else {
+                1
             };
-            let _ = write_json(&run_root.join("SERVICE-RUN-RESULT.json"), &summary);
+            let summary = service_qualification_result(
+                &run_root,
+                context_valid,
+                cli_identity_validated,
+                &execution,
+                qualification,
+            );
+            if let Err(error) = write_json(&run_root.join("SERVICE-RUN-RESULT.json"), &summary) {
+                persist_execution_error(
+                    &run_root,
+                    format!("SERVICE-RUN-RESULT.json persistence failed: {error}"),
+                    &execution,
+                );
+            }
             (code, qualification.to_owned())
         }
         Err(error) => {
-            let launch_evidence_path = run_root.join("AMD-CLI-LAUNCH.json");
-            let launch_evidence_present = launch_evidence_path.is_file();
-            let execution_state = cli_execution_state(launch_evidence_present, false);
-            let _ = write_json(
-                &run_root.join("SERVICE-HARNESS-ERROR.json"),
-                &serde_json::json!({
-                    "service_name": SERVICE_NAME,
-                    "qualification_only": QUALIFICATION_ONLY,
-                    "error": error,
-                    "amd_cli_launched": launch_evidence_present,
-                    "amd_runtime_executed": launch_evidence_present,
-                    "amd_cli_execution_state": execution_state,
-                    "amd_cli_launch_evidence_path": launch_evidence_path,
-                }),
+            let execution = error.execution;
+            persist_execution_error(&run_root, error.message, &execution);
+            let summary = service_qualification_result(
+                &run_root,
+                context_valid,
+                cli_identity_validated,
+                &execution,
+                "SERVICE_HARNESS_FAILED",
             );
-            let detail = if launch_evidence_present {
+            if let Err(summary_error) =
+                write_json(&run_root.join("SERVICE-RUN-RESULT.json"), &summary)
+            {
+                persist_execution_error(
+                    &run_root,
+                    format!("SERVICE-RUN-RESULT.json persistence failed: {summary_error}"),
+                    &execution,
+                );
+            }
+            let detail = if execution.process_spawned {
                 "service failed after AMD CLI launch before a complete CLI result"
             } else {
                 "service failed before AMD CLI launch"
@@ -362,19 +383,110 @@ fn read_installation_root() -> Result<PathBuf, String> {
     Ok(PathBuf::from(root))
 }
 
-fn run_cli(run_root: &Path, cli_path: &Path) -> Result<CliProcessResult, String> {
+fn service_qualification_result(
+    run_root: &Path,
+    context_valid: bool,
+    cli_identity_validated_by_wrapper: bool,
+    execution: &CliExecutionEvidence,
+    qualification: &str,
+) -> ServiceQualificationResult {
+    ServiceQualificationResult {
+        schema: "cpu-sensor-amd-service-context/v1".to_owned(),
+        service_name: SERVICE_NAME.to_owned(),
+        qualification_only: QUALIFICATION_ONLY,
+        service_context_valid: context_valid,
+        cli_identity_validated_by_wrapper,
+        amd_runtime_executed: execution.amd_runtime_executed(),
+        process_spawned: execution.process_spawned,
+        target_pid: execution.target_pid,
+        launch_evidence_persisted: execution.launch_evidence_persisted,
+        complete_result_persisted: execution.complete_result_persisted,
+        cli_execution_state: execution.execution_state().to_owned(),
+        cli_launch_evidence_path: run_root
+            .join("AMD-CLI-LAUNCH.json")
+            .to_string_lossy()
+            .into_owned(),
+        cli_process_result_path: run_root
+            .join("AMD-SERVICE-CLI-PROCESS-RESULT.json")
+            .to_string_lossy()
+            .into_owned(),
+        qualification: qualification.to_owned(),
+        created_at_utc_unix_ms: amd_cli_service_context_probe::unix_time_millis(),
+    }
+}
+
+fn persist_execution_error(
+    run_root: &Path,
+    error: impl Into<String>,
+    execution: &CliExecutionEvidence,
+) {
+    let launch_evidence_path = run_root.join("AMD-CLI-LAUNCH.json");
+    let process_result_path = run_root.join("AMD-SERVICE-CLI-PROCESS-RESULT.json");
+    let _ = write_json(
+        &run_root.join("SERVICE-HARNESS-ERROR.json"),
+        &serde_json::json!({
+            "service_name": SERVICE_NAME,
+            "qualification_only": QUALIFICATION_ONLY,
+            "error": error.into(),
+            "process_spawned": execution.process_spawned,
+            "target_pid": execution.target_pid,
+            "launch_evidence_persisted": execution.launch_evidence_persisted,
+            "complete_result_persisted": execution.complete_result_persisted,
+            "amd_cli_launched": execution.process_spawned,
+            "amd_runtime_executed": execution.amd_runtime_executed(),
+            "amd_cli_execution_state": execution.execution_state(),
+            "amd_cli_launch_evidence_path": launch_evidence_path,
+            "amd_cli_process_result_path": process_result_path,
+        }),
+    );
+}
+
+#[derive(Debug)]
+struct CliRunError {
+    message: String,
+    execution: CliExecutionEvidence,
+}
+
+impl CliRunError {
+    fn not_launched(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+            execution: CliExecutionEvidence::not_launched(),
+        }
+    }
+
+    fn after_spawn(
+        target_pid: u32,
+        launch_evidence_persisted: bool,
+        message: impl Into<String>,
+    ) -> Self {
+        Self {
+            message: message.into(),
+            execution: CliExecutionEvidence::from_spawn(
+                Some(target_pid),
+                launch_evidence_persisted,
+                false,
+            ),
+        }
+    }
+}
+
+fn run_cli(run_root: &Path, cli_path: &Path) -> Result<CliProcessResult, CliRunError> {
     let output_dir = run_root.join("timechart-output");
-    fs::create_dir_all(&output_dir)
-        .map_err(|error| format!("creating output directory failed: {error}"))?;
+    fs::create_dir_all(&output_dir).map_err(|error| {
+        CliRunError::not_launched(format!("creating output directory failed: {error}"))
+    })?;
     let stdout_path = run_root.join("AMD-CLI.stdout.txt");
     let stderr_path = run_root.join("AMD-CLI.stderr.txt");
-    let stdout_file = File::create(&stdout_path)
-        .map_err(|error| format!("creating stdout file failed: {error}"))?;
-    let stderr_file = File::create(&stderr_path)
-        .map_err(|error| format!("creating stderr file failed: {error}"))?;
+    let stdout_file = File::create(&stdout_path).map_err(|error| {
+        CliRunError::not_launched(format!("creating stdout file failed: {error}"))
+    })?;
+    let stderr_file = File::create(&stderr_path).map_err(|error| {
+        CliRunError::not_launched(format!("creating stderr file failed: {error}"))
+    })?;
     let working_directory = cli_path
         .parent()
-        .ok_or_else(|| "AMDuProfCLI.exe has no parent directory".to_owned())?;
+        .ok_or_else(|| CliRunError::not_launched("AMDuProfCLI.exe has no parent directory"))?;
     let arguments = fixed_cli_arguments(&output_dir);
     let started_at = amd_cli_service_context_probe::unix_time_millis();
     let stopwatch = Instant::now();
@@ -387,9 +499,9 @@ fn run_cli(run_root: &Path, cli_path: &Path) -> Result<CliProcessResult, String>
         .stdin(Stdio::null())
         .stdout(Stdio::from(stdout_file))
         .stderr(Stdio::from(stderr_file));
-    let mut child = command
-        .spawn()
-        .map_err(|error| format!("AMDuProfCLI.exe spawn failed: {error}"))?;
+    let mut child = command.spawn().map_err(|error| {
+        CliRunError::not_launched(format!("AMDuProfCLI.exe spawn failed: {error}"))
+    })?;
     let target_pid = child.id();
     let launch_evidence = CliLaunchEvidence {
         schema: "cpu-sensor-amd-service-context/cli-launch/v1".to_owned(),
@@ -404,10 +516,15 @@ fn run_cli(run_root: &Path, cli_path: &Path) -> Result<CliProcessResult, String>
     if let Err(error) = write_json(&run_root.join("AMD-CLI-LAUNCH.json"), &launch_evidence) {
         let _ = child.kill();
         let _ = wait_for_exit_until(&mut child, Instant::now() + Duration::from_secs(5));
-        return Err(format!(
-            "AMDuProfCLI.exe spawned with PID {target_pid}, but launch evidence persistence failed: {error}"
+        return Err(CliRunError::after_spawn(
+            target_pid,
+            false,
+            format!(
+                "AMDuProfCLI.exe spawned with PID {target_pid}, but launch evidence persistence failed: {error}"
+            ),
         ));
     }
+    let launch_evidence_persisted = true;
     let job = OwnedJob::try_attach(&child);
     let job_assigned = job.is_some();
 
@@ -423,10 +540,13 @@ fn run_cli(run_root: &Path, cli_path: &Path) -> Result<CliProcessResult, String>
             cleanup_succeeded = terminated;
             break status;
         }
-        if let Some(status) = child
-            .try_wait()
-            .map_err(|error| format!("polling AMDuProfCLI.exe failed: {error}"))?
-        {
+        if let Some(status) = child.try_wait().map_err(|error| {
+            CliRunError::after_spawn(
+                target_pid,
+                launch_evidence_persisted,
+                format!("polling AMDuProfCLI.exe failed: {error}"),
+            )
+        })? {
             break Some(status);
         }
         if stopwatch.elapsed() >= Duration::from_millis(CLI_TIMEOUT_MS) {

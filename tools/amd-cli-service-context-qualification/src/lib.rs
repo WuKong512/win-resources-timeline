@@ -228,13 +228,68 @@ pub struct CliLaunchEvidence {
     pub output_directory: String,
 }
 
-pub fn cli_execution_state(
-    launch_evidence_present: bool,
-    complete_result_present: bool,
-) -> &'static str {
-    if !launch_evidence_present {
+/// In-memory lifecycle facts for one vendor CLI invocation.
+///
+/// `process_spawned` is the authoritative runtime fact.  Persisted launch/result files are
+/// evidence-quality facts and must never turn a known post-spawn execution back into
+/// `NOT_LAUNCHED` when their own writes fail.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct CliExecutionEvidence {
+    pub process_spawned: bool,
+    pub target_pid: Option<u32>,
+    pub launch_evidence_persisted: bool,
+    pub complete_result_persisted: bool,
+}
+
+impl CliExecutionEvidence {
+    pub fn not_launched() -> Self {
+        Self {
+            process_spawned: false,
+            target_pid: None,
+            launch_evidence_persisted: false,
+            complete_result_persisted: false,
+        }
+    }
+
+    pub fn from_spawn(
+        target_pid: Option<u32>,
+        launch_evidence_persisted: bool,
+        complete_result_persisted: bool,
+    ) -> Self {
+        Self {
+            process_spawned: true,
+            target_pid,
+            launch_evidence_persisted,
+            complete_result_persisted,
+        }
+    }
+
+    pub fn from_process_result(
+        result: &CliProcessResult,
+        launch_evidence_persisted: bool,
+        complete_result_persisted: bool,
+    ) -> Self {
+        Self {
+            process_spawned: result.process_started,
+            target_pid: result.target_pid,
+            launch_evidence_persisted,
+            complete_result_persisted,
+        }
+    }
+
+    pub fn amd_runtime_executed(&self) -> bool {
+        self.process_spawned
+    }
+
+    pub fn execution_state(&self) -> &'static str {
+        cli_execution_state(self.process_spawned, self.complete_result_persisted)
+    }
+}
+
+pub fn cli_execution_state(process_spawned: bool, complete_result_persisted: bool) -> &'static str {
+    if !process_spawned {
         CLI_EXECUTION_NOT_LAUNCHED
-    } else if complete_result_present {
+    } else if complete_result_persisted {
         CLI_EXECUTION_LAUNCHED_COMPLETE
     } else {
         CLI_EXECUTION_LAUNCHED_INCOMPLETE
@@ -249,6 +304,10 @@ pub struct ServiceQualificationResult {
     pub service_context_valid: bool,
     pub cli_identity_validated_by_wrapper: bool,
     pub amd_runtime_executed: bool,
+    pub process_spawned: bool,
+    pub target_pid: Option<u32>,
+    pub launch_evidence_persisted: bool,
+    pub complete_result_persisted: bool,
     pub cli_execution_state: String,
     pub cli_launch_evidence_path: String,
     pub cli_process_result_path: String,
@@ -376,6 +435,10 @@ mod tests {
             service_context_valid: false,
             cli_identity_validated_by_wrapper: true,
             amd_runtime_executed: true,
+            process_spawned: true,
+            target_pid: Some(1234),
+            launch_evidence_persisted: true,
+            complete_result_persisted: true,
             cli_execution_state: CLI_EXECUTION_LAUNCHED_COMPLETE.to_owned(),
             cli_launch_evidence_path: "launch.json".to_owned(),
             cli_process_result_path: "result.json".to_owned(),
@@ -406,5 +469,44 @@ mod tests {
             cli_execution_state(true, true),
             CLI_EXECUTION_LAUNCHED_COMPLETE
         );
+    }
+
+    #[test]
+    fn spawn_failed_is_not_launched() {
+        let evidence = CliExecutionEvidence::not_launched();
+        assert!(!evidence.amd_runtime_executed());
+        assert_eq!(evidence.execution_state(), CLI_EXECUTION_NOT_LAUNCHED);
+        assert_eq!(evidence.target_pid, None);
+    }
+
+    #[test]
+    fn post_spawn_launch_evidence_failure_stays_incomplete() {
+        let evidence = CliExecutionEvidence::from_spawn(Some(42), false, false);
+        assert!(evidence.amd_runtime_executed());
+        assert!(!evidence.launch_evidence_persisted);
+        assert_eq!(
+            evidence.execution_state(),
+            CLI_EXECUTION_LAUNCHED_INCOMPLETE
+        );
+    }
+
+    #[test]
+    fn post_spawn_process_result_persistence_failure_stays_incomplete() {
+        let evidence = CliExecutionEvidence::from_spawn(Some(42), true, false);
+        assert!(evidence.amd_runtime_executed());
+        assert!(evidence.launch_evidence_persisted);
+        assert!(!evidence.complete_result_persisted);
+        assert_eq!(
+            evidence.execution_state(),
+            CLI_EXECUTION_LAUNCHED_INCOMPLETE
+        );
+    }
+
+    #[test]
+    fn complete_execution_state_requires_persisted_process_result() {
+        let evidence = CliExecutionEvidence::from_spawn(Some(42), true, true);
+        assert!(evidence.amd_runtime_executed());
+        assert!(evidence.complete_result_persisted);
+        assert_eq!(evidence.execution_state(), CLI_EXECUTION_LAUNCHED_COMPLETE);
     }
 }

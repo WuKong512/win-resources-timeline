@@ -240,11 +240,15 @@ $finalSummary = [pscustomobject]@{
     qualification_before_cleanup = $qualificationSnapshot
     cleanup = [pscustomobject]$cleanup
     amd_runtime_executed = $runtimeEvidence.amd_runtime_executed
+    process_spawned = $runtimeEvidence.process_spawned
+    target_pid = $runtimeEvidence.target_pid
     amd_cli_execution_state = $runtimeEvidence.execution_state
     amd_cli_launch_evidence_path = $runtimeEvidence.launch_evidence_path
+    launch_evidence_persisted = $runtimeEvidence.launch_evidence_persisted
+    complete_result_persisted = $runtimeEvidence.complete_result_persisted
     runtime_evidence = $runtimeEvidence
     wrapper_error = $wrapperError
-    note = 'Manual qualification wrapper; runtime state is derived from persisted launch evidence.'
+    note = 'Manual qualification wrapper; runtime state is derived from service lifecycle evidence and persisted result artifacts.'
 }
 if (Test-Path -LiteralPath $runRoot -PathType Container) {
     Write-JsonFile -Path (Join-Path $runRoot 'ADMIN-AMD-SERVICE-CONTEXT-SUMMARY.json') -Value $finalSummary

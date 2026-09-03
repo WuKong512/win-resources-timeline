@@ -196,13 +196,17 @@ temporary service registration.
 
 The qualification-only harness now persists `AMD-CLI-LAUNCH.json` immediately
 after `AMDuProfCLI.exe` spawn succeeds, before polling or post-processing. Its
-runtime summary derives `amd_runtime_executed` from that durable launch fact,
-not from a successful qualification result. The states are
+typed lifecycle outcome carries the in-memory spawn fact through every
+`run_cli()` exit path. The service summary and, when needed, the
+`SERVICE-HARNESS-ERROR.json` fallback artifact derive `amd_runtime_executed`
+from that fact rather than from launch-file existence or a successful
+qualification result. The states are
 `NOT_LAUNCHED`, `LAUNCHED_INCOMPLETE_RESULT`, and
-`LAUNCHED_COMPLETE_RESULT`; therefore a timeout, target failure, or later
-service post-processing error cannot be reported as “not executed” after the
-CLI was actually launched. This repair was validated with synthetic
-non-AMD evidence only; the Service/Session 0 qualification remains
+`LAUNCHED_COMPLETE_RESULT`; the complete state additionally requires durable
+process-result persistence. Therefore a launch-evidence write failure, timeout,
+target failure, or later service post-processing error cannot be reported as
+“not executed” after the CLI was actually launched. This repair was validated
+with synthetic non-AMD evidence only; the Service/Session 0 qualification remains
 `PREPARED / NOT_RUN`.
 
 ## PROCESS OWNERSHIP AND LIFECYCLE
