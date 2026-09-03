@@ -16,6 +16,11 @@ ROOT_CAUSE_CONFIDENCE = CONFIRMED_BY_STATIC_AND_RUNTIME_COUNTERFACTUAL
 AMD_PROVIDER_ARCHITECTURE = CLI_SUBPROCESS
 DECISION_CONFIDENCE = MEDIUM
 DECISION_STATUS = PROVISIONAL_DIRECTION / NOT_PRODUCTION_ADMITTED
+AMD_PRIVILEGE_ARCHITECTURE = DEFER_INSUFFICIENT_EVIDENCE
+PRIVILEGE_DEPLOYMENT_DECISION = DEFER_INSUFFICIENT_EVIDENCE
+ADMIN_CONSENT_MODEL = ONE_TIME_INSTALL_OR_ENABLE
+SERVICE_SESSION0_AMD_CLI_QUALIFIED = false
+MINIMUM_REQUIRED_WINDOWS_PRIVILEGES = UNPROVEN
 SPIKE_IMPLEMENTATION = PREPARED / BOUNDED_RUNTIME_TECHNICALLY_QUALIFIED
 CPU_PACKAGE_POWER_W_RUNTIME_QUALIFIED = true
 CPU_PACKAGE_POWER_W_PRODUCTION_QUALIFIED = false
@@ -279,39 +284,41 @@ failure mapping, a file-producing session state machine, and a header-driven
 package-power CSV parser. It does not perform an AMD call in-process, request
 elevation, expose settings, or write a metric value into production storage.
 
-## NEXT IMPLEMENTATION TASK (PRIVILEGE DEPLOYMENT)
+## PRIVILEGE DEPLOYMENT DECISION
 
 ```text
-TASK = AMD_CLI_PRIVILEGE_DEPLOYMENT_ARCHITECTURE
+AMD_PRIVILEGE_ARCHITECTURE = DEFER_INSUFFICIENT_EVIDENCE
+DECISION_CONFIDENCE = MEDIUM
+SERVICE_ACCOUNT_RUNTIME_QUALIFICATION_REQUIRED = true
+PUBLIC_REUSABLE_SERVICE_INTERFACE = NOT_FOUND
 ```
 
-Goal: select a legitimate unattended deployment model for the known
-Administrator-only CLI path while keeping the main application non-elevated by
-default. This is not yet a production provider implementation.
+The architecture-level comparison is complete, but no unattended privilege
+deployment model is admitted. The service-broker shape is promising for
+supervision, yet the exact service account and Session 0 behavior are
+unqualified. A Scheduled Task still needs a secure standard-user control ACL,
+typed result/cancellation semantics, and run ownership. Per-session UAC is not
+appropriate for transparent all-day collection, and elevating the main app is
+rejected by the product requirement.
 
-Scope:
+The complete threat model, request allowlist, output ownership, account
+comparison, and decision matrix are in
+[`cpu-sensor-amd-privilege-deployment.md`](cpu-sensor-amd-privilege-deployment.md).
+This decision does not implement or register a service/task, request UAC, or
+change the production collector.
 
-- compare a disabled/no-privilege fallback, user-mediated elevation, and a
-  separately installed privileged helper/service at the architecture level;
-- define capability/status behavior when privilege, driver/service, or the CLI
-  is unavailable;
-- preserve subprocess crash isolation and bounded recovery from this spike;
-- identify the additional security, installation, and support review required
-  before all-day collection.
+The required fallback remains a permission/unavailable provider state while
+the baseline and other providers continue. The next qualification family is:
 
-Required tests include absent/unsupported installation, non-admin permission
-denial, and explicit fallback behavior. Later runtime qualification must also
-cover malformed output, child crash/timeout, disable/re-enable,
-provider restart, concurrent-session busy behavior, sleep/resume, long-run
-overhead, and UI/input responsiveness. No test may silently elevate, modify
-the vendor tree, install a driver/service, or substitute a CLI value for an
-unqualified Resource Timeline metric.
+```text
+NEXT_RUNTIME_QUALIFICATION = AMD_CLI_PRIVILEGE_CONTEXT_QUALIFICATION
+LONG_LIVED_SESSION_ORDERING = AFTER_PRIVILEGE_CONTEXT_QUALIFICATION
+```
 
-The bounded session already established package-power parsing for one
-Administrator run, but success for this next task requires a documented
-privilege/fallback posture. Long-lived collection, timestamp/storage semantics,
-temperature/frequency, distribution, and production admission remain deferred.
-This task is not executed here.
+It must qualify one exact proposed principal/context with a bounded session and
+fixed semantic request, not a broad matrix. It must prove result delivery,
+cancellation, cleanup, and failure isolation before long-lived collection or
+production admission is considered.
 
 ## DEFERRED / EXPLICITLY NOT DONE
 

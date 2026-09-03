@@ -207,7 +207,10 @@ On this installation, non-administrator power initialization returned
 This does not authorize permanent elevation of Resource Timeline.
 
 ```text
-PRIVILEGE_DEPLOYMENT_DECISION = DEFER_PENDING_RUNTIME_AND_PRODUCT_DECISION
+PRIVILEGE_DEPLOYMENT_DECISION = DEFER_INSUFFICIENT_EVIDENCE
+AMD_PRIVILEGE_ARCHITECTURE = DEFER_INSUFFICIENT_EVIDENCE
+DECISION_CONFIDENCE = MEDIUM
+ADMIN_CONSENT_MODEL = ONE_TIME_INSTALL_OR_ENABLE
 ```
 
 The spike represents privilege as a capability/status boundary:
@@ -226,7 +229,11 @@ The future provider must also decide whether a legitimate elevated helper or
 user-approved session exists. A per-session elevation prompt is potentially
 unsuitable for unattended collection; a privileged service has additional
 installation and security cost. Both remain product decisions, not hidden
-implementation details.
+implementation details. The dedicated privilege-deployment record evaluates
+service broker, Scheduled Task, per-session UAC, and elevated-main options. It
+does not select one because Session 0/service-account behavior and
+standard-user task-control ACLs remain unqualified:
+[`cpu-sensor-amd-privilege-deployment.md`](cpu-sensor-amd-privilege-deployment.md).
 
 ## CONFIGURATION AND REGISTRATION BOUNDARY
 
@@ -365,17 +372,19 @@ telemetry interface. No private IPC/authentication surface is used.
 
 ## NEXT TASK
 
-The next implementation/design task is:
+The next qualification family, after the privilege deployment model is chosen,
+is:
 
 ```text
-AMD_CLI_PRIVILEGE_DEPLOYMENT_ARCHITECTURE
+AMD_CLI_PRIVILEGE_CONTEXT_QUALIFICATION
 ```
 
-The bounded session is technically qualified for package-power parsing, but
-the historical non-administrator access-denied result leaves unattended
-privilege deployment as the most immediate product blocker. That task must
-evaluate a legitimate deployment model while keeping the main app
-non-elevated by default. Long-lived session behavior, restart/recovery,
-timestamp mapping, temperature/frequency, provider registration, user-facing
-settings, and production admission remain deferred and must not be inferred
-from this run.
+The deployment architecture is documented but deliberately deferred: no
+service or task has been implemented, and no account or cross-integrity IPC
+contract has been qualified. The context qualification must select one exact
+proposed principal, use a fixed semantic power request, and prove bounded
+result delivery, cancellation, cleanup, and failure isolation. It must not
+install a production privileged component or use per-sample UAC. Long-lived
+session behavior, restart/recovery, timestamp mapping, temperature/frequency,
+provider registration, user-facing settings, and production admission remain
+deferred.

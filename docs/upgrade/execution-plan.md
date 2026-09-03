@@ -216,6 +216,10 @@ AMD_CLI_PROVIDER_SPIKE = technically qualified for bounded session / production 
 CPU_PACKAGE_POWER_W_RUNTIME_QUALIFIED = true
 CPU_PACKAGE_POWER_W_PRODUCTION_QUALIFIED = false
 AMD_PRODUCTION_PROVIDER = not completed / not registered
+AMD_PRIVILEGE_ARCHITECTURE = DEFER_INSUFFICIENT_EVIDENCE
+PRIVILEGE_DEPLOYMENT_DECISION = DEFER_INSUFFICIENT_EVIDENCE
+SERVICE_SESSION0_AMD_CLI_QUALIFIED = false
+MINIMUM_REQUIRED_WINDOWS_PRIVILEGES = UNPROVEN
 ```
 
 本 spike 已在不修改 production registration 的前提下准备可测试的 CLI
@@ -236,8 +240,19 @@ package power spike 提升到 bounded-session technical qualification，不能
 推断 production metric approval。详见
 [`cpu-sensor-amd-cli-spike-runtime.md`](../measurements/cpu-sensor-amd-cli-spike-runtime.md)。
 
-下一项实现/架构任务是 `AMD_CLI_PRIVILEGE_DEPLOYMENT_ARCHITECTURE`，用于
-解决已观察到的 Administrator privilege boundary；temperature/frequency、
-long-lived/all-day session、timestamp/storage contract、provider registration、
-schema/UI 和永久提权均保持 deferred。详见
+`AMD_CLI_PRIVILEGE_DEPLOYMENT_ARCHITECTURE` 已完成架构、威胁模型和
+fallback 审计，但没有选择尚未验证的 Service/Task context：
+`AMD_PRIVILEGE_ARCHITECTURE = DEFER_INSUFFICIENT_EVIDENCE`。
+主应用继续保持 non-elevated-by-default，AMD provider 继续 optional、
+failure-isolated；不注册 service/task，不实现 elevation，不修改 AMD
+installation。详见
+[`cpu-sensor-amd-privilege-deployment.md`](../architecture/cpu-sensor-amd-privilege-deployment.md)。
+
+下一项单一 qualification family 是
+`AMD_CLI_PRIVILEGE_CONTEXT_QUALIFICATION`：在产品先选定一个确切的
+principal/deployment model 后，验证该 context 下的 bounded CLI session、
+typed result、cancellation、cleanup 和 failure isolation。它先于
+long-lived/all-day session qualification；temperature/frequency、timestamp/
+storage contract、provider registration、schema/UI 和 production admission
+仍保持 deferred。详见
 [`cpu-sensor-amd-cli-provider-spike.md`](../architecture/cpu-sensor-amd-cli-provider-spike.md)。
