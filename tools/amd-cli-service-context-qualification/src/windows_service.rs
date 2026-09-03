@@ -1,16 +1,16 @@
 use amd_cli_service_context_probe::{
-    exit_code_hex, fixed_cli_arguments, write_json, CliArtifactIdentity, CliProcessResult,
-    ServiceContextEvidence, ServiceQualificationResult, ServiceState, ServiceStatusJournal,
-    AMD_CLI_NAME, AMD_INSTALL_REGISTRY_KEY, AMD_INSTALL_REGISTRY_VALUE, CLI_TIMEOUT_MS,
-    EXPECTED_AMD_CLI_SHA256, EXPECTED_AMD_CLI_VERSION, EXPECTED_LOCAL_SYSTEM_SID,
-    QUALIFICATION_ONLY, SERVICE_NAME,
+    cli_execution_state, exit_code_hex, fixed_cli_arguments, write_json, CliArtifactIdentity,
+    CliLaunchEvidence, CliProcessResult, ServiceContextEvidence, ServiceQualificationResult,
+    ServiceState, ServiceStatusJournal, AMD_CLI_NAME, AMD_INSTALL_REGISTRY_KEY,
+    AMD_INSTALL_REGISTRY_VALUE, CLI_TIMEOUT_MS, EXPECTED_AMD_CLI_SHA256, EXPECTED_AMD_CLI_VERSION,
+    EXPECTED_LOCAL_SYSTEM_SID, QUALIFICATION_ONLY, SERVICE_NAME,
 };
 use sha2::{Digest, Sha256};
 use std::fs::{self, File};
 use std::os::windows::io::AsRawHandle;
 use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
+use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::OnceLock;
 use std::thread;
@@ -182,12 +182,18 @@ unsafe extern "system" fn service_main(_argc: u32, _argv: *mut PWSTR) {
             } else {
                 "TARGET_FAILED"
             };
+            let launch_evidence_path = run_root.join("AMD-CLI-LAUNCH.json");
+            let launch_evidence_present = launch_evidence_path.is_file();
+            let execution_state = cli_execution_state(launch_evidence_present, true);
             let summary = ServiceQualificationResult {
                 schema: "cpu-sensor-amd-service-context/v1".to_owned(),
                 service_name: SERVICE_NAME.to_owned(),
                 qualification_only: QUALIFICATION_ONLY,
                 service_context_valid: context_valid,
                 cli_identity_validated_by_wrapper: true,
+                amd_runtime_executed: launch_evidence_present,
+                cli_execution_state: execution_state.to_owned(),
+                cli_launch_evidence_path: launch_evidence_path.to_string_lossy().into_owned(),
                 cli_process_result_path: run_root
                     .join("AMD-SERVICE-CLI-PROCESS-RESULT.json")
                     .to_string_lossy()
@@ -199,16 +205,27 @@ unsafe extern "system" fn service_main(_argc: u32, _argv: *mut PWSTR) {
             (code, qualification.to_owned())
         }
         Err(error) => {
+            let launch_evidence_path = run_root.join("AMD-CLI-LAUNCH.json");
+            let launch_evidence_present = launch_evidence_path.is_file();
+            let execution_state = cli_execution_state(launch_evidence_present, false);
             let _ = write_json(
                 &run_root.join("SERVICE-HARNESS-ERROR.json"),
                 &serde_json::json!({
                     "service_name": SERVICE_NAME,
                     "qualification_only": QUALIFICATION_ONLY,
                     "error": error,
-                    "amd_cli_launched": false,
+                    "amd_cli_launched": launch_evidence_present,
+                    "amd_runtime_executed": launch_evidence_present,
+                    "amd_cli_execution_state": execution_state,
+                    "amd_cli_launch_evidence_path": launch_evidence_path,
                 }),
             );
-            (1, "service failed before a complete CLI result".to_owned())
+            let detail = if launch_evidence_present {
+                "service failed after AMD CLI launch before a complete CLI result"
+            } else {
+                "service failed before AMD CLI launch"
+            };
+            (1, detail.to_owned())
         }
     };
 
@@ -374,12 +391,25 @@ fn run_cli(run_root: &Path, cli_path: &Path) -> Result<CliProcessResult, String>
         .spawn()
         .map_err(|error| format!("AMDuProfCLI.exe spawn failed: {error}"))?;
     let target_pid = child.id();
-    let mut job = OwnedJob::new().ok();
-    let job_assigned = if let Some(job) = job.as_ref() {
-        job.assign(&child).is_ok()
-    } else {
-        false
+    let launch_evidence = CliLaunchEvidence {
+        schema: "cpu-sensor-amd-service-context/cli-launch/v1".to_owned(),
+        process_started: true,
+        target_pid,
+        started_at_utc_unix_ms: started_at,
+        executable: cli_path.to_string_lossy().into_owned(),
+        arguments: arguments.clone(),
+        working_directory: working_directory.to_string_lossy().into_owned(),
+        output_directory: output_dir.to_string_lossy().into_owned(),
     };
+    if let Err(error) = write_json(&run_root.join("AMD-CLI-LAUNCH.json"), &launch_evidence) {
+        let _ = child.kill();
+        let _ = wait_for_exit_until(&mut child, Instant::now() + Duration::from_secs(5));
+        return Err(format!(
+            "AMDuProfCLI.exe spawned with PID {target_pid}, but launch evidence persistence failed: {error}"
+        ));
+    }
+    let job = OwnedJob::try_attach(&child);
+    let job_assigned = job.is_some();
 
     let mut timeout = false;
     let mut cancelled = false;
@@ -389,8 +419,9 @@ fn run_cli(run_root: &Path, cli_path: &Path) -> Result<CliProcessResult, String>
         if STOP_REQUESTED.load(Ordering::SeqCst) {
             cancelled = true;
             cleanup_attempted = true;
-            cleanup_succeeded = terminate_owned(&mut child, job.as_ref());
-            break child.wait().ok();
+            let (terminated, status) = terminate_owned(&mut child, job.as_ref());
+            cleanup_succeeded = terminated;
+            break status;
         }
         if let Some(status) = child
             .try_wait()
@@ -401,12 +432,13 @@ fn run_cli(run_root: &Path, cli_path: &Path) -> Result<CliProcessResult, String>
         if stopwatch.elapsed() >= Duration::from_millis(CLI_TIMEOUT_MS) {
             timeout = true;
             cleanup_attempted = true;
-            cleanup_succeeded = terminate_owned(&mut child, job.as_ref());
-            break child.wait().ok();
+            let (terminated, status) = terminate_owned(&mut child, job.as_ref());
+            cleanup_succeeded = terminated;
+            break status;
         }
         thread::sleep(Duration::from_millis(50));
     };
-    drop(job.take());
+    drop(job);
 
     let finished_at = amd_cli_service_context_probe::unix_time_millis();
     let target_exit_signed = exit_status.and_then(|status| status.code());
@@ -456,13 +488,47 @@ fn run_cli(run_root: &Path, cli_path: &Path) -> Result<CliProcessResult, String>
     })
 }
 
-fn terminate_owned(child: &mut Child, job: Option<&OwnedJob>) -> bool {
-    if let Some(job) = job {
-        if unsafe { TerminateJobObject(job.0, 1) }.is_ok() {
-            return true;
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TerminationTarget {
+    Job,
+    ExactChild,
+}
+
+fn termination_target(job_assigned: bool) -> TerminationTarget {
+    if job_assigned {
+        TerminationTarget::Job
+    } else {
+        TerminationTarget::ExactChild
+    }
+}
+
+fn terminate_owned(child: &mut Child, job: Option<&OwnedJob>) -> (bool, Option<ExitStatus>) {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let target = termination_target(job.is_some());
+    let termination_requested = match (target, job) {
+        (TerminationTarget::Job, Some(job)) => unsafe { TerminateJobObject(job.0, 1) }.is_ok(),
+        (TerminationTarget::ExactChild, _) => child.kill().is_ok(),
+        (TerminationTarget::Job, None) => false,
+    };
+
+    if target == TerminationTarget::Job && !termination_requested {
+        let _ = child.kill();
+    }
+
+    let status = wait_for_exit_until(child, deadline);
+    (status.is_some(), status)
+}
+
+fn wait_for_exit_until(child: &mut Child, deadline: Instant) -> Option<ExitStatus> {
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => return Some(status),
+            Ok(None) if Instant::now() < deadline => {
+                thread::sleep(Duration::from_millis(10));
+            }
+            Ok(None) | Err(_) => return None,
         }
     }
-    child.kill().is_ok()
 }
 
 struct OwnedJob(HANDLE);
@@ -478,6 +544,14 @@ impl OwnedJob {
         let handle = HANDLE(child.as_raw_handle());
         unsafe { AssignProcessToJobObject(self.0, handle) }
             .map_err(|error| format!("AssignProcessToJobObject failed: {error}"))
+    }
+
+    fn try_attach(child: &Child) -> Option<Self> {
+        let job = Self::new().ok()?;
+        if job.assign(child).is_err() {
+            return None;
+        }
+        Some(job)
     }
 }
 
@@ -695,5 +769,15 @@ mod tests {
         let status = service_status(ServiceState::StopPending, 0, 1);
         assert_eq!(status.dwCurrentState, SERVICE_STOP_PENDING);
         assert_eq!(status.dwControlsAccepted, SERVICE_ACCEPT_STOP);
+    }
+
+    #[test]
+    fn job_assignment_failure_uses_exact_child_termination_fallback() {
+        assert_eq!(
+            termination_target(false),
+            TerminationTarget::ExactChild,
+            "an unassigned job must never be used for cleanup"
+        );
+        assert_eq!(termination_target(true), TerminationTarget::Job);
     }
 }

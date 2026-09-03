@@ -113,6 +113,31 @@ try {
     $validArgs = @('--run-root', $runPath)
     Assert-True -Condition ((Test-Path -LiteralPath $root -PathType Container) -and ($validArgs.Count -eq 2)) -Message 'T2 evidence root setup failed'
 
+    $runtimeEvidenceRoot = Join-Path $root 'runtime-evidence'
+    [void](New-Item -ItemType Directory -Path $runtimeEvidenceRoot -Force)
+    $beforeLaunch = Get-AmdCliExecutionEvidence -EvidenceRoot $runtimeEvidenceRoot
+    Assert-True -Condition (-not $beforeLaunch.amd_runtime_executed) -Message 'runtime was reported before launch evidence'
+    Assert-True -Condition ($beforeLaunch.execution_state -eq 'NOT_LAUNCHED') -Message 'pre-launch execution state mismatch'
+    Write-JsonFile -Path (Join-Path $runtimeEvidenceRoot 'AMD-CLI-LAUNCH.json') -Value ([pscustomobject]@{
+        process_started = $true
+        target_pid = 1234
+        started_at_utc_unix_ms = 1
+        executable = 'synthetic-cli.exe'
+        arguments = @('synthetic')
+        working_directory = $runtimeEvidenceRoot
+        output_directory = $runtimeEvidenceRoot
+    })
+    $afterLaunch = Get-AmdCliExecutionEvidence -EvidenceRoot $runtimeEvidenceRoot
+    Assert-True -Condition $afterLaunch.amd_runtime_executed -Message 'synthetic launch was not recorded as runtime'
+    Assert-True -Condition ($afterLaunch.execution_state -eq 'LAUNCHED_INCOMPLETE_RESULT') -Message 'incomplete launch state mismatch'
+    Write-JsonFile -Path (Join-Path $runtimeEvidenceRoot 'AMD-SERVICE-CLI-PROCESS-RESULT.json') -Value ([pscustomobject]@{
+        process_started = $true
+        target_exit_signed = 1
+    })
+    $afterComplete = Get-AmdCliExecutionEvidence -EvidenceRoot $runtimeEvidenceRoot
+    Assert-True -Condition $afterComplete.amd_runtime_executed -Message 'completed synthetic launch reported false runtime'
+    Assert-True -Condition ($afterComplete.execution_state -eq 'LAUNCHED_COMPLETE_RESULT') -Message 'complete launch state mismatch'
+
     $csvDir = Join-Path $fixtureRoot 'timechart-output'
     [void](New-Item -ItemType Directory -Path $csvDir -Force)
     $csv = @'
@@ -163,6 +188,9 @@ RecordId,Timestamp,socket0-package-power
     Write-Output 'SHARED_PARSER_PASS=PASS'
     Write-Output 'SHARED_PARSER_FAILURE=PASS'
     Write-Output 'QUALIFICATION_BEFORE_CLEANUP=PASS'
+    Write-Output 'AMD_RUNTIME_FALSE_BEFORE_LAUNCH=PASS'
+    Write-Output 'AMD_RUNTIME_TRUE_AFTER_SYNTHETIC_LAUNCH_RECORD=PASS'
+    Write-Output 'FAILED_POST_LAUNCH_PATH_DOES_NOT_REPORT_FALSE=PASS'
     Write-Output 'AMD_RUNTIME_EXECUTED=false'
 } finally {
     if (Test-Path -LiteralPath $root) {

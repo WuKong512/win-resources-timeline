@@ -253,6 +253,17 @@ attempt discovery or profiling during ordinary startup. The prepared metadata
 and descriptor can be adapted to `MetricProvider` after the value/storage
 contract and runtime gates are approved.
 
+## PR REVIEW REPAIR BOUNDARY
+
+`src-tauri/src/collector/amd_uprof_cli.rs` remains compiled/exported spike
+code only. `collector::manager` is unchanged and does not register this
+module, so the repair does not alter the default collector or production
+startup. Production admission still has a separate identity gate: the Rust
+discovery path currently checks Authenticode validity, x64, version policy, and
+artifact facts, but it does not yet establish an AMD signer-identity contract
+as a production requirement. That is a `PRODUCTION_ADMISSION_FOLLOW_UP`, not
+an assertion that the spike is already production-ready.
+
 ## AUTOMATED QUALIFICATION
 
 The focused Rust tests cover:

@@ -233,14 +233,18 @@ try {
     }
 }
 
+$runtimeEvidence = Get-AmdCliExecutionEvidence -EvidenceRoot $runRoot
 $finalSummary = [pscustomobject]@{
     schema = 'cpu-sensor-amd-service-context/v1'
     evidence_root = $runRoot
     qualification_before_cleanup = $qualificationSnapshot
     cleanup = [pscustomobject]$cleanup
-    amd_runtime_executed = $false
+    amd_runtime_executed = $runtimeEvidence.amd_runtime_executed
+    amd_cli_execution_state = $runtimeEvidence.execution_state
+    amd_cli_launch_evidence_path = $runtimeEvidence.launch_evidence_path
+    runtime_evidence = $runtimeEvidence
     wrapper_error = $wrapperError
-    note = 'Preparation wrapper only; this file is intended for one explicit Administrator run.'
+    note = 'Manual qualification wrapper; runtime state is derived from persisted launch evidence.'
 }
 if (Test-Path -LiteralPath $runRoot -PathType Container) {
     Write-JsonFile -Path (Join-Path $runRoot 'ADMIN-AMD-SERVICE-CONTEXT-SUMMARY.json') -Value $finalSummary

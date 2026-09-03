@@ -179,6 +179,7 @@ The service persists, at minimum:
 SERVICE-CONTEXT.json
 SERVICE-STATUS.json
 CLI-ARTIFACT-IDENTITY.json
+AMD-CLI-LAUNCH.json
 AMD-SERVICE-CLI-PROCESS-RESULT.json
 SERVICE-RUN-RESULT.json
 AMD-CLI.stdout.txt
@@ -193,6 +194,17 @@ this service harness does not create a third parser. The future wrapper writes
 `AMD-SERVICE-CONTEXT.qualification-before-cleanup.json` before deleting the
 temporary service registration.
 
+The qualification-only harness now persists `AMD-CLI-LAUNCH.json` immediately
+after `AMDuProfCLI.exe` spawn succeeds, before polling or post-processing. Its
+runtime summary derives `amd_runtime_executed` from that durable launch fact,
+not from a successful qualification result. The states are
+`NOT_LAUNCHED`, `LAUNCHED_INCOMPLETE_RESULT`, and
+`LAUNCHED_COMPLETE_RESULT`; therefore a timeout, target failure, or later
+service post-processing error cannot be reported as “not executed” after the
+CLI was actually launched. This repair was validated with synthetic
+non-AMD evidence only; the Service/Session 0 qualification remains
+`PREPARED / NOT_RUN`.
+
 ## PROCESS OWNERSHIP AND LIFECYCLE
 
 The service launches the exact registry-derived CLI directly with a fixed
@@ -203,8 +215,11 @@ completeness, and output paths.
 
 Where Windows permits it, the child is assigned to a transient job object so a
 timeout or stop request can terminate only the owned process tree. The fallback
-is an exact child-process termination, never a global image-name kill. A stop
-control is reported as cancellation, not as a vendor success or failure.
+is an exact child-process termination, never a global image-name kill. A Job is
+retained only after `AssignProcessToJobObject` succeeds; cleanup then observes
+the exact child exit with a bounded poll, so a successful termination request
+is not confused with target termination. A stop control is reported as
+cancellation, not as a vendor success or failure.
 
 The future wrapper waits for the service to reach `STOPPED`, reads all raw
 evidence, and computes the qualification snapshot. Only then does it stop if

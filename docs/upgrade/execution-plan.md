@@ -109,41 +109,70 @@ PR-09 是 PR-08 合并后的 Dashboard UI 增强：复用 schema v8、既有 `ui
 
 `CPU-SENSOR-SOURCE-Q1` 已完成 AMD uProf 5.3 / `AMDPowerProfileAPI` 的静态 source qualification。AMD 当前公开 Windows build 为 `5.3.521`；Ryzen 9000 Live Power Profiling 和本机 `Family 1Ah / Model 44h` 的官方 family/model 范围证据成立，package temperature、estimated average package power、以及 per-core effective frequency 的 source semantics 已记录。但本机未安装 uProf；Microsoft Hypervisor 已启用，VBS/HVCI 作为平台 context 记录；因此 live evidence 为 `BLOCKED_LIVE_PROVIDER_NOT_INSTALLED`，temperature 另记为 `DEFER_CURRENT_PLATFORM_CONFIGURATION`，effective-frequency aggregate 保持 `DEFER_AGGREGATION_CONTRACT`。部署结论为 `DEFER`，distribution 结论为 `BLOCKED_LEGAL_DISTRIBUTION_REVIEW`；Q1 未新增 probe command、production Provider、schema、MetricCatalog 或 UI。后续若取得合法的 external-installed uProf、官方 header/API PDF/sample，应执行 `CPU-SENSOR-AMD-LIVE-QUALIFICATION`，并继续复用既有 ProviderHost/CollectionPlan/MetricCatalog seam。详见 [`docs/measurements/cpu-sensor-amd-uprof-qualification.md`](../measurements/cpu-sensor-amd-uprof-qualification.md)。
 
-## CPU-SENSOR-AMD-LIVE-QUALIFICATION 当前状态
+## CPU-SENSOR-AMD-LIVE-QUALIFICATION 当前状态（HISTORICAL / SUPERSEDED）
+
+> HISTORICAL / SUPERSEDED: this early load-abort record is retained as evidence.
+> Its `BLOCKED` state and loader-trace next step are not the current AMD gate.
+> The current consolidated state is defined by `CPU-SENSOR-AMD-ROOT-CAUSE-FINAL-CLOSURE`
+> and `CPU-SENSOR-AMD-UPROF-LIVE-QUALIFICATION-SPIKE CLOSURE` below.
 
 `CPU-SENSOR-AMD-LIVE-QUALIFICATION` 的历史 run 仍为 `BLOCKED`，并保留原始零样本记录：已安装 AMD uProf `5.3.521` 的 API DLL 路径、签名、x64 架构和官方 header/PDF/sample 均通过只读审计；非管理员隔离 load-only 子进程在显式 `LoadLibraryExW` 阶段以 signed `-1` / `0xFFFFFFFF` 终止。follow-up 已用已安装 CDB 观察到 `KERNEL32!FatalExit(0xFFFFFFFF)`，并在直接加载 `CXLBaseTools.dll` 时复现同一边界，因此当前主分类为 `DEPENDENCY_LOAD_FAILURE`，subcause 为 `CXLBASETOOLS_LOAD_PATH_FATAL_EXIT`；这不是普通 loader 返回错误，也尚未证明其 vendor 内部触发条件。后续受控 Administrator comparison 已证明 x64 High/Administrator token，但直接 CXL、直接 API DLL、以及 Resource Timeline init-only child 仍以 `-1` / `0xFFFFFFFF` 在 load boundary 终止；官方 `CollectAllCounters` evidence 缺失，保持 `INCONCLUSIVE`。与此同时，官方 CLI `timechart --list` 在管理员上下文报告 Socket/Core/Thread 与 Power/Frequency/P-State 能力，短时 `timechart --event power --interval 1000 --duration 5` 正常生成 3 条 package/core power records。后续只读 divergence investigation 进一步确认：CLI 对 `AMDPowerProfileAPI.dll` 与 `CXLBaseTools.dll` 使用非 delay 的 public-module import path，且既有 CLI 调试证据曾到达 `AMDTPwrProfileInitialize(0)`；因此 `CLI_RUNTIME_USES_PUBLIC_POWER_API_PATH = YES`，但 direct API 与 CLI 的行为仍为 `DIVERGENT`，具体 CXL context/initialization 触发条件仍 `UNPROVEN`。`DEPENDENCY_LOAD_ABORT = PERSISTS`，`PERMISSION_BOUNDARY = PARTIALLY_RESOLVED`（仅 vendor CLI path）。没有 Resource Timeline API 的 package power、per-identity frequency、temperature、cadence、lifecycle 或 busy qualification；package power 与 AMD per-identity frequency 保持 `DEFER`，temperature 保持 `DEFER_UNREACHED_DUE_TO_LIBRARY_LOAD`，CPU effective-frequency aggregate 保持 `DEFER_AGGREGATION_CONTRACT`，distribution 保持 `BLOCKED_LEGAL_DISTRIBUTION_REVIEW`。不得据此开始 `CPU-SENSOR-AMD-PROVIDER-DESIGN`；下一步是窄范围的 `AUTHORIZED_CLI_VS_DIRECT_API_LOADER_CONTEXT_TRACE`（如需精确 loader order），且不得修改 Hypervisor/VBS/HVCI、driver/service、安装、Afterburner/RTSS 或任何 production seam。详见 [`docs/measurements/cpu-sensor-amd-uprof-load-abort-followup.md`](../measurements/cpu-sensor-amd-uprof-load-abort-followup.md) 与 [`docs/measurements/cpu-sensor-amd-uprof-cli-vs-direct-api-divergence.md`](../measurements/cpu-sensor-amd-uprof-cli-vs-direct-api-divergence.md)。
 
-## CPU-SENSOR-AMD-STATIC-IMPORT-SURFACE-AUDIT 当前状态
+## CPU-SENSOR-AMD-STATIC-IMPORT-SURFACE-AUDIT 当前状态（HISTORICAL / SUPERSEDED）
+
+> HISTORICAL / SUPERSEDED: the import-surface audit remains valid evidence, but
+> its earlier “next control” framing is no longer the current execution gate.
 
 `CPU-SENSOR-AMD-STATIC-IMPORT-SURFACE-AUDIT` 已完成只读安装树、import library、官方 sample 构建文件和 AMD `bin` PE import audit。已确认 `AMDPowerProfileAPI.lib` 是 x64 public API import library，但未发现 `CXLBaseTools.lib`、CXL header 或官方 CXL link surface；因此在当前安装 artifact 范围内 `CXL_LINK_SURFACE = PRIVATE_INTERNAL`。已发现 AMD 签名的 `D:\apps\AMDuProf\bin\AMDuProf.exe` 直接 import `CXLBaseTools.dll`，可作为未来 `EXISTING_VENDOR_BINARY_VS_DYNAMIC_PROBE` 候选；此前 `CollectAllCounters.exe` 的实际二进制未找到，sample build fidelity 仍为 `INCONCLUSIVE`。后续 A1 运行因 static fixture 以 `0xFFFFFFFF` 失败而未形成有效 A/B，B1 保持未执行；该静态 surface 结论仍为 `STATIC_IMPORT_SURFACE_DECISION = EXISTING_VENDOR_CONTROL`。详见 [`docs/measurements/cpu-sensor-amd-static-import-surface-audit.md`](../measurements/cpu-sensor-amd-static-import-surface-audit.md)。
 
-## CPU-SENSOR-AMD-VENDOR-EXECUTABLE-CONTEXT-DIFFERENTIAL-AUDIT 当前状态
+## CPU-SENSOR-AMD-VENDOR-EXECUTABLE-CONTEXT-DIFFERENTIAL-AUDIT 当前状态（HISTORICAL / SUPERSEDED）
+
+> HISTORICAL / SUPERSEDED: this static differential is retained for provenance;
+> its candidate hypotheses were later narrowed by the directory counterfactual.
 
 `CPU-SENSOR-AMD-VENDOR-EXECUTABLE-CONTEXT-DIFFERENTIAL-AUDIT` 已完成只读静态审计，审计本身未启动 `AMDuProfCLI.exe`、`AMDuProf.exe`、`AMDProfilerService.exe`、sample、`metric-probe` 或 CDB。已确认 V1/V2/V3 vendor executable 均直接 import `CXLBaseTools.dll` 并拥有多个 AMD CXL-importing parent，而失败的 M1 仅通过 `AMDPowerProfileAPI.dll -> AMDSysUtils.dll -> CXLBaseTools.dll` 到达 CXL；`AMDPowerProfileAPI.lib` 是唯一发现的 x64 public import library，未发现 CXL public header/import library。静态最强假设为 `VENDOR_IMPORT_TOPOLOGY_HYPOTHESIS = STRONG`，身份/路径发现为独立的 `VENDOR_PROCESS_IDENTITY_HYPOTHESIS = PLAUSIBLE`；二者都不是 runtime causality proof。随后已完成一次 native non-debugger `AMDuProf.exe` no-op startup control 并确认其存活 3,000 ms；该 survival divergence 仍不等于因果证明。详见 [`docs/measurements/cpu-sensor-amd-vendor-executable-context-differential.md`](../measurements/cpu-sensor-amd-vendor-executable-context-differential.md)。
 
-## CPU-SENSOR-AMD-PUBLIC-API-STATIC-VS-DYNAMIC-MINIMAL-A/B 当前状态
+## CPU-SENSOR-AMD-PUBLIC-API-STATIC-VS-DYNAMIC-MINIMAL-A/B 当前状态（HISTORICAL / SUPERSEDED）
+
+> HISTORICAL / SUPERSEDED: the failed minimal A/B and its untestable B1 gate
+> are preserved; they do not reopen the completed root-cause or CLI spike work.
 
 `CPU-SENSOR-AMD-PUBLIC-API-STATIC-VS-DYNAMIC-MINIMAL-A/B` 已完成两个最小 x64 Rust/MSVC fixture 的构建和 PE import-table 静态门禁：static fixture 使用已安装官方 `AMDPowerProfileAPI.lib`，直接 import `AMDPowerProfileAPI.dll` 且不直接 import `CXLBaseTools.dll`；dynamic fixture 不直接 import AMD API/CXL，仅在 main 中对绝对 API DLL 路径调用 `LoadLibraryExW`。fixture 及 AMD API DLL 的 SHA 已锁定。首次 A1 确实启动并观察到 signed `-1`，但旧 wrapper 在负数退出码转十六进制时抛错，导致 stdout/stderr/result JSON 未持久化；该历史尝试保持 `EXECUTED_BUT_UNCLASSIFIABLE_DUE_TO_HARNESS_PERSISTENCE_FAILURE`，B1 未执行。wrapper 已修复 signed exit serialization、证据持久化顺序和空参数数组处理，且非 AMD synthetic regression 已通过；A1-R1 随后完成了完整 capture，但仍以 `-1 / 0xFFFFFFFF` 结束且没有 main marker，因此 `STATIC_CONTROL_INVALID` 已确认，`STATIC_VS_DYNAMIC_LOAD_BEHAVIOR_DIVERGENCE` 对该 A/B `NOT_TESTABLE_WITH_THIS_A/B`，B1 保持未授权。后续 vendor no-op、hold fixture 与 CXL 静态审计均保持独立，不将该 A/B 标为完成。这不是 AMD source qualification，也不开始 `CPU-SENSOR-AMD-PROVIDER-DESIGN`。详见 [`docs/measurements/cpu-sensor-amd-public-api-static-dynamic-ab.md`](../measurements/cpu-sensor-amd-public-api-static-dynamic-ab.md)。
 
-## CPU-SENSOR-AMD-EXISTING-VENDOR-EXECUTABLE-NO-OP-STARTUP-CONTROL 当前状态
+## CPU-SENSOR-AMD-EXISTING-VENDOR-EXECUTABLE-NO-OP-STARTUP-CONTROL 当前状态（HISTORICAL / SUPERSEDED）
+
+> HISTORICAL / SUPERSEDED: retained as the vendor-survival evidence preceding
+> the final executable-directory counterfactual.
 
 `CPU-SENSOR-AMD-EXISTING-VENDOR-EXECUTABLE-NO-OP-STARTUP-CONTROL` 已完成 native no-op startup qualification。管理员 evidence 在 3,000 ms observation window 后记录 `AMDuProf.exe` root PID 仍存活，`VENDOR_STARTUP_CONTROL = PASS`，并观察到 `AMDProfilerService.exe` 的一层子进程和 vendor 应用 bootstrap 日志；cleanup 记录单独保留，未成功 graceful-close 且未强制终止。该结果确认 vendor executable 与失败 M1 的 native survival divergence，但不证明 import topology、bootstrap、process identity 或其它差异的因果性；`EXACT_VENDOR_EXECUTABLE_REQUIREMENT = UNPROVEN`。没有 profiling、sampling、B1 或 production seam 变更。详见 [`docs/measurements/cpu-sensor-amd-vendor-noop-startup-control.md`](../measurements/cpu-sensor-amd-vendor-noop-startup-control.md)。
 
-## CPU-SENSOR-AMD-STATIC-FIXTURE-LIFETIME-SHUTDOWN-DISCRIMINATOR 当前状态
+## CPU-SENSOR-AMD-STATIC-FIXTURE-LIFETIME-SHUTDOWN-DISCRIMINATOR 当前状态（HISTORICAL / SUPERSEDED）
+
+> HISTORICAL / SUPERSEDED: retained to document the pre-counterfactual startup
+> stage; the directory runtime confirmation is the later authoritative result.
 
 `CPU-SENSOR-AMD-STATIC-FIXTURE-LIFETIME-SHUTDOWN-DISCRIMINATOR` 已完成一次受控 Administrator hold-fixture run。新二进制保留原 M1 的官方 `AMDPowerProfileAPI.lib` static import 策略和 `AMDPowerProfileAPI.dll -> AMDSysUtils.dll -> CXLBaseTools.dll` 依赖链，SHA 为 `B680E7761FC3E64193E7140B57326154A64AB702C62763C7693EA97234DC1676`；原 M1 未被覆盖。目标只运行约 `63.2 ms` 即以 `-1 / 0xFFFFFFFF` 结束，两个 checked synchronous `WriteFile` marker 均未出现，stdout/stderr 已持久化且 capture complete，因此 `M1_FAILURE_FAMILY = STARTUP`、`STATIC_FAILURE_STAGE = BEFORE_DURABLE_MAIN_MARKER`、`SHUTDOWN_OR_DETACH_HYPOTHESIS = DOWNGRADED`；不宣称 Rust `main` 绝对未进入，因为 retained import pointer read 位于第一 marker 之前。没有 B1、profiling/sampling 或 production seam 变更。详见 [`docs/measurements/cpu-sensor-amd-static-fixture-lifetime-discriminator.md`](../measurements/cpu-sensor-amd-static-fixture-lifetime-discriminator.md)。
 
-## CPU-SENSOR-AMD-CXL-FATALEXIT-STATIC-AUDIT 当前状态
+## CPU-SENSOR-AMD-CXL-FATALEXIT-STATIC-AUDIT 当前状态（HISTORICAL / SUPERSEDED）
+
+> HISTORICAL / SUPERSEDED: the CXL static control-flow findings remain useful
+> evidence, but no longer form a pending runtime gate for the spike.
 
 `CPU-SENSOR-AMD-CXL-FATALEXIT-STATIC-AUDIT` 已完成只读静态控制流审计，未运行 AMD 二进制。精确 `CXLBaseTools.dll`（SHA `4815D4631BCA9C051DC4293538DF8D402BD848E705228F497DF718EDCA1F8931`）不直接 import `KERNEL32!FatalExit`，因此直接 FatalExit import/xref 数为 `0`；可定位的是同一运行函数中的两个 `api-ms-win-crt-runtime-l1-1-0.dll!quick_exit` 调用点（`RVA 0x1A82` 与 `0x1B64`），两者均可静态装载 `0xFFFFFFFF`。`RVA 0x12378` 已由 IAT/原始导入名交叉解析为 `api-ms-win-crt-string-l1-1-0.dll!_wcsicmp`；`QE-1` 与历史 FatalExit 返回地址和最近导出定位 `asWideString+0x458` 强相关，但 CRT 后续如何到达 Kernel32 仍不可见。QE-1 的可达路径以 `GetModuleHandleW(NULL)` / `GetModuleFileNameW` 解析进程可执行文件目录，并读取 `HKLM\\SOFTWARE\\WOW6432Node\\AMD\\AMDProfiler` 的 `InstallationPath`，再将其与 `InstallationPath\\bin` 和 `InstallationPath\\bin\\AMDPerf` 进行 `_wcsicmp` 比较；当前只读注册表值为 `D:\\apps\\AMDuProf\\`，与实际安装根匹配，故 `FATAL_CONDITION_FAMILY = MODULE_IDENTITY_FAILURE`，而非当前机器已证明的 registry mismatch。该可见谓词与 hold fixture 目录不匹配、与 vendor `bin` 目录匹配，但 runtime 分支仍未直接观测。entrypoint 的 process-attach dispatcher 到候选函数的静态边存在，TLS callback 数为 `0`。下一步不再执行 `PROCESS_BASENAME_ONLY_CONTROL`；可选的 directory-only confirmation 仍未运行且需要单独授权，不得开始 B1 或 `CPU-SENSOR-AMD-PROVIDER-DESIGN`。详见 [`docs/measurements/cpu-sensor-amd-cxl-fatalexit-static-audit.md`](../measurements/cpu-sensor-amd-cxl-fatalexit-static-audit.md)。
 
-## CPU-SENSOR-AMD-CXL-EXECUTABLE-DIRECTORY-ROOT-CAUSE-CLOSURE 当前状态
+## CPU-SENSOR-AMD-CXL-EXECUTABLE-DIRECTORY-ROOT-CAUSE-CLOSURE 当前状态（HISTORICAL / SUPERSEDED）
+
+> HISTORICAL / SUPERSEDED: the earlier `HIGH` confidence wording was refined
+> by the later byte-identical runtime counterfactual to confirmed causality.
 
 `CPU-SENSOR-AMD-CXL-EXECUTABLE-DIRECTORY-ROOT-CAUSE-CLOSURE` 已完成只读根因闭合。根据 `CXLBaseTools.dll` 的可见 QE-1 谓词，M1 hold fixture 的进程 EXE 目录为 `F:\File\codex\codex-worktrees\08bd\resource-timeline\tools\amd-uprof-public-api-ab\target\release`，与 `D:\apps\AMDuProf\bin` 和 `D:\apps\AMDuProf\bin\AMDPerf` 均为非零不相等；存活的 `AMDuProf.exe` 目录为 `D:\apps\AMDuProf\bin`，与第一候选为零相等。只读注册表 `HKLM\SOFTWARE\WOW6432Node\AMD\AMDProfiler\InstallationPath` 与已知安装根匹配。因此当前 `ROOT_CAUSE = CXL_PROCESS_EXECUTABLE_DIRECTORY_POLICY_MISMATCH`、置信度 HIGH；`PROCESS_BASENAME_ONLY_CONTROL` 已取消，目录-only confirmation 仍为可选、未运行且需要单独授权的安装树临时写入。详见 [`docs/measurements/cpu-sensor-amd-executable-directory-root-cause.md`](../measurements/cpu-sensor-amd-executable-directory-root-cause.md)。
 
 该结论不宣称 CXL 直接调用 `KERNEL32!FatalExit`，也不改变历史记录、B1 门或生产 provider 计划。
 
-## CPU-SENSOR-AMD-EXECUTABLE-DIRECTORY-FINAL-RUNTIME-CONFIRMATION 当前状态
+## CPU-SENSOR-AMD-EXECUTABLE-DIRECTORY-FINAL-RUNTIME-CONFIRMATION 当前状态（HISTORICAL / SUPERSEDED）
+
+> HISTORICAL / SUPERSEDED: this preparation record says “awaiting human
+> authorization” because it predates the authoritative runtime evidence below.
 
 已准备但尚未执行一次严格的 byte-identical directory counterfactual：复用
 未修改的 `amd-uprof-static-api-hold-fixture.exe`，只将其临时复制到
@@ -154,6 +183,33 @@ wrapper 的非 AMD synthetic validation 和静态 PE/hash/signature preflight �
 通过；本目录确认仍为 `prepared / awaiting human authorization`，不能视为
 runtime complete。不得运行 B1 或开始 `CPU-SENSOR-AMD-PROVIDER-DESIGN`。
 详见 [`docs/measurements/cpu-sensor-amd-executable-directory-runtime-confirmation.md`](../measurements/cpu-sensor-amd-executable-directory-runtime-confirmation.md)。
+
+## AMD CURRENT STATE RECONCILIATION
+
+The earlier AMD investigation sections explicitly marked
+`HISTORICAL / SUPERSEDED` above retain their raw findings, but their former
+`BLOCKED`, `prepared / awaiting human authorization`, “do not start provider
+design”, and loader-trace next-step wording is not current state. The
+`CPU-SENSOR-AMD-CLI-SERVICE-CONTEXT-QUALIFICATION` section remains current for
+the separately prepared, not-yet-run Service follow-up. The authoritative
+current AMD block is the spike closure below; this plan intentionally has one
+current state for the completed spike and its deferred follow-ups.
+
+```text
+AMD_ROOT_CAUSE_INVESTIGATION = completed
+AMD_UPROF_FEASIBILITY = completed
+AMD_UPROF_ROOT_CAUSE = completed
+AMD_CLI_BOUNDED_SESSION = completed
+SPIKE_RESULT = PASS_WITH_FOLLOW_UPS
+PRODUCTION_ADMISSION = NOT_COMPLETE
+AMD_SERVICE_CONTEXT = planned / prepared
+AMD_PRIVILEGE_DEPLOYMENT = planned
+AMD_LONG_LIVED_SESSION = planned
+AMD_TEMPERATURE_FREQUENCY = planned
+AMD_PRODUCTION_PROVIDER = planned
+NEXT_TASK = AMD-SERVICE-CONTEXT-I1
+EXECUTION_PLAN_SINGLE_CURRENT_STATE = PASS
+```
 
 ## CPU-SENSOR-AMD-ROOT-CAUSE-FINAL-CLOSURE 当前状态
 

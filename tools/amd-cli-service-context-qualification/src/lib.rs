@@ -21,6 +21,9 @@ pub const PROFILE_DURATION_SECONDS: u32 = 10;
 pub const PROFILE_INTERVAL_MS: u32 = 1_000;
 pub const FIXED_PROFILE_EVENT: &str = "power";
 pub const EXPECTED_LOCAL_SYSTEM_SID: &str = "S-1-5-18";
+pub const CLI_EXECUTION_NOT_LAUNCHED: &str = "NOT_LAUNCHED";
+pub const CLI_EXECUTION_LAUNCHED_INCOMPLETE: &str = "LAUNCHED_INCOMPLETE_RESULT";
+pub const CLI_EXECUTION_LAUNCHED_COMPLETE: &str = "LAUNCHED_COMPLETE_RESULT";
 
 /// Convert a signed Windows process exit value without overflowing on `-1`.
 pub fn exit_code_hex(exit_code: i32) -> String {
@@ -214,12 +217,40 @@ pub struct CliProcessResult {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct CliLaunchEvidence {
+    pub schema: String,
+    pub process_started: bool,
+    pub target_pid: u32,
+    pub started_at_utc_unix_ms: u128,
+    pub executable: String,
+    pub arguments: Vec<String>,
+    pub working_directory: String,
+    pub output_directory: String,
+}
+
+pub fn cli_execution_state(
+    launch_evidence_present: bool,
+    complete_result_present: bool,
+) -> &'static str {
+    if !launch_evidence_present {
+        CLI_EXECUTION_NOT_LAUNCHED
+    } else if complete_result_present {
+        CLI_EXECUTION_LAUNCHED_COMPLETE
+    } else {
+        CLI_EXECUTION_LAUNCHED_INCOMPLETE
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct ServiceQualificationResult {
     pub schema: String,
     pub service_name: String,
     pub qualification_only: bool,
     pub service_context_valid: bool,
     pub cli_identity_validated_by_wrapper: bool,
+    pub amd_runtime_executed: bool,
+    pub cli_execution_state: String,
+    pub cli_launch_evidence_path: String,
     pub cli_process_result_path: String,
     pub qualification: String,
     pub created_at_utc_unix_ms: u128,
@@ -344,6 +375,9 @@ mod tests {
             qualification_only: true,
             service_context_valid: false,
             cli_identity_validated_by_wrapper: true,
+            amd_runtime_executed: true,
+            cli_execution_state: CLI_EXECUTION_LAUNCHED_COMPLETE.to_owned(),
+            cli_launch_evidence_path: "launch.json".to_owned(),
             cli_process_result_path: "result.json".to_owned(),
             qualification: "SERVICE_HARNESS_FAILED".to_owned(),
             created_at_utc_unix_ms: 1,
@@ -351,5 +385,26 @@ mod tests {
         let value = serde_json::to_value(result).expect("serializable result");
         assert_eq!(value["qualification"], "SERVICE_HARNESS_FAILED");
         assert_eq!(value["qualification_only"], true);
+        assert_eq!(value["amd_runtime_executed"], true);
+        assert_eq!(
+            value["cli_execution_state"],
+            CLI_EXECUTION_LAUNCHED_COMPLETE
+        );
+    }
+
+    #[test]
+    fn cli_execution_state_distinguishes_launch_lifecycle() {
+        assert_eq!(
+            cli_execution_state(false, false),
+            CLI_EXECUTION_NOT_LAUNCHED
+        );
+        assert_eq!(
+            cli_execution_state(true, false),
+            CLI_EXECUTION_LAUNCHED_INCOMPLETE
+        );
+        assert_eq!(
+            cli_execution_state(true, true),
+            CLI_EXECUTION_LAUNCHED_COMPLETE
+        );
     }
 }

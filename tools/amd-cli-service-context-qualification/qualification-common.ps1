@@ -37,6 +37,32 @@ function Write-JsonFile {
     Write-Utf8File -Path $Path -Text $json
 }
 
+function Get-AmdCliExecutionEvidence {
+    param(
+        [Parameter(Mandatory = $true)][string]$EvidenceRoot
+    )
+
+    $launchPath = Join-Path $EvidenceRoot 'AMD-CLI-LAUNCH.json'
+    $completeResultPath = Join-Path $EvidenceRoot 'AMD-SERVICE-CLI-PROCESS-RESULT.json'
+    $launchPresent = Test-Path -LiteralPath $launchPath -PathType Leaf
+    $completeResultPresent = Test-Path -LiteralPath $completeResultPath -PathType Leaf
+    $executionState = if (-not $launchPresent) {
+        'NOT_LAUNCHED'
+    } elseif ($completeResultPresent) {
+        'LAUNCHED_COMPLETE_RESULT'
+    } else {
+        'LAUNCHED_INCOMPLETE_RESULT'
+    }
+    [pscustomobject]@{
+        amd_runtime_executed = $launchPresent
+        execution_state = $executionState
+        launch_evidence_path = $launchPath
+        launch_evidence_present = $launchPresent
+        complete_result_path = $completeResultPath
+        complete_result_present = $completeResultPresent
+    }
+}
+
 function Get-PeMachine {
     param([Parameter(Mandatory = $true)][string]$Path)
 
