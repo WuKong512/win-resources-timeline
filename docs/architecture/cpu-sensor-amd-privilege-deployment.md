@@ -515,7 +515,7 @@ Choose exactly one future qualification family after the product selects a
 candidate deployment model:
 
 ```text
-NEXT_RUNTIME_QUALIFICATION = AMD_CLI_PRIVILEGE_CONTEXT_QUALIFICATION
+NEXT_RUNTIME_QUALIFICATION = AMD-SERVICE-CONTEXT-I1
 ```
 
 It must be one bounded, manually authorized test of one exact proposed

@@ -326,7 +326,7 @@ PATH/environment/registry state and does not self-elevate.
 ```text
 CPU_PACKAGE_POWER_W_RUNTIME_QUALIFIED = true
 CPU_PACKAGE_POWER_W_PRODUCTION_QUALIFIED = false
-PRODUCTION_ADMISSION = DEFERRED
+PRODUCTION_ADMISSION = NOT_COMPLETE
 ```
 
 The repaired wrapper remains available for a separately authorized future
@@ -372,22 +372,21 @@ telemetry interface. No private IPC/authentication surface is used.
 
 ## NEXT TASK
 
-The next qualification family, after the privilege deployment model is chosen,
-is:
+The immediate follow-up qualification is:
 
 ```text
-AMD_CLI_PRIVILEGE_CONTEXT_QUALIFICATION
+AMD-SERVICE-CONTEXT-I1
 ```
 
-The deployment architecture is documented but deliberately deferred: no
-service or task has been implemented, and no account or cross-integrity IPC
-contract has been qualified. The context qualification must select one exact
-proposed principal, use a fixed semantic power request, and prove bounded
-result delivery, cancellation, cleanup, and failure isolation. It must not
-install a production privileged component or use per-sample UAC. Long-lived
-session behavior, restart/recovery, timestamp mapping, temperature/frequency,
-provider registration, user-facing settings, and production admission remain
-deferred.
+It reuses the prepared qualification-only LocalSystem/Session 0 harness. The
+deployment architecture is documented but deliberately deferred: no service
+or task has been implemented or registered, and no account or cross-integrity
+IPC contract has been qualified. It must use one fixed semantic power request
+and prove bounded result delivery, cancellation, cleanup, and failure
+isolation. It must not install a production privileged component or use
+per-sample UAC. Long-lived session behavior, restart/recovery, timestamp
+mapping, temperature/frequency, provider registration, user-facing settings,
+and production admission remain deferred.
 
 ## PRIVILEGE-CONTEXT QUALIFICATION PREPARATION
 
@@ -412,3 +411,39 @@ LONG_LIVED_SESSION_ORDERING = AFTER_PRIVILEGE_CONTEXT_QUALIFICATION
 
 No service registration, AMD CLI launch, profiling, IPC, installer change, or
 production provider registration was performed while preparing this harness.
+
+## SPIKE CLOSURE
+
+This branch closes the AMD uProf technical-feasibility and bounded live-
+qualification spike. It does not close production admission.
+
+```text
+AMD_UPROF_LIVE_QUALIFICATION_SPIKE = PASS_WITH_FOLLOW_UPS
+SPIKE_FEASIBILITY = COMPLETED
+PRODUCTION_ADMISSION = NOT_COMPLETE
+AMD_UPROF_FEASIBILITY = completed
+AMD_UPROF_ROOT_CAUSE = completed
+AMD_CLI_BOUNDED_SESSION = completed
+AMD_PROVIDER_PRODUCTION_ADMITTED = false
+SERVICE_CONTEXT_QUALIFICATION = DEFERRED_TO_FOLLOW_UP_TASK
+NEXT_TASK = AMD-SERVICE-CONTEXT-I1
+```
+
+Proven outcomes are: AMD uProf produced real package-power telemetry; the
+official `AMDuProfCLI.exe` completed an elevated interactive bounded session;
+approximately one-second cadence was demonstrated; and the measured CLI
+process behavior was bounded in that run. Direct arbitrary-directory
+in-process API integration is incompatible with the confirmed CXL
+executable-directory policy mismatch. The selected implementation direction
+is `CLI_SUBPROCESS`, with medium decision confidence, but it remains a
+candidate rather than a production-admitted provider.
+
+The prepared Service/Session 0 qualification is intentionally a separate
+follow-up and was not executed in this spike. Production privilege deployment,
+long-lived lifecycle, temperature/frequency, storage/integration, update and
+security review, and final provider admission remain follow-ups.
+
+This PR closes AMD uProf technical feasibility and bounded live qualification.
+Production privilege deployment, service context, long-duration lifecycle,
+additional metrics, storage/integration, and final provider admission are
+intentionally separate follow-up tasks.

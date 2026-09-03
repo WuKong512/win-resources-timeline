@@ -311,7 +311,7 @@ The required fallback remains a permission/unavailable provider state while
 the baseline and other providers continue. The next qualification family is:
 
 ```text
-NEXT_RUNTIME_QUALIFICATION = AMD_CLI_PRIVILEGE_CONTEXT_QUALIFICATION
+NEXT_RUNTIME_QUALIFICATION = AMD-SERVICE-CONTEXT-I1
 LONG_LIVED_SESSION_ORDERING = AFTER_PRIVILEGE_CONTEXT_QUALIFICATION
 ```
 

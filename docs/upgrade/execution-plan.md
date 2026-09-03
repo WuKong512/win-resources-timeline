@@ -249,12 +249,12 @@ installation。详见
 [`cpu-sensor-amd-privilege-deployment.md`](../architecture/cpu-sensor-amd-privilege-deployment.md)。
 
 下一项单一 qualification family 是
-`AMD_CLI_PRIVILEGE_CONTEXT_QUALIFICATION`：在产品先选定一个确切的
-principal/deployment model 后，验证该 context 下的 bounded CLI session、
-typed result、cancellation、cleanup 和 failure isolation。它先于
-long-lived/all-day session qualification；temperature/frequency、timestamp/
-storage contract、provider registration、schema/UI 和 production admission
-仍保持 deferred。详见
+`AMD-SERVICE-CONTEXT-I1`：复用已准备的 qualification-only LocalSystem
+SCM harness，验证真实 Service/Session 0 下的 bounded CLI session、typed
+result、cancellation、cleanup 和 failure isolation。它先于 long-lived/
+all-day session qualification；temperature/frequency、timestamp/storage
+contract、provider registration、schema/UI 和 production admission 仍保持
+deferred。详见
 [`cpu-sensor-amd-cli-provider-spike.md`](../architecture/cpu-sensor-amd-cli-provider-spike.md)。
 
 ## CPU-SENSOR-AMD-CLI-SERVICE-CONTEXT-QUALIFICATION 当前状态
@@ -279,3 +279,44 @@ service，执行一次固定的 10 秒 package-power CLI session，持久化 Ses
 Service/Session 0、least privilege、IPC、long-lived 或 production provider
 为完成。详见
 [`cpu-sensor-amd-service-context-qualification.md`](../measurements/cpu-sensor-amd-service-context-qualification.md)。
+
+## CPU-SENSOR-AMD-UPROF-LIVE-QUALIFICATION-SPIKE CLOSURE
+
+当前 AMD uProf 技术可行性和 bounded live qualification spike 已完成；
+生产准入保持独立 deferred：
+
+```text
+AMD_UPROF_FEASIBILITY = completed
+AMD_UPROF_ROOT_CAUSE = completed
+AMD_CLI_BOUNDED_SESSION = completed
+AMD_UPROF_LIVE_QUALIFICATION_SPIKE = PASS_WITH_FOLLOW_UPS
+SPIKE_RESULT = PASS_WITH_FOLLOW_UPS
+PRODUCTION_ADMISSION = NOT_COMPLETE
+AMD_SERVICE_CONTEXT = planned / prepared
+AMD_PRIVILEGE_DEPLOYMENT = planned
+AMD_LONG_LIVED_SESSION = planned
+AMD_TEMPERATURE_FREQUENCY = planned
+AMD_PRODUCTION_PROVIDER = planned
+NEXT_TASK = AMD-SERVICE-CONTEXT-I1
+```
+
+已证明的 package-power、CLI bounded session 和 CXL executable-directory
+root cause 结果不会因尚未执行 Service/Session 0 qualification 而回退为
+blocked。以下 follow-ups 均未完成：
+
+- `AMD-SERVICE-CONTEXT-I1`：Service/Session 0/LocalSystem bounded-session
+  qualification；现有 harness 已准备，等待人工授权。
+- `AMD-PRIVILEGE-I2`：least-privilege account、Service SID、named-pipe ACL、
+  semantic IPC、session ownership/cancellation。
+- `AMD-LIFECYCLE-I1`：long-lived session、restart/recovery、sleep/resume、
+  orphan prevention、all-day overhead。
+- `AMD-METRICS-I1`：package temperature、effective/average frequency 和
+  aggregation contract。
+- `AMD-PROVIDER-I1`：production registration、DTO/storage、settings、
+  installer/update、fallback states 和最终 admission。
+
+本 spike 的 PR scope 是：关闭 AMD uProf technical feasibility 和 bounded
+live qualification；production privilege deployment、service context、
+long-duration lifecycle、additional metrics、storage/integration 和 final
+provider admission 有意保留为独立 follow-up tasks。当前不执行 prepared
+service qualification，不开始 follow-up implementation。

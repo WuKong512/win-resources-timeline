@@ -23,6 +23,9 @@ CPU_PACKAGE_POWER_W_RUNTIME_QUALIFIED = true
 AMD_CLI_PROVIDER_SPIKE = TECHNICALLY_QUALIFIED_FOR_BOUNDED_SESSION
 CPU_PACKAGE_POWER_W_PRODUCTION_QUALIFIED = false
 AMD_PROVIDER_PRODUCTION_ADMITTED = false
+AMD_UPROF_LIVE_QUALIFICATION_SPIKE = PASS_WITH_FOLLOW_UPS
+SPIKE_FEASIBILITY = COMPLETED
+PRODUCTION_ADMISSION = NOT_COMPLETE
 ```
 
 ## EVIDENCE AND CONTEXT
@@ -314,9 +317,9 @@ performed to obtain this closure.
 The next task is intentionally not another runtime retry:
 
 ```text
-NEXT_TASK = AMD_CLI_PRIVILEGE_DEPLOYMENT_ARCHITECTURE
+NEXT_TASK = AMD-SERVICE-CONTEXT-I1
 ```
 
-It should select a legitimate deployment model for the known Administrator
-boundary before production registration or all-day qualification is
-considered.
+It should qualify the prepared LocalSystem/Session 0 service context before
+selecting a final privilege deployment model, production registration, or
+all-day qualification.
