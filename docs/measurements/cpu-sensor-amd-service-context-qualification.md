@@ -26,7 +26,7 @@ immutable and was not regenerated during this parser repair.
 
 ## QUALIFICATION PROBE ARTIFACT
 
-The final local release build used for the future manual run is:
+The final local release build used for the authoritative manual run was:
 
 ```text
 path = tools/amd-cli-service-context-qualification/target/release/amd-cli-service-context-probe.exe
@@ -35,11 +35,12 @@ sha256 = C437215E32A77B2AAA24351F41DACA9F7F37AF3642048C48E059278205BE04FC
 ```
 
 The release `target` directory is build output and is not part of the
-documentation commit. The future Administrator command must pass this exact
-hash (or a newly rebuilt, separately reviewed hash) to the wrapper; the
-wrapper does not trust an arbitrary service executable.
+documentation commit. The authoritative Administrator command passed this exact
+hash. Any separately authorized future rerun would need to pass this exact hash
+(or a newly rebuilt, separately reviewed hash) to the wrapper; the wrapper does
+not trust an arbitrary service executable.
 
-The preparation ledger for this I1 branch is:
+The preparation ledger for this I1 branch, recorded before PR creation, was:
 
 ```text
 BASE_COMMIT = 91bc4dfaf6e7358473f71be634b349d9b0a82101
@@ -48,13 +49,14 @@ ORIGIN_MAIN = 91bc4dfaf6e7358473f71be634b349d9b0a82101
 MERGE_BASE = 91bc4dfaf6e7358473f71be634b349d9b0a82101
 PR20_MERGE_COMMIT = 91bc4dfaf6e7358473f71be634b349d9b0a82101
 BRANCH = qualify/amd-service-context-i1
-PR = NOT_CREATED_YET
+PR_AT_PREPARATION = NOT_CREATED_YET
 ```
 
 The exact pre-existing Service gate and exact-path AMD CLI process gate both
-passed during Administrator-equivalent read-only preparation. The wrapper
-rechecks both gates immediately before any future registration; preparation
-did not register a Service and did not launch the AMD CLI.
+passed during Administrator-equivalent read-only preparation. The authoritative
+wrapper rechecked both gates immediately before the authoritative service
+registration; preparation did not register a Service and did not launch the
+AMD CLI.
 
 ## FIRST HUMAN WRAPPER INVOCATION
 
@@ -79,8 +81,10 @@ SERVICE_SESSION0_AMD_CLI_QUALIFIED = NOT_YET_TESTED
 The persisted final summary contained no service or CLI lifecycle evidence;
 the exact Service and exact AMD CLI process were absent in the subsequent
 read-only checks. This incident is a harness classification, not evidence
-that LocalSystem or Session 0 is incompatible with the vendor CLI. The
-Service candidate remains pending qualification.
+that LocalSystem or Session 0 is incompatible with the vendor CLI. At that
+point, the Service candidate remained pending qualification. The later
+authoritative run completed the Service/Session 0 qualification; the current
+result is PASS.
 
 The repair makes the process-list evidence explicitly array-shaped for zero,
 one, or multiple matches and writes a stable `count` plus `processes` object.
@@ -239,7 +243,7 @@ It rejects arbitrary executable paths, raw vendor arguments, shell commands,
 arbitrary environment variables, and arbitrary working directories. The
 service itself derives the CLI path and fixed arguments. The run-root is
 restricted to the machine-owned qualification base and is supplied only by
-the future Administrator wrapper; a production broker would derive its output
+the qualification wrapper; a production broker would derive its output
 directory from trusted configuration rather than expose a user-controlled
 path.
 
@@ -289,7 +293,7 @@ Resource Timeline process is involved.
 
 ## OUTPUT AND ACL MODEL
 
-The future wrapper uses:
+The authoritative wrapper used:
 
 ```text
 %ProgramData%\\ResourceTimeline\\qualification\\amd-service-context\\<run-id>
@@ -300,9 +304,10 @@ authorized Administrator wrapper `Modify` access (needed to persist
 qualification and cleanup evidence), with inheritance disabled for the
 qualification directory. Ordinary non-administrator users receive no access
 through this ACL. It is not placed in the interactive user's `%TEMP%`, the AMD
-installation, or the Windows directory. The wrapper creates and protects this
-directory before service start; this preparation task does not create it on the
-real machine.
+installation, or the Windows directory. The authoritative wrapper created and
+protected this directory before service start; the preparation stage did not
+create this directory on the real machine, and the later authoritative run
+did.
 
 The service persists, at minimum:
 
@@ -321,7 +326,8 @@ timechart-output\\session.uprof       # if the vendor creates it
 
 Raw process evidence is written before post-processing. The existing
 `tools/amd-uprof-cli-spike/postprocess.ps1` is the single package-power parser;
-this service harness does not create a third parser. The future wrapper writes
+this service harness does not create a third parser. The authoritative
+qualification wrapper wrote
 `AMD-SERVICE-CONTEXT.qualification-before-cleanup.json` before deleting the
 temporary service registration.
 
@@ -433,7 +439,7 @@ All tests use harmless synthetic processes or fixture data and report
 
 ## REMAINING GATES
 
-This preparation does not qualify:
+The completed I1 qualification does not claim:
 
 - minimum privilege account;
 - service SID and production named-pipe ACL;
