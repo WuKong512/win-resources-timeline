@@ -3,8 +3,10 @@
 ## STATUS
 
 ```text
-TASK = AMD_CLI_SERVICE_CONTEXT_QUALIFICATION
-RESULT = PREPARED / NOT_RUN
+TASK = AMD-SERVICE-CONTEXT-I1
+RESULT = ADMIN_SERVICE_CONTEXT_QUALIFICATION_REQUIRED
+RUNTIME = NOT_RUN
+AUTOMATED_PREPARATION = PASS
 SERVICE_BROKER_CANDIDATE = LEADING_PENDING_RUNTIME_QUALIFICATION
 AMD_PRIVILEGE_ARCHITECTURE = DEFER_INSUFFICIENT_EVIDENCE
 DECISION_CONFIDENCE = MEDIUM
@@ -12,6 +14,8 @@ SERVICE_SESSION0_AMD_CLI_QUALIFIED = false
 MINIMUM_REQUIRED_WINDOWS_PRIVILEGES = UNPROVEN
 QUALIFICATION_ONLY = true
 AMD_RUNTIME_EXECUTED_BY_PREPARATION = false
+AMD_RUNTIME_EXECUTED = false
+SERVICE_REGISTERED = false
 ```
 
 This document prepares one narrowly scoped, manually authorized feasibility
@@ -25,13 +29,30 @@ The final local release build used for the future manual run is:
 ```text
 path = tools/amd-cli-service-context-qualification/target/release/amd-cli-service-context-probe.exe
 architecture = x64
-sha256 = DA0F0D2F2E47400D422C543B0B16901A379E9D7EA5187A7BFBF2EA29AF53AEC0
+sha256 = C437215E32A77B2AAA24351F41DACA9F7F37AF3642048C48E059278205BE04FC
 ```
 
 The release `target` directory is build output and is not part of the
 documentation commit. The future Administrator command must pass this exact
 hash (or a newly rebuilt, separately reviewed hash) to the wrapper; the
 wrapper does not trust an arbitrary service executable.
+
+The preparation ledger for this I1 branch is:
+
+```text
+BASE_COMMIT = 91bc4dfaf6e7358473f71be634b349d9b0a82101
+START_HEAD = 91bc4dfaf6e7358473f71be634b349d9b0a82101
+ORIGIN_MAIN = 91bc4dfaf6e7358473f71be634b349d9b0a82101
+MERGE_BASE = 91bc4dfaf6e7358473f71be634b349d9b0a82101
+PR20_MERGE_COMMIT = 91bc4dfaf6e7358473f71be634b349d9b0a82101
+BRANCH = qualify/amd-service-context-i1
+PR = NOT_CREATED_YET
+```
+
+The exact pre-existing Service gate and exact-path AMD CLI process gate both
+passed during Administrator-equivalent read-only preparation. The wrapper
+rechecks both gates immediately before any future registration; preparation
+did not register a Service and did not launch the AMD CLI.
 
 ## BASELINE AND QUESTION
 

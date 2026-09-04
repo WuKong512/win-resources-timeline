@@ -249,6 +249,7 @@ RecordId,Timestamp,socket0-package-power
     Write-Output 'POST_SPAWN_EVIDENCE_FAILURE_NEVER_REPORTS_NOT_LAUNCHED=PASS'
     Write-Output 'COMPLETE_RESULT_STATE_REQUIRES_PERSISTENCE=PASS'
     Write-Output 'AMD_RUNTIME_EXECUTED=false'
+    Write-Output 'SERVICE_REGISTERED=false'
 } finally {
     if (Test-Path -LiteralPath $root) {
         Remove-Item -LiteralPath $root -Recurse -Force
