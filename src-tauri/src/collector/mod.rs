@@ -1,3 +1,4 @@
+pub mod amd_uprof_cli;
 pub mod interval_engine;
 pub mod manager;
 pub mod nvidia_nvml;

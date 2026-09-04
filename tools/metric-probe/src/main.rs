@@ -1,4 +1,5 @@
 mod admission;
+mod amd_uprof;
 mod cli;
 mod cpu_sensor;
 mod model;
@@ -83,6 +84,18 @@ fn run_main() -> Result<(), String> {
             println!("JSON: {}", json_path.display());
             println!("Markdown: {}", markdown_path.display());
             Ok(())
+        }
+        Command::AmdUprof(config) => {
+            let (json_path, markdown_path) = amd_uprof::run(config)?;
+            println!("JSON: {}", json_path.display());
+            println!("Markdown: {}", markdown_path.display());
+            Ok(())
+        }
+        Command::AmdUprofWorkloadChild { workers } => amd_uprof::run_workload_child(workers),
+        Command::AmdUprofLoadChild { install_root } => amd_uprof::run_load_child(install_root),
+        Command::AmdUprofLoadOnlyChild { path } => amd_uprof::run_load_only_child(path),
+        Command::AmdUprofInitOnlyChild { install_root } => {
+            amd_uprof::run_init_only_child(install_root)
         }
     }
 }

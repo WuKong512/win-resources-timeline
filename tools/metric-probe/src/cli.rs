@@ -12,6 +12,11 @@ pub enum Command {
     Scenarios(ScenarioConfig),
     CpuSensors(CpuSensorConfig),
     CpuSensorLifecycle(CpuSensorLifecycleConfig),
+    AmdUprof(AmdUprofConfig),
+    AmdUprofWorkloadChild { workers: u32 },
+    AmdUprofLoadChild { install_root: PathBuf },
+    AmdUprofLoadOnlyChild { path: PathBuf },
+    AmdUprofInitOnlyChild { install_root: PathBuf },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -100,6 +105,57 @@ impl Default for CpuSensorLifecycleConfig {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AmdUprofMode {
+    Sanity,
+    Cadence,
+    Lifecycle,
+    Busy,
+}
+
+impl AmdUprofMode {
+    fn parse(value: &str) -> Result<Self, String> {
+        match value {
+            "sanity" => Ok(Self::Sanity),
+            "cadence" => Ok(Self::Cadence),
+            "lifecycle" => Ok(Self::Lifecycle),
+            "busy" => Ok(Self::Busy),
+            other => Err(format!(
+                "invalid AMD uProf mode '{other}'; expected sanity, cadence, lifecycle, or busy"
+            )),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AmdUprofConfig {
+    pub mode: AmdUprofMode,
+    pub duration_seconds: u64,
+    pub poll_interval_ms: u64,
+    pub phase_duration_ms: u64,
+    pub quiescence_ms: u64,
+    pub output_dir: PathBuf,
+    pub install_root: Option<PathBuf>,
+    pub representative_load: bool,
+    pub load_workers: u32,
+}
+
+impl Default for AmdUprofConfig {
+    fn default() -> Self {
+        Self {
+            mode: AmdUprofMode::Sanity,
+            duration_seconds: 30,
+            poll_interval_ms: 1_000,
+            phase_duration_ms: 5_000,
+            quiescence_ms: 2_000,
+            output_dir: PathBuf::from("artifacts/metric-probe/cpu-sensor-amd-uprof"),
+            install_root: None,
+            representative_load: false,
+            load_workers: 4,
+        }
+    }
+}
+
 impl Default for ScenarioConfig {
     fn default() -> Self {
         Self {
@@ -137,6 +193,11 @@ where
         "scenarios" => parse_scenario_args(args),
         "cpu-sensors" => parse_cpu_sensor_args(args),
         "cpu-sensor-lifecycle" => parse_cpu_sensor_lifecycle_args(args),
+        "cpu-sensor-amd-uprof" => parse_amd_uprof_args(args),
+        "amd-uprof-workload-child" => parse_amd_uprof_workload_child_args(args),
+        "amd-uprof-load-child" => parse_amd_uprof_load_child_args(args),
+        "amd-uprof-load-only-child" => parse_amd_uprof_load_only_child_args(args),
+        "amd-uprof-init-only-child" => parse_amd_uprof_init_only_child_args(args),
         "--help" | "-h" => Err(usage().to_string()),
         "--version" | "-V" => Err("metric-probe 0.1.0".to_string()),
         other => Err(format!(
@@ -187,6 +248,110 @@ where
         }
     }
     Ok(Command::CpuSensorLifecycle(config))
+}
+
+fn parse_amd_uprof_args<I>(args: I) -> Result<Command, String>
+where
+    I: IntoIterator<Item = String>,
+{
+    let mut config = AmdUprofConfig::default();
+    let mut args = args.into_iter();
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--mode" => {
+                let value = args
+                    .next()
+                    .ok_or_else(|| format!("missing value for {arg}"))?;
+                config.mode = AmdUprofMode::parse(&value)?;
+            }
+            "--duration-seconds" => {
+                config.duration_seconds = parse_positive(&arg, args.next())?;
+            }
+            "--poll-interval-ms" => {
+                config.poll_interval_ms = parse_positive(&arg, args.next())?;
+            }
+            "--phase-duration-ms" => {
+                config.phase_duration_ms = parse_positive(&arg, args.next())?;
+            }
+            "--quiescence-ms" => {
+                config.quiescence_ms = parse_positive(&arg, args.next())?;
+            }
+            "--output-dir" => config.output_dir = parse_path(&arg, args.next())?,
+            "--install-root" => config.install_root = Some(parse_path(&arg, args.next())?),
+            "--load" | "--representative-load" => config.representative_load = true,
+            "--load-workers" => {
+                config.load_workers = parse_positive_u32(&arg, args.next())?;
+            }
+            "--help" | "-h" => return Err(usage().to_string()),
+            other => return Err(format!("invalid cpu-sensor-amd-uprof argument '{other}'")),
+        }
+    }
+    Ok(Command::AmdUprof(config))
+}
+
+fn parse_amd_uprof_workload_child_args<I>(args: I) -> Result<Command, String>
+where
+    I: IntoIterator<Item = String>,
+{
+    let mut workers = 4;
+    let mut args = args.into_iter();
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--workers" => workers = parse_positive_u32(&arg, args.next())?,
+            other => return Err(format!("invalid AMD uProf workload argument '{other}'")),
+        }
+    }
+    Ok(Command::AmdUprofWorkloadChild { workers })
+}
+
+fn parse_amd_uprof_load_child_args<I>(args: I) -> Result<Command, String>
+where
+    I: IntoIterator<Item = String>,
+{
+    let mut install_root = None;
+    let mut args = args.into_iter();
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--install-root" => install_root = Some(parse_path(&arg, args.next())?),
+            other => return Err(format!("invalid AMD uProf load-check argument '{other}'")),
+        }
+    }
+    install_root
+        .map(|install_root| Command::AmdUprofLoadChild { install_root })
+        .ok_or_else(|| "AMD uProf load-check requires --install-root".to_string())
+}
+
+fn parse_amd_uprof_load_only_child_args<I>(args: I) -> Result<Command, String>
+where
+    I: IntoIterator<Item = String>,
+{
+    let mut path = None;
+    let mut args = args.into_iter();
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--path" => path = Some(parse_path(&arg, args.next())?),
+            other => return Err(format!("invalid AMD uProf load-only argument '{other}'")),
+        }
+    }
+    path.map(|path| Command::AmdUprofLoadOnlyChild { path })
+        .ok_or_else(|| "AMD uProf load-only check requires --path".to_string())
+}
+
+fn parse_amd_uprof_init_only_child_args<I>(args: I) -> Result<Command, String>
+where
+    I: IntoIterator<Item = String>,
+{
+    let mut install_root = None;
+    let mut args = args.into_iter();
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--install-root" => install_root = Some(parse_path(&arg, args.next())?),
+            other => return Err(format!("invalid AMD uProf init-only argument '{other}'")),
+        }
+    }
+    install_root
+        .map(|install_root| Command::AmdUprofInitOnlyChild { install_root })
+        .ok_or_else(|| "AMD uProf init-only check requires --install-root".to_string())
 }
 
 fn parse_lifecycle_args<I>(args: I) -> Result<Command, String>
@@ -287,8 +452,13 @@ fn parse_positive(flag: &str, value: Option<String>) -> Result<u64, String> {
     Ok(parsed)
 }
 
+fn parse_positive_u32(flag: &str, value: Option<String>) -> Result<u32, String> {
+    let parsed = parse_positive(flag, value)?;
+    u32::try_from(parsed).map_err(|_| format!("value for {flag} is too large"))
+}
+
 pub fn usage() -> &'static str {
-    "Usage:\n  metric-probe inventory\n  metric-probe run [options]\n  metric-probe lifecycle [options]\n  metric-probe scenarios [options]\n  metric-probe cpu-sensors [options]\n  metric-probe cpu-sensor-lifecycle [options]\n\nRun options:\n  --duration-seconds <n>\n  --core-interval-ms <n>\n  --process-interval-ms <n>\n  --output-dir <path>\n  --no-process-probe\n  --no-disk-probe\n  --no-network-probe\n  --no-power-probe\n  --no-gpu-probe\n\nLifecycle options:\n  --enabled-duration-ms <n>\n  --disabled-duration-ms <n>\n  --output-dir <path>\n\nScenario options:\n  --sample-count <n>\n  --output-dir <path>\n\nCPU sensor options:\n  --duration-seconds <n>\n  --poll-interval-ms <n>\n  --output-dir <path>\n\nCPU sensor lifecycle options:\n  --enabled-duration-ms <n>\n  --disabled-duration-ms <n>\n  --output-dir <path>"
+    "Usage:\n  metric-probe inventory\n  metric-probe run [options]\n  metric-probe lifecycle [options]\n  metric-probe scenarios [options]\n  metric-probe cpu-sensors [options]\n  metric-probe cpu-sensor-lifecycle [options]\n  metric-probe cpu-sensor-amd-uprof [options]\n\nRun options:\n  --duration-seconds <n>\n  --core-interval-ms <n>\n  --process-interval-ms <n>\n  --output-dir <path>\n  --no-process-probe\n  --no-disk-probe\n  --no-network-probe\n  --no-power-probe\n  --no-gpu-probe\n\nLifecycle options:\n  --enabled-duration-ms <n>\n  --disabled-duration-ms <n>\n  --output-dir <path>\n\nScenario options:\n  --sample-count <n>\n  --output-dir <path>\n\nCPU sensor options:\n  --duration-seconds <n>\n  --poll-interval-ms <n>\n  --output-dir <path>\n\nCPU sensor lifecycle options:\n  --enabled-duration-ms <n>\n  --disabled-duration-ms <n>\n  --output-dir <path>\n\nAMD uProf qualification options:\n  --mode sanity|cadence|lifecycle|busy\n  --duration-seconds <n>\n  --poll-interval-ms <n>\n  --phase-duration-ms <n>\n  --quiescence-ms <n>\n  --install-root <absolute-path>\n  --output-dir <path>\n  --load\n  --load-workers <n>"
 }
 
 pub fn args() -> Vec<String> {
@@ -298,8 +468,8 @@ pub fn args() -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        parse_args, Command, CpuSensorConfig, CpuSensorLifecycleConfig, LifecycleConfig, RunConfig,
-        ScenarioConfig,
+        parse_args, AmdUprofConfig, AmdUprofMode, Command, CpuSensorConfig,
+        CpuSensorLifecycleConfig, LifecycleConfig, RunConfig, ScenarioConfig,
     };
     use std::path::PathBuf;
 
@@ -430,5 +600,77 @@ mod tests {
                 output_dir: PathBuf::from("tmp/lifecycle"),
             })
         );
+    }
+
+    #[test]
+    fn parses_amd_uprof_qualification_commands() {
+        assert_eq!(
+            parse_args([
+                "metric-probe",
+                "cpu-sensor-amd-uprof",
+                "--mode",
+                "cadence",
+                "--duration-seconds",
+                "30",
+                "--poll-interval-ms",
+                "500",
+                "--phase-duration-ms",
+                "1000",
+                "--quiescence-ms",
+                "2000",
+                "--install-root",
+                "D:/apps/AMDuProf",
+                "--output-dir",
+                "tmp/amd",
+                "--load",
+                "--load-workers",
+                "2",
+            ])
+            .unwrap(),
+            Command::AmdUprof(AmdUprofConfig {
+                mode: AmdUprofMode::Cadence,
+                duration_seconds: 30,
+                poll_interval_ms: 500,
+                phase_duration_ms: 1000,
+                quiescence_ms: 2000,
+                output_dir: PathBuf::from("tmp/amd"),
+                install_root: Some(PathBuf::from("D:/apps/AMDuProf")),
+                representative_load: true,
+                load_workers: 2,
+            })
+        );
+        assert_eq!(
+            parse_args(["metric-probe", "amd-uprof-workload-child", "--workers", "3"]).unwrap(),
+            Command::AmdUprofWorkloadChild { workers: 3 }
+        );
+        assert_eq!(
+            parse_args([
+                "metric-probe",
+                "amd-uprof-load-only-child",
+                "--path",
+                "D:/apps/AMDuProf/bin/AMDPowerProfileAPI.dll",
+            ])
+            .unwrap(),
+            Command::AmdUprofLoadOnlyChild {
+                path: PathBuf::from("D:/apps/AMDuProf/bin/AMDPowerProfileAPI.dll"),
+            }
+        );
+        assert_eq!(
+            parse_args([
+                "metric-probe",
+                "amd-uprof-init-only-child",
+                "--install-root",
+                "D:/apps/AMDuProf",
+            ])
+            .unwrap(),
+            Command::AmdUprofInitOnlyChild {
+                install_root: PathBuf::from("D:/apps/AMDuProf"),
+            }
+        );
+    }
+
+    #[test]
+    fn rejects_unknown_amd_uprof_mode() {
+        assert!(parse_args(["metric-probe", "cpu-sensor-amd-uprof", "--mode", "all"]).is_err());
     }
 }
