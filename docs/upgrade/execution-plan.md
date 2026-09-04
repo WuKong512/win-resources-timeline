@@ -326,9 +326,11 @@ RUNTIME = NOT_RUN
 AUTOMATED_PREPARATION = PASS
 AMD_RUNTIME_EXECUTED = false
 SERVICE_REGISTERED = false
+FIRST_HUMAN_WRAPPER_INVOCATION = BLOCKED_PRE_RUNTIME_HARNESS
+FAILURE_OCCURRED_BEFORE_NEW_SERVICE = true
 SERVICE_BROKER_CANDIDATE = LEADING_PENDING_RUNTIME_QUALIFICATION
 AMD_PRIVILEGE_ARCHITECTURE = DEFER_INSUFFICIENT_EVIDENCE
-SERVICE_SESSION0_AMD_CLI_QUALIFIED = false
+SERVICE_SESSION0_AMD_CLI_QUALIFIED = NOT_YET_TESTED
 MINIMUM_REQUIRED_WINDOWS_PRIVILEGES = UNPROVEN
 LONG_LIVED_SESSION_ORDERING = AFTER_PRIVILEGE_CONTEXT_QUALIFICATION
 ```
@@ -339,7 +341,11 @@ argv、cwd、环境或输出路径。未来人工运行仅创建一个 manual Lo
 service，执行一次固定的 10 秒 package-power CLI session，持久化 Session 0
 和原始结果后删除同名注册。非 AMD Rust/PowerShell tests 已通过；不标记
 Service/Session 0、least privilege、IPC、long-lived 或 production provider
-为完成。详见
+为完成。首次人工 wrapper invocation 在 pre-runtime process-list evidence
+序列化处被 `BLOCKED_PRE_RUNTIME_HARNESS` 拦截；未注册 Service、未启动 AMD
+CLI，因此 Service/Session 0 仍为 `NOT_YET_TESTED`。该 harness bug 已修复并
+补充 0/1/N process-list、pre-runtime ordering 和 Unicode evidence regression；
+尚未重跑人工 runtime。详见
 [`cpu-sensor-amd-service-context-qualification.md`](../measurements/cpu-sensor-amd-service-context-qualification.md)。
 
 ## CPU-SENSOR-AMD-UPROF-LIVE-QUALIFICATION-SPIKE CLOSURE

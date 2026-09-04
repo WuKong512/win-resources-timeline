@@ -113,6 +113,52 @@ try {
     $validArgs = @('--run-root', $runPath)
     Assert-True -Condition ((Test-Path -LiteralPath $root -PathType Container) -and ($validArgs.Count -eq 2)) -Message 'T2 evidence root setup failed'
 
+    $zeroProcessList = New-ProcessListEvidence -Processes @()
+    Assert-True -Condition ($zeroProcessList.count -eq 0) -Message 'zero process-list count mismatch'
+    Assert-True -Condition ($zeroProcessList.processes -is [array]) -Message 'zero process-list was not an array'
+    $zeroProcessJson = $zeroProcessList | ConvertTo-Json -Depth 10
+    $zeroProcessRoundTrip = $zeroProcessJson | ConvertFrom-Json
+    Assert-True -Condition ($zeroProcessRoundTrip.count -eq 0 -and
+        $zeroProcessRoundTrip.processes -is [array] -and
+        @($zeroProcessRoundTrip.processes).Count -eq 0) -Message 'zero process-list serialization shape failed'
+
+    $oneProcessList = New-ProcessListEvidence -Processes @([pscustomobject]@{
+        process_id = 1234
+        executable_path = 'C:\synthetic\AMDuProfCLI.exe'
+    })
+    Assert-True -Condition ($oneProcessList.count -eq 1) -Message 'one process-list count mismatch'
+    Assert-True -Condition ($oneProcessList.processes -is [array]) -Message 'one process-list was not an array'
+    $oneProcessRoundTrip = (($oneProcessList | ConvertTo-Json -Depth 10) | ConvertFrom-Json)
+    Assert-True -Condition ($oneProcessRoundTrip.count -eq 1 -and
+        $oneProcessRoundTrip.processes -is [array] -and
+        @($oneProcessRoundTrip.processes).Count -eq 1) -Message 'one process-list serialization shape failed'
+
+    $multipleProcessList = New-ProcessListEvidence -Processes @(
+        [pscustomobject]@{ process_id = 1234; executable_path = 'C:\synthetic\AMDuProfCLI.exe' },
+        [pscustomobject]@{ process_id = 5678; executable_path = 'C:\synthetic\AMDuProfCLI.exe' }
+    )
+    Assert-True -Condition ($multipleProcessList.count -gt 1) -Message 'multiple process-list count mismatch'
+    Assert-True -Condition ($multipleProcessList.processes -is [array]) -Message 'multiple process-list was not an array'
+    $multipleProcessRoundTrip = (($multipleProcessList | ConvertTo-Json -Depth 10) | ConvertFrom-Json)
+    Assert-True -Condition ($multipleProcessRoundTrip.count -gt 1 -and
+        $multipleProcessRoundTrip.processes -is [array] -and
+        @($multipleProcessRoundTrip.processes).Count -gt 1) -Message 'multiple process-list serialization shape failed'
+
+    $wrapperText = Get-Content -LiteralPath (Join-Path $PSScriptRoot 'run-admin-amd-service-context-qualification.ps1') -Raw
+    $adminProofIndex = $wrapperText.IndexOf('$adminProof = Get-AdminProof', [StringComparison]::Ordinal)
+    $probeIdentityIndex = $wrapperText.IndexOf('$probeRecord = Get-ArtifactRecord', [StringComparison]::Ordinal)
+    $cliIdentityIndex = $wrapperText.IndexOf('$cliRecord = Get-ArtifactRecord', [StringComparison]::Ordinal)
+    $serviceGateIndex = $wrapperText.IndexOf('Test-ServiceNameAbsent', [StringComparison]::Ordinal)
+    $cliGateIndex = $wrapperText.IndexOf('$existingCli = @(', [StringComparison]::Ordinal)
+    $evidencePersistIndex = $wrapperText.IndexOf('PREEXISTING-CLI-PROCESSES.json', [StringComparison]::Ordinal)
+    $newServiceIndex = $wrapperText.IndexOf('New-Service -Name', [StringComparison]::Ordinal)
+    $startServiceIndex = $wrapperText.IndexOf('Start-Service -Name', [StringComparison]::Ordinal)
+    Assert-True -Condition ($adminProofIndex -ge 0 -and $probeIdentityIndex -gt $adminProofIndex -and
+        $cliIdentityIndex -gt $probeIdentityIndex -and $serviceGateIndex -gt $cliIdentityIndex -and
+        $cliGateIndex -gt $serviceGateIndex -and $evidencePersistIndex -gt $cliGateIndex -and
+        $newServiceIndex -gt $evidencePersistIndex -and $startServiceIndex -gt $newServiceIndex) `
+        -Message 'pre-runtime gates/evidence must precede New-Service and Start-Service'
+
     $runtimeEvidenceRoot = Join-Path $root 'runtime-evidence'
     [void](New-Item -ItemType Directory -Path $runtimeEvidenceRoot -Force)
     $beforeLaunch = Get-AmdCliExecutionEvidence -EvidenceRoot $runtimeEvidenceRoot
@@ -221,6 +267,24 @@ RecordId,Timestamp,socket0-package-power
     Assert-True -Condition ($parseFail.parsed_package_power.status -eq 'NOT_FOUND') -Message 'T11 parser failure path failed'
     Assert-True -Condition ($parseFail.qualification -eq 'OUTPUT_ARTIFACT_MISSING') -Message 'T11 missing output classification failed'
 
+    $emptyInventoryRoot = Join-Path $fixtureRoot 'empty-inventory'
+    [void](New-Item -ItemType Directory -Path $emptyInventoryRoot -Force)
+    $emptyInventoryPost = Invoke-AmdCliPostRuntimePipeline -SessionDirectory $emptyInventoryRoot -Run $run
+    Assert-True -Condition ($emptyInventoryPost.output_artifacts -is [array] -and
+        @($emptyInventoryPost.output_artifacts).Count -eq 0) -Message 'empty output inventory shape failed'
+
+    try {
+        throw [System.Exception]::new('无法将参数绑定到参数 Value')
+    } catch {
+        $unicodeError = $_.Exception.Message
+    }
+    $unicodeRoot = Join-Path $root 'unicode'
+    $unicodePath = Join-Path $unicodeRoot 'summary.json'
+    Write-JsonFile -Path $unicodePath -Value ([pscustomobject]@{ wrapper_error = $unicodeError })
+    $unicodeRoundTrip = Get-Content -LiteralPath $unicodePath -Raw | ConvertFrom-Json
+    Assert-True -Condition ($unicodeRoundTrip.wrapper_error -eq '无法将参数绑定到参数 Value') `
+        -Message 'Unicode wrapper error did not round-trip through JSON evidence'
+
     $qualificationPath = Join-Path $root 'qualification-before-cleanup.json'
     Write-JsonFile -Path $qualificationPath -Value ([pscustomobject]@{
         qualification = 'PASS'
@@ -248,6 +312,10 @@ RecordId,Timestamp,socket0-package-power
     Write-Output 'FAILED_POST_LAUNCH_PATH_DOES_NOT_REPORT_FALSE=PASS'
     Write-Output 'POST_SPAWN_EVIDENCE_FAILURE_NEVER_REPORTS_NOT_LAUNCHED=PASS'
     Write-Output 'COMPLETE_RESULT_STATE_REQUIRES_PERSISTENCE=PASS'
+    Write-Output 'EMPTY_PROCESS_LIST_SERIALIZATION=PASS'
+    Write-Output 'PROCESS_LIST_SHAPE_STABLE_FOR_0_1_N=PASS'
+    Write-Output 'FAILURE_OCCURRED_BEFORE_NEW_SERVICE=true'
+    Write-Output 'UNICODE_ERROR_EVIDENCE_ROUNDTRIP=PASS'
     Write-Output 'AMD_RUNTIME_EXECUTED=false'
     Write-Output 'SERVICE_REGISTERED=false'
 } finally {

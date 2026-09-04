@@ -24,7 +24,9 @@ function Write-Utf8File {
     if (-not [string]::IsNullOrWhiteSpace($parent)) {
         [void](New-Item -ItemType Directory -Path $parent -Force)
     }
-    [System.IO.File]::WriteAllText($Path, $Text, [System.Text.UTF8Encoding]::new($false))
+    # Windows PowerShell 5.1 otherwise reads BOM-less UTF-8 evidence using the
+    # active ANSI code page, which corrupts non-ASCII wrapper_error text.
+    [System.IO.File]::WriteAllText($Path, $Text, [System.Text.UTF8Encoding]::new($true))
 }
 
 function Write-JsonFile {
@@ -303,6 +305,18 @@ function Get-ExistingAmdCliProcesses {
             }
     )
     $rows
+}
+
+function New-ProcessListEvidence {
+    param(
+        [Parameter(Mandatory = $true)][AllowEmptyCollection()][object[]]$Processes
+    )
+
+    $stableProcesses = @($Processes)
+    [pscustomobject]@{
+        count = [int]$stableProcesses.Count
+        processes = [object[]]$stableProcesses
+    }
 }
 
 function Protect-ServiceRunRoot {

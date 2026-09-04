@@ -10,7 +10,7 @@ AUTOMATED_PREPARATION = PASS
 SERVICE_BROKER_CANDIDATE = LEADING_PENDING_RUNTIME_QUALIFICATION
 AMD_PRIVILEGE_ARCHITECTURE = DEFER_INSUFFICIENT_EVIDENCE
 DECISION_CONFIDENCE = MEDIUM
-SERVICE_SESSION0_AMD_CLI_QUALIFIED = false
+SERVICE_SESSION0_AMD_CLI_QUALIFIED = NOT_YET_TESTED
 MINIMUM_REQUIRED_WINDOWS_PRIVILEGES = UNPROVEN
 QUALIFICATION_ONLY = true
 AMD_RUNTIME_EXECUTED_BY_PREPARATION = false
@@ -53,6 +53,37 @@ The exact pre-existing Service gate and exact-path AMD CLI process gate both
 passed during Administrator-equivalent read-only preparation. The wrapper
 rechecks both gates immediately before any future registration; preparation
 did not register a Service and did not launch the AMD CLI.
+
+## FIRST HUMAN WRAPPER INVOCATION
+
+The first manually authorized wrapper invocation stopped during pre-runtime
+evidence preparation, after administrator and artifact preflight and before
+the pre-existing process evidence file or any Service registration could be
+created:
+
+```text
+FIRST_HUMAN_WRAPPER_INVOCATION = BLOCKED_PRE_RUNTIME_HARNESS
+EVIDENCE_ROOT = C:\ProgramData\ResourceTimeline\qualification\amd-service-context\20260904T071828677Z
+ROOT_CAUSE = EMPTY_PIPELINE_RESULT_COLLAPSED_TO_NULL_BEFORE_JSON_SERIALIZATION
+FAILURE_OCCURRED_BEFORE_NEW_SERVICE = true
+AMD_RUNTIME_EXECUTED = false
+PROCESS_SPAWNED = false
+SERVICE_REGISTERED = false
+REAL_AMD_RUNTIME_COUNT = 0
+SERVICE_CONTEXT_RUNTIME_COUNT = 0
+SERVICE_SESSION0_AMD_CLI_QUALIFIED = NOT_YET_TESTED
+```
+
+The persisted final summary contained no service or CLI lifecycle evidence;
+the exact Service and exact AMD CLI process were absent in the subsequent
+read-only checks. This incident is a harness classification, not evidence
+that LocalSystem or Session 0 is incompatible with the vendor CLI. The
+Service candidate remains pending qualification.
+
+The repair makes the process-list evidence explicitly array-shaped for zero,
+one, or multiple matches and writes a stable `count` plus `processes` object.
+It also makes the qualification PowerShell evidence UTF-8/BOM-readable by
+Windows PowerShell 5.1 for deterministic Unicode error round-tripping.
 
 ## BASELINE AND QUESTION
 
@@ -312,6 +343,9 @@ The PowerShell synthetic test covers:
 - timeout and owned cleanup bookkeeping;
 - fixed service command shape and service-name safety checks;
 - shared package-power parser PASS/FAIL and cadence assessment;
+- zero/one/multiple pre-existing CLI process-list evidence serialization;
+- pre-runtime gate ordering before `New-Service` and `Start-Service`;
+- Unicode wrapper-error evidence round-tripping;
 - qualification-before-cleanup persistence and exact-file cleanup.
 
 All tests use harmless synthetic processes or fixture data and report

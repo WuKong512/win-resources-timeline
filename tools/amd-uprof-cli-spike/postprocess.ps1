@@ -133,6 +133,7 @@ function Invoke-AmdCliPostRuntimePipeline {
     }
     $uprofPath = if ($null -ne $uprofFile) { $uprofFile.FullName } else { $null }
     $qualification = Get-AmdCliQualification -Run $Run -CsvPath $csvPath -UprofPath $uprofPath -Parsed $parsed
+    $outputArtifacts = @(Get-OutputInventory -Root $SessionDirectory)
 
     [pscustomobject]@{
         csv_path_resolution = if ($null -ne $csvPath) { 'PASS' } else { 'NOT_FOUND' }
@@ -140,7 +141,7 @@ function Invoke-AmdCliPostRuntimePipeline {
         session_uprof_path = $uprofPath
         parser_invoked = $parserInvoked
         parsed_package_power = $parsed
-        output_artifacts = Get-OutputInventory -Root $SessionDirectory
+        output_artifacts = [object[]]$outputArtifacts
         qualification = $qualification
     }
 }

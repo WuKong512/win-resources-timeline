@@ -78,9 +78,13 @@ try {
     if (-not (Test-ServiceNameAbsent -ServiceName $ServiceName)) {
         throw 'BLOCKED_PREEXISTING_SERVICE: exact qualification service already exists'
     }
-    $existingCli = Get-ExistingAmdCliProcesses -CliPath $cliPath
-    Write-JsonFile -Path (Join-Path $runRoot 'PREEXISTING-CLI-PROCESSES.json') -Value $existingCli
-    if (@($existingCli).Count -gt 0) {
+    $existingCli = @(
+        Get-ExistingAmdCliProcesses -CliPath $cliPath
+    )
+    $existingCliEvidence = New-ProcessListEvidence -Processes $existingCli
+    Write-JsonFile -Path (Join-Path $runRoot 'PREEXISTING-CLI-PROCESSES.json') `
+        -Value $existingCliEvidence
+    if ($existingCli.Count -gt 0) {
         throw 'BLOCKED_PREEXISTING_AMD_CLI_PROCESS: exact target is already running'
     }
 
