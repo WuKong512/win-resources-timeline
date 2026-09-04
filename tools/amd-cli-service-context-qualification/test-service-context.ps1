@@ -159,6 +159,96 @@ try {
         $newServiceIndex -gt $evidencePersistIndex -and $startServiceIndex -gt $newServiceIndex) `
         -Message 'pre-runtime gates/evidence must precede New-Service and Start-Service'
 
+    $singleDigitTimestamp = Parse-CadenceTimestamp -Timestamp '1:2:3:4'
+    Assert-True -Condition ($singleDigitTimestamp.valid -and $singleDigitTimestamp.milliseconds -eq 3723004) `
+        -Message 'single-digit timestamp fields were not parsed deterministically'
+    $mixedWidthTimestamp = Parse-CadenceTimestamp -Timestamp '16:3:25:895'
+    Assert-True -Condition ($mixedWidthTimestamp.valid -and $mixedWidthTimestamp.milliseconds -eq 57805895) `
+        -Message 'mixed-width vendor timestamp was rejected'
+    $paddedTimestamp = Parse-CadenceTimestamp -Timestamp '16:03:25:895'
+    Assert-True -Condition ($paddedTimestamp.valid -and
+        $paddedTimestamp.milliseconds -eq $mixedWidthTimestamp.milliseconds) -Message 'padded timestamp changed semantics'
+    $acceptedTimestampForms = @(
+        [pscustomobject]@{ text = '6:3:5:895'; milliseconds = 21785895 },
+        [pscustomobject]@{ text = '16:3:5:895'; milliseconds = 57785895 },
+        [pscustomobject]@{ text = '6:03:5:895'; milliseconds = 21785895 },
+        [pscustomobject]@{ text = '16:03:5:895'; milliseconds = 57785895 },
+        [pscustomobject]@{ text = '6:3:05:895'; milliseconds = 21785895 },
+        [pscustomobject]@{ text = '16:3:05:895'; milliseconds = 57785895 },
+        [pscustomobject]@{ text = '6:03:05:895'; milliseconds = 21785895 },
+        [pscustomobject]@{ text = '16:03:05:895'; milliseconds = 57785895 }
+    )
+    foreach ($acceptedTimestampForm in $acceptedTimestampForms) {
+        $acceptedTimestamp = Parse-CadenceTimestamp -Timestamp $acceptedTimestampForm.text
+        Assert-True -Condition ($acceptedTimestamp.valid -and
+            $acceptedTimestamp.milliseconds -eq $acceptedTimestampForm.milliseconds) `
+            -Message "supported timestamp form was rejected: $($acceptedTimestampForm.text)"
+    }
+
+    $consecutiveCadence = Get-CadenceAssessment -Samples @(
+        [pscustomobject]@{ timestamp = '16:3:25:895' }
+        [pscustomobject]@{ timestamp = '16:3:26:897' }
+    )
+    Assert-True -Condition ($consecutiveCadence.status -eq 'PASS' -and
+        $consecutiveCadence.delta_count -eq 1 -and
+        @($consecutiveCadence.deltas_ms)[0] -eq 1002) -Message 'mixed-width consecutive cadence failed'
+
+    $midnightCadence = Get-CadenceAssessment -Samples @(
+        [pscustomobject]@{ timestamp = '23:59:59:900' }
+        [pscustomobject]@{ timestamp = '00:00:00:900' }
+    )
+    Assert-True -Condition ($midnightCadence.status -eq 'PASS' -and
+        $midnightCadence.delta_count -eq 1 -and
+        @($midnightCadence.deltas_ms)[0] -eq 1000) -Message 'midnight rollover cadence failed'
+
+    $arbitraryRegression = Get-CadenceAssessment -Samples @(
+        [pscustomobject]@{ timestamp = '12:00:00:000' }
+        [pscustomobject]@{ timestamp = '11:59:59:000' }
+    )
+    Assert-True -Condition ($arbitraryRegression.status -eq 'INCONCLUSIVE' -and
+        @($arbitraryRegression.deltas_ms)[0] -eq -1000 -and
+        $arbitraryRegression.error -match 'regression') -Message 'arbitrary timestamp regression was treated as rollover'
+
+    $invalidCadenceTimestamps = @(
+        '24:00:00:000',
+        '12:60:00:000',
+        '12:00:60:000',
+        '12:00:00:1000',
+        '12:00:00',
+        '12:00:00:000:1'
+    )
+    foreach ($invalidCadenceTimestamp in $invalidCadenceTimestamps) {
+        $invalidTimestamp = Parse-CadenceTimestamp -Timestamp $invalidCadenceTimestamp
+        Assert-True -Condition (-not $invalidTimestamp.valid) `
+            -Message "invalid timestamp was accepted: $invalidCadenceTimestamp"
+    }
+
+    # Regression fixture copied from the authoritative 20260904T080323173Z run.
+    $authoritativeTimestamps = @(
+        '16:3:25:895',
+        '16:3:26:897',
+        '16:3:27:901',
+        '16:3:28:910',
+        '16:3:29:916',
+        '16:3:30:922',
+        '16:3:31:926',
+        '16:3:32:928',
+        '16:3:33:937'
+    )
+    $authoritativeSamples = @($authoritativeTimestamps | ForEach-Object {
+        [pscustomobject]@{ timestamp = $_ }
+    })
+    $authoritativeCadence = Get-CadenceAssessment -Samples $authoritativeSamples
+    $expectedAuthoritativeDeltas = @(1002, 1004, 1009, 1006, 1006, 1004, 1002, 1009)
+    Assert-True -Condition ($authoritativeCadence.status -eq 'PASS' -and
+        $authoritativeCadence.delta_count -eq 8 -and
+        ($authoritativeCadence.deltas_ms -join ',') -eq ($expectedAuthoritativeDeltas -join ',') -and
+        $authoritativeCadence.min_ms -eq 1002 -and
+        $authoritativeCadence.max_ms -eq 1009 -and
+        $authoritativeCadence.mean_ms -eq 1005.25 -and
+        [string]::IsNullOrWhiteSpace([string]$authoritativeCadence.error)) `
+        -Message 'authoritative cadence fixture did not produce the expected PASS deltas'
+
     $runtimeEvidenceRoot = Join-Path $root 'runtime-evidence'
     [void](New-Item -ItemType Directory -Path $runtimeEvidenceRoot -Force)
     $beforeLaunch = Get-AmdCliExecutionEvidence -EvidenceRoot $runtimeEvidenceRoot
@@ -316,6 +406,13 @@ RecordId,Timestamp,socket0-package-power
     Write-Output 'PROCESS_LIST_SHAPE_STABLE_FOR_0_1_N=PASS'
     Write-Output 'FAILURE_OCCURRED_BEFORE_NEW_SERVICE=true'
     Write-Output 'UNICODE_ERROR_EVIDENCE_ROUNDTRIP=PASS'
+    Write-Output 'TIMESTAMP_PARSER_FORMAT_MATRIX=PASS'
+    Write-Output 'AUTHORITATIVE_CADENCE_FIXTURE=PASS'
+    Write-Output 'DERIVED_FROM_EXISTING_AUTHORITATIVE_RUN=true'
+    Write-Output 'SOURCE_RUN=20260904T080323173Z'
+    Write-Output 'REAL_RUNTIME_REEXECUTED=false'
+    Write-Output 'MIDNIGHT_ROLLOVER=PASS'
+    Write-Output 'TIMESTAMP_REGRESSION_REJECTED=PASS'
     Write-Output 'AMD_RUNTIME_EXECUTED=false'
     Write-Output 'SERVICE_REGISTERED=false'
 } finally {
