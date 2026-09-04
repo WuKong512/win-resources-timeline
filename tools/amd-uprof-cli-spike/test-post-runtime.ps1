@@ -105,6 +105,7 @@ try {
     Write-Output 'SUMMARY_WRITTEN=PASS'
     Write-Output 'FULL_POST_RUNTIME_SYNTHETIC_PATH=PASS'
     Write-Output 'AMD_RUNTIME_EXECUTED=false'
+    Write-Output 'SERVICE_REGISTERED=false'
 } finally {
     if (Test-Path -LiteralPath $testRoot) {
         Remove-Item -LiteralPath $testRoot -Recurse -Force

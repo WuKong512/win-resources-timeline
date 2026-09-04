@@ -113,6 +113,142 @@ try {
     $validArgs = @('--run-root', $runPath)
     Assert-True -Condition ((Test-Path -LiteralPath $root -PathType Container) -and ($validArgs.Count -eq 2)) -Message 'T2 evidence root setup failed'
 
+    $zeroProcessList = New-ProcessListEvidence -Processes @()
+    Assert-True -Condition ($zeroProcessList.count -eq 0) -Message 'zero process-list count mismatch'
+    Assert-True -Condition ($zeroProcessList.processes -is [array]) -Message 'zero process-list was not an array'
+    $zeroProcessJson = $zeroProcessList | ConvertTo-Json -Depth 10
+    $zeroProcessRoundTrip = $zeroProcessJson | ConvertFrom-Json
+    Assert-True -Condition ($zeroProcessRoundTrip.count -eq 0 -and
+        $zeroProcessRoundTrip.processes -is [array] -and
+        @($zeroProcessRoundTrip.processes).Count -eq 0) -Message 'zero process-list serialization shape failed'
+
+    $oneProcessList = New-ProcessListEvidence -Processes @([pscustomobject]@{
+        process_id = 1234
+        executable_path = 'C:\synthetic\AMDuProfCLI.exe'
+    })
+    Assert-True -Condition ($oneProcessList.count -eq 1) -Message 'one process-list count mismatch'
+    Assert-True -Condition ($oneProcessList.processes -is [array]) -Message 'one process-list was not an array'
+    $oneProcessRoundTrip = (($oneProcessList | ConvertTo-Json -Depth 10) | ConvertFrom-Json)
+    Assert-True -Condition ($oneProcessRoundTrip.count -eq 1 -and
+        $oneProcessRoundTrip.processes -is [array] -and
+        @($oneProcessRoundTrip.processes).Count -eq 1) -Message 'one process-list serialization shape failed'
+
+    $multipleProcessList = New-ProcessListEvidence -Processes @(
+        [pscustomobject]@{ process_id = 1234; executable_path = 'C:\synthetic\AMDuProfCLI.exe' },
+        [pscustomobject]@{ process_id = 5678; executable_path = 'C:\synthetic\AMDuProfCLI.exe' }
+    )
+    Assert-True -Condition ($multipleProcessList.count -gt 1) -Message 'multiple process-list count mismatch'
+    Assert-True -Condition ($multipleProcessList.processes -is [array]) -Message 'multiple process-list was not an array'
+    $multipleProcessRoundTrip = (($multipleProcessList | ConvertTo-Json -Depth 10) | ConvertFrom-Json)
+    Assert-True -Condition ($multipleProcessRoundTrip.count -gt 1 -and
+        $multipleProcessRoundTrip.processes -is [array] -and
+        @($multipleProcessRoundTrip.processes).Count -gt 1) -Message 'multiple process-list serialization shape failed'
+
+    $wrapperText = Get-Content -LiteralPath (Join-Path $PSScriptRoot 'run-admin-amd-service-context-qualification.ps1') -Raw
+    $adminProofIndex = $wrapperText.IndexOf('$adminProof = Get-AdminProof', [StringComparison]::Ordinal)
+    $probeIdentityIndex = $wrapperText.IndexOf('$probeRecord = Get-ArtifactRecord', [StringComparison]::Ordinal)
+    $cliIdentityIndex = $wrapperText.IndexOf('$cliRecord = Get-ArtifactRecord', [StringComparison]::Ordinal)
+    $serviceGateIndex = $wrapperText.IndexOf('Test-ServiceNameAbsent', [StringComparison]::Ordinal)
+    $cliGateIndex = $wrapperText.IndexOf('$existingCli = @(', [StringComparison]::Ordinal)
+    $evidencePersistIndex = $wrapperText.IndexOf('PREEXISTING-CLI-PROCESSES.json', [StringComparison]::Ordinal)
+    $newServiceIndex = $wrapperText.IndexOf('New-Service -Name', [StringComparison]::Ordinal)
+    $startServiceIndex = $wrapperText.IndexOf('Start-Service -Name', [StringComparison]::Ordinal)
+    Assert-True -Condition ($adminProofIndex -ge 0 -and $probeIdentityIndex -gt $adminProofIndex -and
+        $cliIdentityIndex -gt $probeIdentityIndex -and $serviceGateIndex -gt $cliIdentityIndex -and
+        $cliGateIndex -gt $serviceGateIndex -and $evidencePersistIndex -gt $cliGateIndex -and
+        $newServiceIndex -gt $evidencePersistIndex -and $startServiceIndex -gt $newServiceIndex) `
+        -Message 'pre-runtime gates/evidence must precede New-Service and Start-Service'
+
+    $singleDigitTimestamp = Parse-CadenceTimestamp -Timestamp '1:2:3:4'
+    Assert-True -Condition ($singleDigitTimestamp.valid -and $singleDigitTimestamp.milliseconds -eq 3723004) `
+        -Message 'single-digit timestamp fields were not parsed deterministically'
+    $mixedWidthTimestamp = Parse-CadenceTimestamp -Timestamp '16:3:25:895'
+    Assert-True -Condition ($mixedWidthTimestamp.valid -and $mixedWidthTimestamp.milliseconds -eq 57805895) `
+        -Message 'mixed-width vendor timestamp was rejected'
+    $paddedTimestamp = Parse-CadenceTimestamp -Timestamp '16:03:25:895'
+    Assert-True -Condition ($paddedTimestamp.valid -and
+        $paddedTimestamp.milliseconds -eq $mixedWidthTimestamp.milliseconds) -Message 'padded timestamp changed semantics'
+    $acceptedTimestampForms = @(
+        [pscustomobject]@{ text = '6:3:5:895'; milliseconds = 21785895 },
+        [pscustomobject]@{ text = '16:3:5:895'; milliseconds = 57785895 },
+        [pscustomobject]@{ text = '6:03:5:895'; milliseconds = 21785895 },
+        [pscustomobject]@{ text = '16:03:5:895'; milliseconds = 57785895 },
+        [pscustomobject]@{ text = '6:3:05:895'; milliseconds = 21785895 },
+        [pscustomobject]@{ text = '16:3:05:895'; milliseconds = 57785895 },
+        [pscustomobject]@{ text = '6:03:05:895'; milliseconds = 21785895 },
+        [pscustomobject]@{ text = '16:03:05:895'; milliseconds = 57785895 }
+    )
+    foreach ($acceptedTimestampForm in $acceptedTimestampForms) {
+        $acceptedTimestamp = Parse-CadenceTimestamp -Timestamp $acceptedTimestampForm.text
+        Assert-True -Condition ($acceptedTimestamp.valid -and
+            $acceptedTimestamp.milliseconds -eq $acceptedTimestampForm.milliseconds) `
+            -Message "supported timestamp form was rejected: $($acceptedTimestampForm.text)"
+    }
+
+    $consecutiveCadence = Get-CadenceAssessment -Samples @(
+        [pscustomobject]@{ timestamp = '16:3:25:895' }
+        [pscustomobject]@{ timestamp = '16:3:26:897' }
+    )
+    Assert-True -Condition ($consecutiveCadence.status -eq 'PASS' -and
+        $consecutiveCadence.delta_count -eq 1 -and
+        @($consecutiveCadence.deltas_ms)[0] -eq 1002) -Message 'mixed-width consecutive cadence failed'
+
+    $midnightCadence = Get-CadenceAssessment -Samples @(
+        [pscustomobject]@{ timestamp = '23:59:59:900' }
+        [pscustomobject]@{ timestamp = '00:00:00:900' }
+    )
+    Assert-True -Condition ($midnightCadence.status -eq 'PASS' -and
+        $midnightCadence.delta_count -eq 1 -and
+        @($midnightCadence.deltas_ms)[0] -eq 1000) -Message 'midnight rollover cadence failed'
+
+    $arbitraryRegression = Get-CadenceAssessment -Samples @(
+        [pscustomobject]@{ timestamp = '12:00:00:000' }
+        [pscustomobject]@{ timestamp = '11:59:59:000' }
+    )
+    Assert-True -Condition ($arbitraryRegression.status -eq 'INCONCLUSIVE' -and
+        @($arbitraryRegression.deltas_ms)[0] -eq -1000 -and
+        $arbitraryRegression.error -match 'regression') -Message 'arbitrary timestamp regression was treated as rollover'
+
+    $invalidCadenceTimestamps = @(
+        '24:00:00:000',
+        '12:60:00:000',
+        '12:00:60:000',
+        '12:00:00:1000',
+        '12:00:00',
+        '12:00:00:000:1'
+    )
+    foreach ($invalidCadenceTimestamp in $invalidCadenceTimestamps) {
+        $invalidTimestamp = Parse-CadenceTimestamp -Timestamp $invalidCadenceTimestamp
+        Assert-True -Condition (-not $invalidTimestamp.valid) `
+            -Message "invalid timestamp was accepted: $invalidCadenceTimestamp"
+    }
+
+    # Regression fixture copied from the authoritative 20260904T080323173Z run.
+    $authoritativeTimestamps = @(
+        '16:3:25:895',
+        '16:3:26:897',
+        '16:3:27:901',
+        '16:3:28:910',
+        '16:3:29:916',
+        '16:3:30:922',
+        '16:3:31:926',
+        '16:3:32:928',
+        '16:3:33:937'
+    )
+    $authoritativeSamples = @($authoritativeTimestamps | ForEach-Object {
+        [pscustomobject]@{ timestamp = $_ }
+    })
+    $authoritativeCadence = Get-CadenceAssessment -Samples $authoritativeSamples
+    $expectedAuthoritativeDeltas = @(1002, 1004, 1009, 1006, 1006, 1004, 1002, 1009)
+    Assert-True -Condition ($authoritativeCadence.status -eq 'PASS' -and
+        $authoritativeCadence.delta_count -eq 8 -and
+        ($authoritativeCadence.deltas_ms -join ',') -eq ($expectedAuthoritativeDeltas -join ',') -and
+        $authoritativeCadence.min_ms -eq 1002 -and
+        $authoritativeCadence.max_ms -eq 1009 -and
+        $authoritativeCadence.mean_ms -eq 1005.25 -and
+        [string]::IsNullOrWhiteSpace([string]$authoritativeCadence.error)) `
+        -Message 'authoritative cadence fixture did not produce the expected PASS deltas'
+
     $runtimeEvidenceRoot = Join-Path $root 'runtime-evidence'
     [void](New-Item -ItemType Directory -Path $runtimeEvidenceRoot -Force)
     $beforeLaunch = Get-AmdCliExecutionEvidence -EvidenceRoot $runtimeEvidenceRoot
@@ -221,6 +357,24 @@ RecordId,Timestamp,socket0-package-power
     Assert-True -Condition ($parseFail.parsed_package_power.status -eq 'NOT_FOUND') -Message 'T11 parser failure path failed'
     Assert-True -Condition ($parseFail.qualification -eq 'OUTPUT_ARTIFACT_MISSING') -Message 'T11 missing output classification failed'
 
+    $emptyInventoryRoot = Join-Path $fixtureRoot 'empty-inventory'
+    [void](New-Item -ItemType Directory -Path $emptyInventoryRoot -Force)
+    $emptyInventoryPost = Invoke-AmdCliPostRuntimePipeline -SessionDirectory $emptyInventoryRoot -Run $run
+    Assert-True -Condition ($emptyInventoryPost.output_artifacts -is [array] -and
+        @($emptyInventoryPost.output_artifacts).Count -eq 0) -Message 'empty output inventory shape failed'
+
+    try {
+        throw [System.Exception]::new('无法将参数绑定到参数 Value')
+    } catch {
+        $unicodeError = $_.Exception.Message
+    }
+    $unicodeRoot = Join-Path $root 'unicode'
+    $unicodePath = Join-Path $unicodeRoot 'summary.json'
+    Write-JsonFile -Path $unicodePath -Value ([pscustomobject]@{ wrapper_error = $unicodeError })
+    $unicodeRoundTrip = Get-Content -LiteralPath $unicodePath -Raw | ConvertFrom-Json
+    Assert-True -Condition ($unicodeRoundTrip.wrapper_error -eq '无法将参数绑定到参数 Value') `
+        -Message 'Unicode wrapper error did not round-trip through JSON evidence'
+
     $qualificationPath = Join-Path $root 'qualification-before-cleanup.json'
     Write-JsonFile -Path $qualificationPath -Value ([pscustomobject]@{
         qualification = 'PASS'
@@ -248,7 +402,19 @@ RecordId,Timestamp,socket0-package-power
     Write-Output 'FAILED_POST_LAUNCH_PATH_DOES_NOT_REPORT_FALSE=PASS'
     Write-Output 'POST_SPAWN_EVIDENCE_FAILURE_NEVER_REPORTS_NOT_LAUNCHED=PASS'
     Write-Output 'COMPLETE_RESULT_STATE_REQUIRES_PERSISTENCE=PASS'
+    Write-Output 'EMPTY_PROCESS_LIST_SERIALIZATION=PASS'
+    Write-Output 'PROCESS_LIST_SHAPE_STABLE_FOR_0_1_N=PASS'
+    Write-Output 'FAILURE_OCCURRED_BEFORE_NEW_SERVICE=true'
+    Write-Output 'UNICODE_ERROR_EVIDENCE_ROUNDTRIP=PASS'
+    Write-Output 'TIMESTAMP_PARSER_FORMAT_MATRIX=PASS'
+    Write-Output 'AUTHORITATIVE_CADENCE_FIXTURE=PASS'
+    Write-Output 'DERIVED_FROM_EXISTING_AUTHORITATIVE_RUN=true'
+    Write-Output 'SOURCE_RUN=20260904T080323173Z'
+    Write-Output 'REAL_RUNTIME_REEXECUTED=false'
+    Write-Output 'MIDNIGHT_ROLLOVER=PASS'
+    Write-Output 'TIMESTAMP_REGRESSION_REJECTED=PASS'
     Write-Output 'AMD_RUNTIME_EXECUTED=false'
+    Write-Output 'SERVICE_REGISTERED=false'
 } finally {
     if (Test-Path -LiteralPath $root) {
         Remove-Item -LiteralPath $root -Recurse -Force

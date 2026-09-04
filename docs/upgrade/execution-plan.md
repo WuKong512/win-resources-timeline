@@ -190,10 +190,11 @@ The earlier AMD investigation sections explicitly marked
 `HISTORICAL / SUPERSEDED` above retain their raw findings, but their former
 `BLOCKED`, `prepared / awaiting human authorization`, “do not start provider
 design”, and loader-trace next-step wording is not current state. The
-`CPU-SENSOR-AMD-CLI-SERVICE-CONTEXT-QUALIFICATION` section remains current for
-the separately prepared, not-yet-run Service follow-up. The authoritative
-current AMD block is the spike closure below; this plan intentionally has one
-current state for the completed spike and its deferred follow-ups.
+`CPU-SENSOR-AMD-CLI-SERVICE-CONTEXT-QUALIFICATION` section records the
+completed Service/Session 0 result and its deferred privilege/IPC follow-ups.
+The authoritative current AMD block is the spike closure below; this plan
+intentionally has one current state for the completed spike and its deferred
+follow-ups.
 
 ```text
 AMD_ROOT_CAUSE_INVESTIGATION = completed
@@ -202,12 +203,12 @@ AMD_UPROF_ROOT_CAUSE = completed
 AMD_CLI_BOUNDED_SESSION = completed
 SPIKE_RESULT = PASS_WITH_FOLLOW_UPS
 PRODUCTION_ADMISSION = NOT_COMPLETE
-AMD_SERVICE_CONTEXT = planned / prepared
+AMD_SERVICE_CONTEXT = completed / PASS
 AMD_PRIVILEGE_DEPLOYMENT = planned
 AMD_LONG_LIVED_SESSION = planned
 AMD_TEMPERATURE_FREQUENCY = planned
 AMD_PRODUCTION_PROVIDER = planned
-NEXT_TASK = AMD-SERVICE-CONTEXT-I1
+NEXT_TASK = AMD-PRIVILEGE-I2
 EXECUTION_PLAN_SINGLE_CURRENT_STATE = PASS
 ```
 
@@ -272,9 +273,9 @@ AMD_CLI_PROVIDER_SPIKE = technically qualified for bounded session / production 
 CPU_PACKAGE_POWER_W_RUNTIME_QUALIFIED = true
 CPU_PACKAGE_POWER_W_PRODUCTION_QUALIFIED = false
 AMD_PRODUCTION_PROVIDER = not completed / not registered
-AMD_PRIVILEGE_ARCHITECTURE = DEFER_INSUFFICIENT_EVIDENCE
-PRIVILEGE_DEPLOYMENT_DECISION = DEFER_INSUFFICIENT_EVIDENCE
-SERVICE_SESSION0_AMD_CLI_QUALIFIED = false
+AMD_PRIVILEGE_ARCHITECTURE = WINDOWS_SERVICE_BROKER
+PRIVILEGE_DEPLOYMENT_DECISION = DEFER_LEAST_PRIVILEGE_AND_IPC
+SERVICE_SESSION0_AMD_CLI_QUALIFIED = true
 MINIMUM_REQUIRED_WINDOWS_PRIVILEGES = UNPROVEN
 ```
 
@@ -297,43 +298,62 @@ package power spike 提升到 bounded-session technical qualification，不能
 [`cpu-sensor-amd-cli-spike-runtime.md`](../measurements/cpu-sensor-amd-cli-spike-runtime.md)。
 
 `AMD_CLI_PRIVILEGE_DEPLOYMENT_ARCHITECTURE` 已完成架构、威胁模型和
-fallback 审计，但没有选择尚未验证的 Service/Task context：
-`AMD_PRIVILEGE_ARCHITECTURE = DEFER_INSUFFICIENT_EVIDENCE`。
+fallback 审计；LocalSystem/Session 0 bounded run 已验证 Service Broker
+可行性，但仍不能证明 minimum privilege 或 production deployment：
+`AMD_PRIVILEGE_ARCHITECTURE = WINDOWS_SERVICE_BROKER`。
 主应用继续保持 non-elevated-by-default，AMD provider 继续 optional、
 failure-isolated；不注册 service/task，不实现 elevation，不修改 AMD
 installation。详见
 [`cpu-sensor-amd-privilege-deployment.md`](../architecture/cpu-sensor-amd-privilege-deployment.md)。
 
-下一项单一 qualification family 是
-`AMD-SERVICE-CONTEXT-I1`：复用已准备的 qualification-only LocalSystem
-SCM harness，验证真实 Service/Session 0 下的 bounded CLI session、typed
-result、cancellation、cleanup 和 failure isolation。它先于 long-lived/
-all-day session qualification；temperature/frequency、timestamp/storage
-contract、provider registration、schema/UI 和 production admission 仍保持
-deferred。详见
+下一项单一 privilege qualification family 是
+`AMD-PRIVILEGE-I2`：验证 least-privilege account、Service SID、named-pipe
+ACL、semantic IPC、session ownership/cancellation。它位于已通过的
+LocalSystem/Session 0 bounded run之后并先于 long-lived/all-day session
+qualification；temperature/frequency、timestamp/storage contract、provider
+registration、schema/UI 和 production admission 仍保持 deferred。详见
 [`cpu-sensor-amd-cli-provider-spike.md`](../architecture/cpu-sensor-amd-cli-provider-spike.md)。
 
 ## CPU-SENSOR-AMD-CLI-SERVICE-CONTEXT-QUALIFICATION 当前状态
 
-`AMD_CLI_SERVICE_CONTEXT_QUALIFICATION` 已完成准备，尚未运行：
+`AMD-SERVICE-CONTEXT-I1` 已基于既有 immutable authoritative run 完成；本次
+修复只离线重算 post-runtime cadence，没有重新运行 AMD 或 Service：
 
 ```text
-AMD_CLI_SERVICE_CONTEXT_QUALIFICATION = prepared / awaiting explicit Administrator authorization
-RESULT = ADMIN_SERVICE_CONTEXT_QUALIFICATION_REQUIRED
-SERVICE_BROKER_CANDIDATE = LEADING_PENDING_RUNTIME_QUALIFICATION
-AMD_PRIVILEGE_ARCHITECTURE = DEFER_INSUFFICIENT_EVIDENCE
-SERVICE_SESSION0_AMD_CLI_QUALIFIED = false
+AMD-SERVICE-CONTEXT-I1 = completed / PASS
+AMD_CLI_SERVICE_CONTEXT_QUALIFICATION = PASS / existing authoritative run reparsed
+RESULT = PASS
+RUNTIME = COMPLETED_FROM_EXISTING_AUTHORITATIVE_EVIDENCE
+AUTOMATED_PREPARATION = PASS
+AMD_RUNTIME_EXECUTED = true
+REAL_AMD_RUNTIME_COUNT_BEFORE_TASK = 1
+REAL_AMD_RUNTIME_COUNT_DURING_REPAIR = 0
+SERVICE_CONTEXT_RUNTIME_COUNT_BEFORE_TASK = 1
+SERVICE_CONTEXT_RUNTIME_COUNT_DURING_REPAIR = 0
+SERVICE_REGISTERED_DURING_AUTHORITATIVE_RUN = true
+SERVICE_REGISTRATION_REMOVED = true
+SERVICE_REGISTERED_CURRENT = false
+FIRST_HUMAN_WRAPPER_INVOCATION = BLOCKED_PRE_RUNTIME_HARNESS
+FAILURE_OCCURRED_BEFORE_NEW_SERVICE = true
+INCIDENT_CLASSIFICATION = POST_RUNTIME_EVIDENCE_PARSER_DEFECT
+SERVICE_BROKER_CANDIDATE = EVIDENCE_SUPPORTED_PENDING_PRIVILEGE_AND_IPC
+AMD_PRIVILEGE_ARCHITECTURE = WINDOWS_SERVICE_BROKER
+SERVICE_SESSION0_AMD_CLI_QUALIFIED = true
 MINIMUM_REQUIRED_WINDOWS_PRIVILEGES = UNPROVEN
 LONG_LIVED_SESSION_ORDERING = AFTER_PRIVILEGE_CONTEXT_QUALIFICATION
+NEXT_TASK = AMD-PRIVILEGE-I2
 ```
 
-已新增独立 qualification-only SCM service harness：它不属于生产
-Provider、没有 IPC/installer/autostart，不注册服务，也不接受任意可执行文件、
-argv、cwd、环境或输出路径。未来人工运行仅创建一个 manual LocalSystem
-service，执行一次固定的 10 秒 package-power CLI session，持久化 Session 0
-和原始结果后删除同名注册。非 AMD Rust/PowerShell tests 已通过；不标记
-Service/Session 0、least privilege、IPC、long-lived 或 production provider
-为完成。详见
+已新增独立 qualification-only SCM service harness：它不属于生产 Provider、没有
+IPC/installer/autostart，不接受任意可执行文件、argv、cwd、环境或输出路径。
+既有人工 run 在 LocalSystem/Session 0 下完成一次固定的 10 秒 package-power
+session，目标 exit 0，产生 9 个样本并完成 Service/CLI cleanup。wrapper 最初
+因 vendor 的 `H:m:s:fff` timestamp 被旧 parser 拒绝而报告
+`CADENCE_INCONCLUSIVE`；本任务以 exact timestamp fixture 离线修复并验证
+cadence 为 PASS。此前的 pre-runtime process-list bug 保持独立历史 incident，
+没有被错误重分类为 Service/Session 0 failure；未进行第二次人工 runtime。生产
+provider、least privilege、IPC、long-lived 和 production admission 仍未完成。
+详见
 [`cpu-sensor-amd-service-context-qualification.md`](../measurements/cpu-sensor-amd-service-context-qualification.md)。
 
 ## CPU-SENSOR-AMD-UPROF-LIVE-QUALIFICATION-SPIKE CLOSURE
@@ -348,20 +368,21 @@ AMD_CLI_BOUNDED_SESSION = completed
 AMD_UPROF_LIVE_QUALIFICATION_SPIKE = PASS_WITH_FOLLOW_UPS
 SPIKE_RESULT = PASS_WITH_FOLLOW_UPS
 PRODUCTION_ADMISSION = NOT_COMPLETE
-AMD_SERVICE_CONTEXT = planned / prepared
+AMD_SERVICE_CONTEXT = completed / PASS
 AMD_PRIVILEGE_DEPLOYMENT = planned
 AMD_LONG_LIVED_SESSION = planned
 AMD_TEMPERATURE_FREQUENCY = planned
 AMD_PRODUCTION_PROVIDER = planned
-NEXT_TASK = AMD-SERVICE-CONTEXT-I1
+NEXT_TASK = AMD-PRIVILEGE-I2
 ```
 
-已证明的 package-power、CLI bounded session 和 CXL executable-directory
-root cause 结果不会因尚未执行 Service/Session 0 qualification 而回退为
-blocked。以下 follow-ups 均未完成：
+已证明的 package-power、CLI bounded session、LocalSystem/Session 0 Service
+context 和 CXL executable-directory root cause 结果不会因 parser repair 而
+回退为 blocked。以下 follow-ups 均未完成：
 
-- `AMD-SERVICE-CONTEXT-I1`：Service/Session 0/LocalSystem bounded-session
-  qualification；现有 harness 已准备，等待人工授权。
+- `AMD-SERVICE-CONTEXT-I1` 已完成 LocalSystem/Session 0 bounded-session
+  qualification；cadence parser repair 使用 immutable authoritative evidence
+  完成，未执行第二次 runtime。
 - `AMD-PRIVILEGE-I2`：least-privilege account、Service SID、named-pipe ACL、
   semantic IPC、session ownership/cancellation。
 - `AMD-LIFECYCLE-I1`：long-lived session、restart/recovery、sleep/resume、
@@ -372,7 +393,6 @@ blocked。以下 follow-ups 均未完成：
   installer/update、fallback states 和最终 admission。
 
 本 spike 的 PR scope 是：关闭 AMD uProf technical feasibility 和 bounded
-live qualification；production privilege deployment、service context、
-long-duration lifecycle、additional metrics、storage/integration 和 final
-provider admission 有意保留为独立 follow-up tasks。当前不执行 prepared
-service qualification，不开始 follow-up implementation。
+live qualification；production privilege deployment、long-duration lifecycle、
+additional metrics、storage/integration 和 final provider admission 有意保留
+为独立 follow-up tasks。当前不开始 `AMD-PRIVILEGE-I2` implementation。

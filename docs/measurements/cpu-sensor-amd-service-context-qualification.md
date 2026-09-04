@@ -3,35 +3,169 @@
 ## STATUS
 
 ```text
-TASK = AMD_CLI_SERVICE_CONTEXT_QUALIFICATION
-RESULT = PREPARED / NOT_RUN
-SERVICE_BROKER_CANDIDATE = LEADING_PENDING_RUNTIME_QUALIFICATION
-AMD_PRIVILEGE_ARCHITECTURE = DEFER_INSUFFICIENT_EVIDENCE
-DECISION_CONFIDENCE = MEDIUM
-SERVICE_SESSION0_AMD_CLI_QUALIFIED = false
+TASK = AMD-SERVICE-CONTEXT-I1
+RESULT = PASS
+RUNTIME = COMPLETED_FROM_EXISTING_AUTHORITATIVE_EVIDENCE
+AUTOMATED_PREPARATION = PASS
+SERVICE_BROKER_CANDIDATE = EVIDENCE_SUPPORTED_PENDING_PRIVILEGE_AND_IPC
+AMD_PRIVILEGE_ARCHITECTURE = WINDOWS_SERVICE_BROKER
+DECISION_CONFIDENCE = MEDIUM_TO_HIGH
+SERVICE_SESSION0_AMD_CLI_QUALIFIED = true
 MINIMUM_REQUIRED_WINDOWS_PRIVILEGES = UNPROVEN
 QUALIFICATION_ONLY = true
 AMD_RUNTIME_EXECUTED_BY_PREPARATION = false
+AMD_RUNTIME_EXECUTED = true
+SERVICE_REGISTERED_DURING_AUTHORITATIVE_RUN = true
+SERVICE_REGISTRATION_REMOVED = true
+SERVICE_REGISTERED_CURRENT = false
 ```
 
-This document prepares one narrowly scoped, manually authorized feasibility
-run. No service was registered, no AMD process was launched, and no profiling
-was performed while preparing it.
+The pre-runtime preparation was narrowly scoped and performed no AMD runtime.
+One manually authorized feasibility run is documented below; its evidence is
+immutable and was not regenerated during this parser repair.
 
 ## QUALIFICATION PROBE ARTIFACT
 
-The final local release build used for the future manual run is:
+The final local release build used for the authoritative manual run was:
 
 ```text
 path = tools/amd-cli-service-context-qualification/target/release/amd-cli-service-context-probe.exe
 architecture = x64
-sha256 = DA0F0D2F2E47400D422C543B0B16901A379E9D7EA5187A7BFBF2EA29AF53AEC0
+sha256 = C437215E32A77B2AAA24351F41DACA9F7F37AF3642048C48E059278205BE04FC
 ```
 
 The release `target` directory is build output and is not part of the
-documentation commit. The future Administrator command must pass this exact
-hash (or a newly rebuilt, separately reviewed hash) to the wrapper; the
-wrapper does not trust an arbitrary service executable.
+documentation commit. The authoritative Administrator command passed this exact
+hash. Any separately authorized future rerun would need to pass this exact hash
+(or a newly rebuilt, separately reviewed hash) to the wrapper; the wrapper does
+not trust an arbitrary service executable.
+
+The preparation ledger for this I1 branch, recorded before PR creation, was:
+
+```text
+BASE_COMMIT = 91bc4dfaf6e7358473f71be634b349d9b0a82101
+START_HEAD = 91bc4dfaf6e7358473f71be634b349d9b0a82101
+ORIGIN_MAIN = 91bc4dfaf6e7358473f71be634b349d9b0a82101
+MERGE_BASE = 91bc4dfaf6e7358473f71be634b349d9b0a82101
+PR20_MERGE_COMMIT = 91bc4dfaf6e7358473f71be634b349d9b0a82101
+BRANCH = qualify/amd-service-context-i1
+PR_AT_PREPARATION = NOT_CREATED_YET
+```
+
+The exact pre-existing Service gate and exact-path AMD CLI process gate both
+passed during Administrator-equivalent read-only preparation. The authoritative
+wrapper rechecked both gates immediately before the authoritative service
+registration; preparation did not register a Service and did not launch the
+AMD CLI.
+
+## FIRST HUMAN WRAPPER INVOCATION
+
+The first manually authorized wrapper invocation stopped during pre-runtime
+evidence preparation, after administrator and artifact preflight and before
+the pre-existing process evidence file or any Service registration could be
+created:
+
+```text
+FIRST_HUMAN_WRAPPER_INVOCATION = BLOCKED_PRE_RUNTIME_HARNESS
+EVIDENCE_ROOT = C:\ProgramData\ResourceTimeline\qualification\amd-service-context\20260904T071828677Z
+ROOT_CAUSE = EMPTY_PIPELINE_RESULT_COLLAPSED_TO_NULL_BEFORE_JSON_SERIALIZATION
+FAILURE_OCCURRED_BEFORE_NEW_SERVICE = true
+AMD_RUNTIME_EXECUTED = false
+PROCESS_SPAWNED = false
+SERVICE_REGISTERED = false
+REAL_AMD_RUNTIME_COUNT = 0
+SERVICE_CONTEXT_RUNTIME_COUNT = 0
+SERVICE_SESSION0_AMD_CLI_QUALIFIED = NOT_YET_TESTED
+```
+
+The persisted final summary contained no service or CLI lifecycle evidence;
+the exact Service and exact AMD CLI process were absent in the subsequent
+read-only checks. This incident is a harness classification, not evidence
+that LocalSystem or Session 0 is incompatible with the vendor CLI. At that
+point, the Service candidate remained pending qualification. The later
+authoritative run completed the Service/Session 0 qualification; the current
+result is PASS.
+
+The repair makes the process-list evidence explicitly array-shaped for zero,
+one, or multiple matches and writes a stable `count` plus `processes` object.
+It also makes the qualification PowerShell evidence UTF-8/BOM-readable by
+Windows PowerShell 5.1 for deterministic Unicode error round-tripping.
+
+## AUTHORITATIVE SERVICE-CONTEXT RUNTIME
+
+The first pre-runtime harness repair was followed by exactly one manually
+authorized Administrator x64 PowerShell run. Its evidence is immutable:
+
+```text
+AUTHORITATIVE_RUN = C:\ProgramData\ResourceTimeline\qualification\amd-service-context\20260904T080323173Z
+AUTHORITATIVE_EVIDENCE_MUTATED = false
+SERVICE_CONTEXT_VALID = true
+SERVICE_ACCOUNT = NT AUTHORITY\SYSTEM
+ACCOUNT_SID = S-1-5-18
+SESSION_ID = 0
+SERVICE_PROCESS_ARCHITECTURE = x64
+TOKEN_ELEVATED = true
+AMD_RUNTIME_EXECUTED = true
+PROCESS_SPAWNED = true
+TARGET_PID = 28376
+AMD_CLI_EXIT = 0x00000000
+TIMEOUT = false
+STDERR_BYTES = 0
+CAPTURE_COMPLETE = true
+HARNESS_FAILED = false
+PACKAGE_POWER_STATUS = PASS
+PACKAGE_POWER_SAMPLE_COUNT = 9
+SERVICE_RUN_QUALIFICATION = TARGET_COMPLETED
+SERVICE_COMPLETED_CLEANLY = true
+SERVICE_DELETE_VERIFIED = true
+SERVICE_PROCESS_GONE = true
+CLI_PROCESS_GONE = true
+REAL_AMD_RUNTIME_COUNT_BEFORE_TASK = 1
+REAL_AMD_RUNTIME_COUNT_DURING_REPAIR = 0
+SERVICE_CONTEXT_RUNTIME_COUNT_BEFORE_TASK = 1
+SERVICE_CONTEXT_RUNTIME_COUNT_DURING_REPAIR = 0
+```
+
+The wrapper initially reported `CADENCE_INCONCLUSIVE` because the vendor
+timestamp `16:3:25:895` did not match its former fixed-width-only expression.
+The deterministic parser now accepts one- or two-digit hour/minute/second
+fields and one- to three-digit milliseconds, with explicit range validation.
+It accepts one reasonable midnight rollover only once; arbitrary timestamp
+regression remains inconclusive and is not normalized as a day rollover.
+
+The authoritative timestamp fixture is re-parsed offline without starting a
+process or service:
+
+```text
+DERIVED_FROM_EXISTING_AUTHORITATIVE_RUN = true
+SOURCE_RUN = 20260904T080323173Z
+REAL_RUNTIME_REEXECUTED = false
+OBSERVED_VENDOR_TIMESTAMP_FORMAT = H:m:s:fff
+AUTHORITATIVE_SAMPLE_COUNT = 9
+AUTHORITATIVE_DELTA_COUNT = 8
+AUTHORITATIVE_DELTAS_MS = [1002,1004,1009,1006,1006,1004,1002,1009]
+MIN_DELTA_MS = 1002
+MAX_DELTA_MS = 1009
+MEAN_DELTA_MS = 1005.25
+CADENCE_POLICY_RESULT = PASS
+```
+
+The current non-elevated preparation shell cannot read the ACL-protected
+authoritative directory directly, and the repository has no separate offline
+replay entrypoint. The focused repository-native regression therefore uses
+the exact persisted timestamp sequence as a derived fixture and does not
+modify the evidence root.
+
+```text
+INCIDENT_CLASSIFICATION = POST_RUNTIME_EVIDENCE_PARSER_DEFECT
+TIMESTAMP_PARSER_REPAIR = PASS
+MIDNIGHT_ROLLOVER = PASS
+AMD_SERVICE_CONTEXT_RUNTIME = PASS
+PACKAGE_POWER_SAMPLING = PASS
+CADENCE_PARSER = PASS
+AMD_SERVICE_CONTEXT_I1 = PASS
+AMD_PROVIDER_PRODUCTION_ADMITTED = false
+```
 
 ## BASELINE AND QUESTION
 
@@ -39,10 +173,11 @@ The existing architecture keeps the Resource Timeline application
 non-elevated by default and treats the AMD CLI provider as optional and
 failure-isolated. A manually elevated interactive `AMDuProfCLI.exe` ten-second
 power session is technically qualified for a bounded run, but the historical
-non-administrator path returned `ACCESSDENIED`. No result currently proves
-that the same vendor CLI works from a genuine Windows Service in Session 0.
+non-administrator path returned `ACCESSDENIED`. The immutable authoritative
+run documented below proves that the same vendor CLI works from a genuine
+LocalSystem Windows Service in Session 0 for this bounded session.
 
-The single question for the future run is:
+The single qualification question was:
 
 ```text
 Can the vendor-owned AMDuProfCLI.exe successfully execute the already-qualified
@@ -55,7 +190,7 @@ least-privilege selection, IPC qualification, or an all-day test.
 
 ## SERVICE ACCOUNT AND CONTEXT CONTRACT
 
-The first feasibility run uses `LocalSystem`. This is an upper-bound service
+The first feasibility run used `LocalSystem`. This is an upper-bound service
 context chosen because it requires no credential material and is a native SCM
 identity. A pass must not be interpreted as proof that LocalSystem is the
 minimum required account; a later least-privilege qualification remains
@@ -80,8 +215,8 @@ status journal for the same run.
 ```text
 SERVICE_ACCOUNT = LocalSystem
 SERVICE_SESSION0_REQUIRED = true
-SERVICE_SESSION0_AMD_CLI_QUALIFIED = false  # until the future run passes
-INTERACTIVE_DESKTOP_REQUIRED = false        # only if the future run completes
+SERVICE_SESSION0_AMD_CLI_QUALIFIED = true
+INTERACTIVE_DESKTOP_REQUIRED = false
 ```
 
 ## QUALIFICATION-ONLY HARNESS
@@ -108,7 +243,7 @@ It rejects arbitrary executable paths, raw vendor arguments, shell commands,
 arbitrary environment variables, and arbitrary working directories. The
 service itself derives the CLI path and fixed arguments. The run-root is
 restricted to the machine-owned qualification base and is supplied only by
-the future Administrator wrapper; a production broker would derive its output
+the qualification wrapper; a production broker would derive its output
 directory from trusted configuration rather than expose a user-controlled
 path.
 
@@ -158,7 +293,7 @@ Resource Timeline process is involved.
 
 ## OUTPUT AND ACL MODEL
 
-The future wrapper uses:
+The authoritative wrapper used:
 
 ```text
 %ProgramData%\\ResourceTimeline\\qualification\\amd-service-context\\<run-id>
@@ -169,9 +304,10 @@ authorized Administrator wrapper `Modify` access (needed to persist
 qualification and cleanup evidence), with inheritance disabled for the
 qualification directory. Ordinary non-administrator users receive no access
 through this ACL. It is not placed in the interactive user's `%TEMP%`, the AMD
-installation, or the Windows directory. The wrapper creates and protects this
-directory before service start; this preparation task does not create it on the
-real machine.
+installation, or the Windows directory. The authoritative wrapper created and
+protected this directory before service start; the preparation stage did not
+create this directory on the real machine, and the later authoritative run
+did.
 
 The service persists, at minimum:
 
@@ -190,7 +326,8 @@ timechart-output\\session.uprof       # if the vendor creates it
 
 Raw process evidence is written before post-processing. The existing
 `tools/amd-uprof-cli-spike/postprocess.ps1` is the single package-power parser;
-this service harness does not create a third parser. The future wrapper writes
+this service harness does not create a third parser. The authoritative
+qualification wrapper wrote
 `AMD-SERVICE-CONTEXT.qualification-before-cleanup.json` before deleting the
 temporary service registration.
 
@@ -206,8 +343,8 @@ qualification result. The states are
 process-result persistence. Therefore a launch-evidence write failure, timeout,
 target failure, or later service post-processing error cannot be reported as
 “not executed” after the CLI was actually launched. This repair was validated
-with synthetic non-AMD evidence only; the Service/Session 0 qualification remains
-`PREPARED / NOT_RUN`.
+with synthetic non-AMD evidence and the immutable authoritative timestamp
+fixture; the Service/Session 0 qualification is `PASS`.
 
 ## PROCESS OWNERSHIP AND LIFECYCLE
 
@@ -225,7 +362,7 @@ the exact child exit with a bounded poll, so a successful termination request
 is not confused with target termination. A stop control is reported as
 cancellation, not as a vendor success or failure.
 
-The future wrapper waits for the service to reach `STOPPED`, reads all raw
+The qualification wrapper waits for the service to reach `STOPPED`, reads all raw
 evidence, and computes the qualification snapshot. Only then does it stop if
 needed, delete the exact service name, verify that SCM no longer returns it,
 and check the recorded service/CLI PIDs. It does not claim that unrelated AMD
@@ -233,7 +370,7 @@ processes are gone.
 
 ## QUALIFICATION CONTRACT
 
-The future result is `PASS` only if all of the following are true:
+The qualification result is `PASS` only if all of the following are true:
 
 - LocalSystem SID and Session 0 proof is complete;
 - x64 service context and token evidence are present;
@@ -265,13 +402,12 @@ justify a retry in the same task.
 
 ## SYSTEM MUTATION AND AUTHORIZATION BOUNDARY
 
-The future run requires one explicit Administrator operation to create the
-manual/demand-start service, start it once, and delete the exact registration.
+The authoritative run required one explicit Administrator operation to create
+the manual/demand-start service, start it once, and delete the exact registration.
 It must not configure `Automatic` or `AutomaticDelayedStart`, alter AMD files,
 registry, PATH, drivers, services, security settings, or reboot the machine.
 
-This preparation performs none of those operations. The final command block is
-provided for a human-authorized run only; the harness does not self-elevate.
+This parser repair performed none of those operations and did not self-elevate.
 
 ## AUTOMATED NON-AMD VALIDATION
 
@@ -291,6 +427,11 @@ The PowerShell synthetic test covers:
 - timeout and owned cleanup bookkeeping;
 - fixed service command shape and service-name safety checks;
 - shared package-power parser PASS/FAIL and cadence assessment;
+- deterministic 1/2/3-width timestamp parsing and range rejection;
+- the authoritative 9-sample cadence fixture and one-time midnight rollover;
+- zero/one/multiple pre-existing CLI process-list evidence serialization;
+- pre-runtime gate ordering before `New-Service` and `Start-Service`;
+- Unicode wrapper-error evidence round-tripping;
 - qualification-before-cleanup persistence and exact-file cleanup.
 
 All tests use harmless synthetic processes or fixture data and report
@@ -298,7 +439,7 @@ All tests use harmless synthetic processes or fixture data and report
 
 ## REMAINING GATES
 
-This preparation does not qualify:
+The completed I1 qualification does not claim:
 
 - minimum privilege account;
 - service SID and production named-pipe ACL;
@@ -320,14 +461,12 @@ LONG_LIVED_SESSION_ORDERING = AFTER_PRIVILEGE_CONTEXT_QUALIFICATION
 ## NEXT RUNTIME QUALIFICATION
 
 ```text
-NEXT_RUNTIME_QUALIFICATION = AMD_CLI_SERVICE_CONTEXT_QUALIFICATION
-RESULT = ADMIN_SERVICE_CONTEXT_QUALIFICATION_REQUIRED
+NEXT_RUNTIME_QUALIFICATION = AMD_PRIVILEGE_I2
+RESULT = PASS
 ```
 
-The one future run is the LocalSystem/Session 0 bounded package-power session
-described above. If it passes, the architecture review may promote the
-Windows Service Broker from leading candidate to an evidence-supported
-candidate, while still requiring least-privilege and IPC qualification. If it
-fails because the vendor runtime is incompatible with Session 0, the service
-architecture remains unselected and Scheduled Task qualification may be
-considered separately. No service or AMD CLI is run in this task.
+The existing LocalSystem/Session 0 bounded package-power run passed after
+offline parser repair. The architecture review may therefore use the Windows
+Service Broker as an evidence-supported candidate, while still requiring
+least-privilege and IPC qualification. No additional service or AMD CLI was
+run during this parser-repair task.

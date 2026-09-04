@@ -24,7 +24,9 @@ function Write-Utf8File {
     if (-not [string]::IsNullOrWhiteSpace($parent)) {
         [void](New-Item -ItemType Directory -Path $parent -Force)
     }
-    [System.IO.File]::WriteAllText($Path, $Text, [System.Text.UTF8Encoding]::new($false))
+    # Windows PowerShell 5.1 otherwise reads BOM-less UTF-8 evidence using the
+    # active ANSI code page, which corrupts non-ASCII wrapper_error text.
+    [System.IO.File]::WriteAllText($Path, $Text, [System.Text.UTF8Encoding]::new($true))
 }
 
 function Write-JsonFile {
@@ -305,6 +307,18 @@ function Get-ExistingAmdCliProcesses {
     $rows
 }
 
+function New-ProcessListEvidence {
+    param(
+        [Parameter(Mandatory = $true)][AllowEmptyCollection()][object[]]$Processes
+    )
+
+    $stableProcesses = @($Processes)
+    [pscustomobject]@{
+        count = [int]$stableProcesses.Count
+        processes = [object[]]$stableProcesses
+    }
+}
+
 function Protect-ServiceRunRoot {
     param([Parameter(Mandatory = $true)][string]$Path)
 
@@ -338,22 +352,93 @@ function Get-ProcessAliveById {
     }
 }
 
+function Parse-CadenceTimestamp {
+    param(
+        [Parameter(Mandatory = $true)][AllowEmptyString()][string]$Timestamp
+    )
+
+    $match = [regex]::Match(
+        $Timestamp,
+        '\A(?<hour>[0-9]{1,2}):(?<minute>[0-9]{1,2}):(?<second>[0-9]{1,2}):(?<millisecond>[0-9]{1,3})\z',
+        [Text.RegularExpressions.RegexOptions]::CultureInvariant
+    )
+    if (-not $match.Success) {
+        return [pscustomobject]@{
+            valid = $false
+            milliseconds = $null
+            error = "unsupported timestamp: $Timestamp"
+        }
+    }
+
+    $invariant = [Globalization.CultureInfo]::InvariantCulture
+    $hour = [int]::Parse($match.Groups['hour'].Value, $invariant)
+    $minute = [int]::Parse($match.Groups['minute'].Value, $invariant)
+    $second = [int]::Parse($match.Groups['second'].Value, $invariant)
+    $millisecond = [int]::Parse($match.Groups['millisecond'].Value, $invariant)
+    $invalidField = if ($hour -gt 23) {
+        'hour'
+    } elseif ($minute -gt 59) {
+        'minute'
+    } elseif ($second -gt 59) {
+        'second'
+    } elseif ($millisecond -gt 999) {
+        'millisecond'
+    } else {
+        $null
+    }
+    if ($null -ne $invalidField) {
+        return [pscustomobject]@{
+            valid = $false
+            milliseconds = $null
+            error = "invalid $invalidField field in timestamp: $Timestamp"
+        }
+    }
+
+    [pscustomobject]@{
+        valid = $true
+        milliseconds = ($hour * 3600000) + ($minute * 60000) + ($second * 1000) + $millisecond
+        error = $null
+    }
+}
+
 function Get-CadenceAssessment {
     param([Parameter(Mandatory = $true)]$Samples)
 
     $millis = @()
     foreach ($sample in @($Samples)) {
         $timestamp = [string]$sample.timestamp
-        if ($timestamp -notmatch '^(?<h>\d{2}):(?<m>\d{2}):(?<s>\d{2}):(?<ms>\d{3})$') {
-            return [pscustomobject]@{ status = 'INCONCLUSIVE'; delta_count = 0; deltas_ms = @(); error = "unsupported timestamp: $timestamp" }
+        $parsedTimestamp = Parse-CadenceTimestamp -Timestamp $timestamp
+        if (-not $parsedTimestamp.valid) {
+            return [pscustomobject]@{
+                status = 'INCONCLUSIVE'
+                delta_count = 0
+                deltas_ms = @()
+                error = $parsedTimestamp.error
+            }
         }
-        $millis += ([int]$Matches.h * 3600000) + ([int]$Matches.m * 60000) +
-            ([int]$Matches.s * 1000) + [int]$Matches.ms
+        $millis += [int]$parsedTimestamp.milliseconds
     }
     $deltas = @()
+    $cadenceError = $null
+    $midnightRollovers = 0
+    $dayMillis = 86400000
+    $nearMidnightStart = 23 * 3600000
+    $nearMidnightEnd = 1 * 3600000
     for ($index = 1; $index -lt $millis.Count; $index++) {
-        $delta = $millis[$index] - $millis[$index - 1]
-        if ($delta -lt 0) { $delta += 86400000 }
+        $rawDelta = $millis[$index] - $millis[$index - 1]
+        $delta = $rawDelta
+        if ($rawDelta -lt 0) {
+            $wrappedDelta = $rawDelta + $dayMillis
+            $reasonableMidnight = $midnightRollovers -eq 0 -and
+                $millis[$index - 1] -ge $nearMidnightStart -and
+                $millis[$index] -lt $nearMidnightEnd
+            if ($reasonableMidnight) {
+                $delta = $wrappedDelta
+                $midnightRollovers++
+            } elseif ($null -eq $cadenceError) {
+                $cadenceError = 'timestamp regression was not accepted as a midnight rollover'
+            }
+        }
         $deltas += $delta
     }
     $status = if ($deltas.Count -gt 0 -and ($deltas | Measure-Object -Minimum).Minimum -ge 900 -and
@@ -365,7 +450,7 @@ function Get-CadenceAssessment {
         min_ms = if ($deltas.Count -gt 0) { [int](($deltas | Measure-Object -Minimum).Minimum) } else { $null }
         max_ms = if ($deltas.Count -gt 0) { [int](($deltas | Measure-Object -Maximum).Maximum) } else { $null }
         mean_ms = if ($deltas.Count -gt 0) { [math]::Round((($deltas | Measure-Object -Average).Average), 3) } else { $null }
-        error = $null
+        error = $cadenceError
     }
 }
 
