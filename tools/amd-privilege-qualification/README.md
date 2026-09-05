@@ -65,10 +65,15 @@ pwsh -NoProfile -File .\tools\amd-privilege-qualification\test-qualification.ps1
 This command does not register a service, request elevation, access the AMD
 installation, or run AMD uProf.
 
-## Future, manually authorized two-context run
+## Historical I2 power-sampling qualification path
 
-The following commands are prepared but must not be run as part of automated
-preparation. They are intentionally separate:
+The following path is retained as historical I2 qualification infrastructure.
+It consumed the one bounded real power-sampling gate and is not the I2B
+counter-discovery handoff:
+
+`run-standard-user-amd-privilege-client.ps1` = **I2 POWER-SAMPLING CLIENT**
+**NOT THE I2B COUNTER-DISCOVERY HANDOFF**; **DO NOT RUN DURING I2B
+DIFFERENTIAL**.
 
 1. An Administrator x64 PowerShell runs `run-admin-amd-privilege-qualification.ps1`.
    It verifies the exact x64 release artifact and SHA-256, registers the fixed
@@ -90,12 +95,35 @@ The real run is at most one bounded `LocalService + Service SID + Session 0`
 AMD package-power session. Cancellation is qualified synthetically and is not
 performed against a real AMD runtime.
 
-The next differential gate is deliberately separate from that consumed run:
-one human-authorized `GetAmdCounterAvailability` request in a LocalService
-Session 0 broker context and one equivalent `timechart --list` request in a
-SYSTEM Session 0 comparison context, with the same broker-derived executable,
-fixed arguments, output policy, timeout, and token evidence schema. No account
-switch or SYSTEM fallback is authorized by this preparation.
+## I2B human handoff: non-sampling counter discovery
+
+This is the only authorized LocalService client sequence for the I2B
+differential. It is **NON_SAMPLING**, sends only
+`GetAmdCounterAvailability`, and lets the broker derive the fixed
+`AMDuProfCLI.exe timechart --list` command. It does not request a power event,
+duration, interval, or CSV session.
+
+Run these commands manually, exactly once per stated shell, only after human
+authorization. They are not executed by this repair or by synthetic tests:
+
+```powershell
+# Administrator x64 PowerShell — setup only; starts no AMD runtime itself
+Set-Location 'F:\File\codex\codex-worktrees\ac74\resource-timeline'
+& '.\tools\amd-privilege-qualification\run-admin-amd-privilege-qualification.ps1'
+
+# Normal, non-elevated, medium-integrity x64 PowerShell — I2B only
+Set-Location 'F:\File\codex\codex-worktrees\ac74\resource-timeline'
+& '.\tools\amd-privilege-qualification\run-standard-user-amd-counter-discovery.ps1'
+
+# Administrator x64 PowerShell — cleanup after the bounded handoff
+Set-Location 'F:\File\codex\codex-worktrees\ac74\resource-timeline'
+& '.\tools\amd-privilege-qualification\cleanup-admin-amd-privilege-qualification.ps1'
+```
+
+The SYSTEM comparison remains `PLAN_ONLY / HUMAN_AUTHORIZATION_REQUIRED`.
+There is no executable SYSTEM command in this handoff and no account switch or
+SYSTEM fallback is authorized by this preparation.
+
 The fixed two-context plan is retained at
 `counter-discovery-differential-plan.json`; its SYSTEM entry is plan-only until
 separately authorized.
@@ -113,15 +141,9 @@ sha256 = C9973BAAA01AF3C2673D8C70D8C7E626C577642505E6DFF7BA3C6026DEA63FB1
 broker_authenticode = NotSigned; exact SHA-256 is required by both wrappers
 ```
 
-Prepared commands, to be run only in the stated contexts:
+The active I2B handoff commands are the three commands in the preceding
+section. The older sampling wrapper must not be substituted for the I2B
+client:
 
-```powershell
-# Administrator x64 PowerShell
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File ".\tools\amd-privilege-qualification\run-admin-amd-privilege-qualification.ps1"
-
-# normal non-elevated x64 PowerShell
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File ".\tools\amd-privilege-qualification\run-standard-user-amd-privilege-client.ps1"
-
-# Administrator x64 PowerShell, after the bounded real run
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File ".\tools\amd-privilege-qualification\cleanup-admin-amd-privilege-qualification.ps1"
-```
+`run-standard-user-amd-privilege-client.ps1` remains preserved as the
+historical **I2 POWER-SAMPLING CLIENT**, not an active I2B command.
