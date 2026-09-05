@@ -181,7 +181,7 @@ LOCAL_SERVICE_ARTIFACT_STATUS = historical / used by completed LocalService run
 
 The dedicated SYSTEM comparison wrapper is pinned to a new offline release
 artifact; changing that binary requires rebuilding and recording a new hash
-before the human-authorized SYSTEM setup:
+before the human-authorized SYSTEM comparison execution:
 
 ```text
 path = tools/amd-privilege-qualification/target/release/amd-privilege-qualification.exe

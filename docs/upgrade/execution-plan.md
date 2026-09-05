@@ -209,7 +209,7 @@ AMD_LONG_LIVED_SESSION = planned
 AMD_TEMPERATURE_FREQUENCY = planned
 AMD_PRODUCTION_PROVIDER = planned
 NEXT_TASK = AMD-PRIVILEGE-I2C
-NEXT_GATE = HUMAN_SYSTEM_COUNTER_DISCOVERY_SETUP_ONLY
+NEXT_GATE = HUMAN_SYSTEM_COUNTER_DISCOVERY_EXECUTION
 EXECUTION_PLAN_SINGLE_CURRENT_STATE = PASS
 ```
 
@@ -1139,5 +1139,35 @@ SERVICE_RUNTIME_DURING_PREPARATION = 0
 PRODUCTION_ACCOUNT_SELECTION = UNRESOLVED
 LOCAL_SERVICE_TO_SYSTEM_SWITCH = NOT_AUTHORIZED
 I2_REAL_RUNTIME_GATE_CONSUMED = true
-NEXT_GATE = HUMAN_SYSTEM_COUNTER_DISCOVERY_SETUP_ONLY
+NEXT_GATE = HUMAN_SYSTEM_COUNTER_DISCOVERY_EXECUTION
 ```
+
+## AMD-PRIVILEGE-I2C SYSTEM PRE-RUN CLOSURE
+
+The SYSTEM comparison remains a dedicated, non-IPC, non-sampling qualification
+path. Its setup wrapper now follows the safe Service SID ordering used by the
+real LocalService path: AMD preflight and artifact checks complete before
+service creation; Service SID type is configured and verified with `qsidtype`
+before the Service SID is resolved; only then are qualification ACLs and the
+complete configuration written, followed by the coupled service start.
+
+```text
+SERVICE_CREATE_BEFORE_SERVICE_SID_RESOLUTION = PASS
+SIDTYPE_UNRESTRICTED_VERIFIED_BEFORE_SERVICE_SID_USE = PASS
+CONFIG_AND_ACL_COMPLETE_BEFORE_SERVICE_START = PASS
+SETUP_AND_DISCOVERY_ARE_COUPLED = true
+SYSTEM_ARTIFACT_SHA256 = 9E5A012B0A95C84DD28CD607D99EF43C9BC4D700683F33890CDE6C2108794AC3
+SYSTEM_ARTIFACT_CHANGED = false
+REAL_SYSTEM_SERVICE_DURING_REPAIR = 0
+REAL_COUNTER_DISCOVERY_DURING_REPAIR = 0
+REAL_AMD_RUNTIME_DURING_REPAIR = 0
+PRODUCTION_ACCOUNT_SELECTION = UNRESOLVED
+LOCAL_SERVICE_TO_SYSTEM_SWITCH = NOT_AUTHORIZED
+NEXT_GATE = HUMAN_SYSTEM_COUNTER_DISCOVERY_EXECUTION
+```
+
+If setup fails after the exact SYSTEM service is created but before start, the
+dedicated cleanup wrapper remains the only authorized removal path; counter
+discovery has not executed. The future Administrator wrapper intentionally
+consumes the coupled SYSTEM `timechart --list` comparison gate; there is no
+separate setup-only stage.

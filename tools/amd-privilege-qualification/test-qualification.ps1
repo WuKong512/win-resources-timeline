@@ -187,6 +187,31 @@ foreach ($requiredSystemSetupContract in @(
 if ($systemSetupSource -notmatch '9E5A012B0A95C84DD28CD607D99EF43C9BC4D700683F33890CDE6C2108794AC3') {
     throw 'SYSTEM comparison wrapper is not pinned to the new release artifact hash.'
 }
+$systemSetupOrder = [ordered]@{
+    AMD_CLI_PREFLIGHT = $systemSetupSource.IndexOf('$amdCliPreflight = Get-AmdCliPreflight')
+    SERVICE_CREATE = $systemSetupSource.IndexOf('Invoke-Sc -Arguments (New-QualificationServiceCreateArguments')
+    SIDTYPE_UNRESTRICTED = $systemSetupSource.IndexOf("Invoke-Sc -Arguments @('sidtype', `$ServiceName, 'unrestricted')")
+    QSIDTYPE_VERIFY = $systemSetupSource.IndexOf("Invoke-Sc -Arguments @('qsidtype', `$ServiceName)")
+    SERVICE_SID_RESOLUTION = $systemSetupSource.IndexOf('[Security.Principal.NTAccount]::new($ServiceSidAccount)')
+    ACL = $systemSetupSource.IndexOf('Set-SystemDirectoryAcl -Path $QualificationRoot -ServiceSid $serviceSid')
+    CONFIG = $systemSetupSource.IndexOf('Write-Utf8Json -Path $ConfigPath')
+    SERVICE_START = $systemSetupSource.IndexOf("Invoke-Sc -Arguments @('start', `$ServiceName)")
+}
+if (@($systemSetupOrder.Values | Where-Object { $_ -lt 0 }).Count -gt 0 -or
+    -not ($systemSetupOrder.AMD_CLI_PREFLIGHT -lt $systemSetupOrder.SERVICE_CREATE -and
+        $systemSetupOrder.SERVICE_CREATE -lt $systemSetupOrder.SIDTYPE_UNRESTRICTED -and
+        $systemSetupOrder.SIDTYPE_UNRESTRICTED -lt $systemSetupOrder.QSIDTYPE_VERIFY -and
+        $systemSetupOrder.QSIDTYPE_VERIFY -lt $systemSetupOrder.SERVICE_SID_RESOLUTION -and
+        $systemSetupOrder.SERVICE_SID_RESOLUTION -lt $systemSetupOrder.ACL -and
+        $systemSetupOrder.ACL -lt $systemSetupOrder.CONFIG -and
+        $systemSetupOrder.CONFIG -lt $systemSetupOrder.SERVICE_START)) {
+    throw "SYSTEM setup ordering contract failed: $($systemSetupOrder | ConvertTo-Json -Compress)"
+}
+if ($systemSetupSource -notmatch 'service_sid_type_verified\s*=\s*\$true') {
+    throw 'SYSTEM config must record that qsidtype verified UNRESTRICTED before start.'
+}
+Write-Host 'SYSTEM_SETUP_ORDER_CREATE_SIDTYPE_QSIDTYPE_RESOLVE_ACL_CONFIG_START=PASS'
+Write-Host 'SYSTEM_SERVICE_START_AFTER_CONFIG_AND_ACL=PASS'
 $historicalLocalServiceWrappers = @(
     (Join-Path $ToolRoot 'run-admin-amd-privilege-qualification.ps1'),
     (Join-Path $ToolRoot 'run-standard-user-amd-counter-discovery.ps1'),

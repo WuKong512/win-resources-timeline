@@ -134,31 +134,15 @@ if (Test-Path -LiteralPath $ConfigPath -PathType Leaf) {
     throw "SYSTEM qualification config already exists: $ConfigPath. Preserve it; do not overwrite it."
 }
 
-$serviceSid = ([Security.Principal.NTAccount]::new($ServiceSidAccount)).Translate(
-    [Security.Principal.SecurityIdentifier]).Value
+$amdCliPreflight = Get-AmdCliPreflight
+if (-not $amdCliPreflight.preflight_pass) {
+    throw 'AMD CLI preflight failed; the SYSTEM comparison service was not registered.'
+}
+
 $scope = [Guid]::NewGuid().ToString('N')
 $outputRoot = Join-Path $QualificationRoot $scope
 $serviceCreated = $false
 try {
-    New-Item -ItemType Directory -Force -Path $QualificationRoot, $outputRoot | Out-Null
-    Set-SystemDirectoryAcl -Path $QualificationRoot -ServiceSid $serviceSid
-    Set-SystemDirectoryAcl -Path $outputRoot -ServiceSid $serviceSid
-    $amdCliPreflight = Get-AmdCliPreflight
-    if (-not $amdCliPreflight.preflight_pass) {
-        throw 'AMD CLI preflight failed; the SYSTEM comparison service was not registered.'
-    }
-    Write-Utf8Json -Path (Join-Path $outputRoot 'AMD-CLI-PREFLIGHT.json') -Value $amdCliPreflight
-    $config = [ordered]@{
-        schema = 'amd-system-counter-config/v1'
-        service_name = $ServiceName
-        service_account = $ServiceAccount
-        service_account_sid = 'S-1-5-18'
-        service_sid = $serviceSid
-        scope = $scope
-        output_root = $outputRoot
-    }
-    Write-Utf8Json -Path (Join-Path $outputRoot 'SYSTEM-CONFIG.json') -Value $config
-    Write-Utf8Json -Path $ConfigPath -Value $config
     $binPath = '"{0}" --system-counter-service' -f $ArtifactPath
     Invoke-Sc -Arguments (New-QualificationServiceCreateArguments `
         -ServiceName $ServiceName `
@@ -167,6 +151,37 @@ try {
         -DisplayName 'Resource Timeline AMD SYSTEM counter qualification') | Out-Null
     $serviceCreated = $true
     Invoke-Sc -Arguments @('sidtype', $ServiceName, 'unrestricted') | Out-Null
+
+    $sidTypeOutput = @(Invoke-Sc -Arguments @('qsidtype', $ServiceName))
+    if (($sidTypeOutput -join "`n") -notmatch '(?i)\bUNRESTRICTED\b') {
+        throw "sc.exe qsidtype did not verify UNRESTRICTED for ${ServiceName}: $($sidTypeOutput -join ' ')"
+    }
+
+    $serviceSid = ([Security.Principal.NTAccount]::new($ServiceSidAccount)).Translate(
+        [Security.Principal.SecurityIdentifier]).Value
+    if ($serviceSid -notmatch '^S-1-5-80-') {
+        throw "Resolved Service SID is outside the expected service SID authority: $serviceSid"
+    }
+
+    New-Item -ItemType Directory -Force -Path $QualificationRoot, $outputRoot | Out-Null
+    Set-SystemDirectoryAcl -Path $QualificationRoot -ServiceSid $serviceSid
+    Set-SystemDirectoryAcl -Path $outputRoot -ServiceSid $serviceSid
+
+    Write-Utf8Json -Path (Join-Path $outputRoot 'AMD-CLI-PREFLIGHT.json') -Value $amdCliPreflight
+    $config = [ordered]@{
+        schema = 'amd-system-counter-config/v1'
+        service_name = $ServiceName
+        service_account = $ServiceAccount
+        service_account_sid = 'S-1-5-18'
+        service_sid = $serviceSid
+        service_sid_type = 'UNRESTRICTED'
+        service_sid_type_verified = $true
+        scope = $scope
+        output_root = $outputRoot
+    }
+    Write-Utf8Json -Path (Join-Path $outputRoot 'SYSTEM-CONFIG.json') -Value $config
+    Write-Utf8Json -Path $ConfigPath -Value $config
+
     Invoke-Sc -Arguments @('start', $ServiceName) | Out-Null
 
     $deadline = [DateTime]::UtcNow.AddSeconds(45)
