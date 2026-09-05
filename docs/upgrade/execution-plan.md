@@ -434,3 +434,34 @@ REAL_AMD_RUNTIME_DURING_PREPARATION = 0
 NEXT_GATE = AUTHORIZED_LOCAL_SERVICE_IPC_RUNTIME
 PRODUCTION_ADMISSION = NOT_COMPLETE
 ```
+
+## AMD-PRIVILEGE-I2 PRE-RUNTIME HARNESS INCIDENT
+
+The first manually authorized I2 Administrator setup stopped before Service
+creation. The PowerShell wrapper passed `sc.exe` option/value pairs such as
+`start= demand` as single argv elements; `sc.exe` returned exit code `1639`
+(`invalid start= field`). Read-only inspection confirmed that the Service was
+not created, no broker or standard-user client ran, and no AMD runtime was
+executed. The failed setup pointer and its evidence scope are retained and are
+not merged into a future successful run:
+
+```text
+FIRST_MANUAL_I2_SETUP = BLOCKED_PRE_RUNTIME_HARNESS
+ROOT_CAUSE = SC_EXE_OPTION_VALUE_ARGUMENT_COLLAPSED_TO_SINGLE_ARGV
+FAILED_SETUP_SCOPE = d98c1841ca4a4c02a294e5c637e45bdf
+FAILED_SETUP_OUTPUT_ROOT = C:\ProgramData\ResourceTimeline\qualification\amd-privilege\d98c1841ca4a4c02a294e5c637e45bdf
+FAILED_SETUP_PIPE_NAME = \\.\pipe\ResourceTimeline-AmdPrivilegeQualification-d98c1841ca4a4c02a294e5c637e45bdf
+FAILED_SETUP_INSTALLING_USER_SID = S-1-5-21-759388592-2654043993-2344833624-1001
+SERVICE_CREATED = false
+BROKER_STARTED = false
+STANDARD_USER_CLIENT_EXECUTED = false
+AMD_RUNTIME_EXECUTED = false
+REAL_AMD_RUNTIME_COUNT = 0
+I2_RUNTIME_GATE = NOT_YET_CONSUMED
+```
+
+The wrapper-only repair uses a pure argument builder that passes each
+`option=` and value as separate argv elements. It does not change the frozen
+broker artifact, service name, account, Service SID policy, or IPC protocol.
+The repair must be validated synthetically before any human setup retry; the
+retry remains human-authorized and must not be treated as an AMD runtime retry.

@@ -12,6 +12,7 @@ $ArtifactPath = Join-Path $PSScriptRoot 'target\release\amd-privilege-qualificat
 $ExpectedArtifactSha256 = 'F76313FF123689C66A15112D43B1F87C33FE8DAD241AD6B98F0511247C3797A0'
 $QualificationRoot = Join-Path $env:ProgramData 'ResourceTimeline\qualification\amd-privilege'
 $ConfigPath = Join-Path $QualificationRoot 'BROKER-CONFIG.json'
+. (Join-Path $PSScriptRoot 'sc-argument-contract.ps1')
 
 function Assert-Administrator {
     $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
@@ -191,10 +192,12 @@ try {
     Write-Utf8Json -Path $ConfigPath -Value $config
 
     $binPath = '"{0}" --broker' -f $ArtifactPath
-    Invoke-Sc -Arguments @(
-        'create', $ServiceName, "binPath= $binPath", 'start= demand', "obj= $ServiceAccount",
-        'type= own', 'DisplayName= Resource Timeline AMD privilege qualification broker'
-    ) | Out-Null
+    $createArguments = New-QualificationServiceCreateArguments `
+        -ServiceName $ServiceName `
+        -BinPath $binPath `
+        -ServiceAccount $ServiceAccount `
+        -DisplayName 'Resource Timeline AMD privilege qualification broker'
+    Invoke-Sc -Arguments $createArguments | Out-Null
     $serviceCreated = $true
     Invoke-Sc -Arguments @('sidtype', $ServiceName, 'unrestricted') | Out-Null
     $sidTypeOutput = (Invoke-Sc -Arguments @('qsidtype', $ServiceName)) -join [Environment]::NewLine
