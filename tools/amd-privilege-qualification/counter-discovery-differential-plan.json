@@ -71,5 +71,17 @@
     "process_architecture"
   ],
   "account_switch_not_authorized_by_preparation": true,
-  "real_amd_runtime_during_preparation": 0
+  "real_amd_runtime_during_preparation": 0,
+  "system_comparison": {
+    "service_name": "ResourceTimelineAmdSystemCounterQualification",
+    "service_account": "NT AUTHORITY\\SYSTEM",
+    "service_account_sid": "S-1-5-18",
+    "service_sid_required": true,
+    "mode": "DEDICATED_NON_IPC_SERVICE",
+    "setup_and_discovery_are_coupled": true,
+    "setup_wrapper": "run-admin-amd-system-counter-qualification.ps1",
+    "cleanup_wrapper": "cleanup-admin-amd-system-counter-qualification.ps1",
+    "artifact_sha256": "9E5A012B0A95C84DD28CD607D99EF43C9BC4D700683F33890CDE6C2108794AC3",
+    "execution": "PREPARED / HUMAN_AUTHORIZATION_REQUIRED / NOT_EXECUTED"
+  }
 }

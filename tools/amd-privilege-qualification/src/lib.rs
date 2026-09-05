@@ -27,9 +27,17 @@ pub const SERVICE_NAME: &str = "ResourceTimelineAmdPrivilegeQualification";
 pub const SERVICE_SID_ACCOUNT: &str = "NT SERVICE\\ResourceTimelineAmdPrivilegeQualification";
 pub const SERVICE_ACCOUNT: &str = "NT AUTHORITY\\LOCAL SERVICE";
 pub const SERVICE_ACCOUNT_SID: &str = "S-1-5-19";
+pub const SYSTEM_COUNTER_SERVICE_NAME: &str = "ResourceTimelineAmdSystemCounterQualification";
+pub const SYSTEM_COUNTER_SERVICE_SID_ACCOUNT: &str =
+    "NT SERVICE\\ResourceTimelineAmdSystemCounterQualification";
+pub const SYSTEM_COUNTER_SERVICE_ACCOUNT: &str = "NT AUTHORITY\\SYSTEM";
+pub const SYSTEM_COUNTER_SERVICE_ACCOUNT_SID: &str = "S-1-5-18";
+pub const SYSTEM_COUNTER_FIXED_ARGUMENTS: [&str; 2] = ["timechart", "--list"];
 pub const SYSTEM_SID: &str = "S-1-5-18";
 pub const PIPE_PREFIX: &str = r"\\.\pipe\ResourceTimeline-AmdPrivilegeQualification-";
 pub const OUTPUT_SUBDIRECTORY: &str = "ResourceTimeline\\qualification\\amd-privilege";
+pub const SYSTEM_COUNTER_OUTPUT_SUBDIRECTORY: &str =
+    "ResourceTimeline\\qualification\\amd-system-counter";
 pub const FIXED_EVENT: &str = "power";
 pub const MIN_DURATION_MS: u32 = 5_000;
 pub const MAX_DURATION_MS: u32 = 60_000;

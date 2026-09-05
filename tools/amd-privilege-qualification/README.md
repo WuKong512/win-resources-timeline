@@ -120,30 +120,86 @@ Set-Location 'F:\File\codex\codex-worktrees\ac74\resource-timeline'
 & '.\tools\amd-privilege-qualification\cleanup-admin-amd-privilege-qualification.ps1'
 ```
 
-The SYSTEM comparison remains `PLAN_ONLY / HUMAN_AUTHORIZATION_REQUIRED`.
-There is no executable SYSTEM command in this handoff and no account switch or
-SYSTEM fallback is authorized by this preparation.
+The SYSTEM comparison is prepared as a separate qualification-only service
+path below, but remains `NOT_EXECUTED / HUMAN_AUTHORIZATION_REQUIRED`. It does
+not mutate the LocalService broker contract, switch the production account, or
+authorize a SYSTEM fallback for production.
 
 The fixed two-context plan is retained at
-`counter-discovery-differential-plan.json`; its SYSTEM entry is plan-only until
+`counter-discovery-differential-plan.json`; its SYSTEM entry is prepared until
 separately authorized.
+
+## I2C human handoff: SYSTEM counter-discovery comparison
+
+The LocalService differential side is complete real evidence at scope
+`4b30b3d64b7e469cbce7c8080c84b7d4`: the fixed non-sampling
+`AMDuProfCLI.exe timechart --list` operation reported
+`POWER_UNAVAILABLE`. Do not rerun the LocalService side. The operator's
+duplicate cleanup invocation overwrote only the single cleanup summary; the
+discovery evidence and run validity remain preserved.
+
+I2C prepares one isolated SYSTEM comparison. It uses the distinct fixed
+service `ResourceTimelineAmdSystemCounterQualification`, `LocalSystem`
+(`S-1-5-18`), Session 0, x64, a Service SID, broker-derived AMD CLI
+discovery, and the fixed arguments `timechart --list`. It has no named-pipe
+client, no sampling request, no arbitrary command surface, and no production
+integration. Setup and discovery are intentionally coupled: starting the
+dedicated service performs the one fixed non-sampling discovery operation.
+The commands below are a future human-authorized handoff only and were not run
+by this preparation:
+
+```powershell
+# Administrator x64 PowerShell — SYSTEM setup and the coupled non-sampling discovery
+Set-Location 'F:\File\codex\codex-worktrees\ac74\resource-timeline'
+& '.\tools\amd-privilege-qualification\run-admin-amd-system-counter-qualification.ps1'
+
+# No standard-user client and no named-pipe IPC are used for the SYSTEM comparison.
+
+# Administrator x64 PowerShell — exact SYSTEM cleanup, after the bounded run
+Set-Location 'F:\File\codex\codex-worktrees\ac74\resource-timeline'
+& '.\tools\amd-privilege-qualification\cleanup-admin-amd-system-counter-qualification.ps1'
+```
+
+The SYSTEM run must remain isolated in its own evidence root and produce
+`SYSTEM-SERVICE-CONTEXT.json`, `CLI-ARTIFACT-IDENTITY.json`,
+`AMD-COUNTER-DISCOVERY-LAUNCH.json`,
+`AMD-COUNTER-DISCOVERY-RESULT.json`, bounded stdout/stderr, and unique
+`SYSTEM-CLEANUP-RESULT-<timestamp>-<id>.json` cleanup evidence. The cleanup
+wrapper never overwrites a previous cleanup attempt and never kills an
+unrelated process. A SYSTEM result can inform the privilege differential; it
+cannot select LocalSystem as the production account.
 
 ## Frozen future-run artifact
 
-The manually authorized wrappers are pinned to this release artifact; changing
-the binary requires rebuilding and recording a new hash before any future run:
+The completed LocalService real run used the historical artifact below. Its
+hash remains immutable in the evidence and is not rewritten by the I2C build:
+
+```text
+LOCAL_SERVICE_REAL_ARTIFACT_SHA256 = C9973BAAA01AF3C2673D8C70D8C7E626C577642505E6DFF7BA3C6026DEA63FB1
+LOCAL_SERVICE_ARTIFACT_STATUS = historical / used by completed LocalService run
+```
+
+The dedicated SYSTEM comparison wrapper is pinned to a new offline release
+artifact; changing that binary requires rebuilding and recording a new hash
+before the human-authorized SYSTEM setup:
 
 ```text
 path = tools/amd-privilege-qualification/target/release/amd-privilege-qualification.exe
 architecture = x64
 build_mode = release / cargo --offline
-sha256 = C9973BAAA01AF3C2673D8C70D8C7E626C577642505E6DFF7BA3C6026DEA63FB1
-broker_authenticode = NotSigned; exact SHA-256 is required by both wrappers
+sha256 = 9E5A012B0A95C84DD28CD607D99EF43C9BC4D700683F33890CDE6C2108794AC3
+system_wrapper = run-admin-amd-system-counter-qualification.ps1
+system_artifact_status = new offline SYSTEM-comparison artifact / not executed
+broker_authenticode = NotSigned; exact SHA-256 is required by the SYSTEM wrapper
 ```
 
-The active I2B handoff commands are the three commands in the preceding
-section. The older sampling wrapper must not be substituted for the I2B
-client:
+The existing LocalService wrappers remain pinned to the historical C9973...
+hash and therefore fail closed against the newly built SYSTEM-comparison
+binary; do not use them to retry the consumed LocalService run. The active I2B
+handoff remains the non-sampling LocalService sequence above, while the I2C
+SYSTEM handoff uses only the dedicated Administrator setup and cleanup
+wrappers. The older sampling wrapper must not be substituted for either
+counter-discovery handoff:
 
 `run-standard-user-amd-privilege-client.ps1` remains preserved as the
 historical **I2 POWER-SAMPLING CLIENT**, not an active I2B command.

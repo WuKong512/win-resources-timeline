@@ -10,7 +10,9 @@ use crate::{
     MessageFrameResult, MutationAssertions, PendingAcceptCompletion, PendingAcceptLifecycleState,
     ProtocolError, ResponseStatus, SemanticRequest, SessionCoordinator, SessionError, SessionOwner,
     SessionResultSummary, SessionState, SyntheticCheck, SyntheticQualificationSummary,
-    MAX_FRAME_BYTES, PROTOCOL_VERSION, SERVICE_ACCOUNT_SID,
+    MAX_FRAME_BYTES, PROTOCOL_VERSION, SERVICE_ACCOUNT_SID, SYSTEM_COUNTER_FIXED_ARGUMENTS,
+    SYSTEM_COUNTER_SERVICE_ACCOUNT, SYSTEM_COUNTER_SERVICE_ACCOUNT_SID,
+    SYSTEM_COUNTER_SERVICE_NAME,
 };
 use serde_json::json;
 use std::process::{Child, Command};
@@ -63,6 +65,11 @@ pub fn run(
             "COUNTER_DISCOVERY_UNKNOWN_FAILURE",
             counter_discovery_unknown_failure(),
             "unrecognized counter-discovery output remains a discovery failure",
+        ),
+        check(
+            "SYSTEM_COUNTER_SERVICE_CONTRACT",
+            system_counter_service_contract_is_fixed(),
+            "SYSTEM comparison uses a distinct fixed LocalSystem service and non-sampling argv",
         ),
         check(
             "RAW_EXECUTABLE_SURFACE_ABSENT",
@@ -682,6 +689,13 @@ fn counter_discovery_power_present() -> bool {
 fn counter_discovery_unknown_failure() -> bool {
     classify_counter_discovery(Some(1), "", "unexpected failure")
         == CounterDiscoveryAvailability::DiscoveryFailed
+}
+
+fn system_counter_service_contract_is_fixed() -> bool {
+    SYSTEM_COUNTER_SERVICE_NAME == "ResourceTimelineAmdSystemCounterQualification"
+        && SYSTEM_COUNTER_SERVICE_ACCOUNT == "NT AUTHORITY\\SYSTEM"
+        && SYSTEM_COUNTER_SERVICE_ACCOUNT_SID == "S-1-5-18"
+        && SYSTEM_COUNTER_FIXED_ARGUMENTS == ["timechart", "--list"]
 }
 
 fn message_frame(payload: &[u8]) -> Vec<u8> {

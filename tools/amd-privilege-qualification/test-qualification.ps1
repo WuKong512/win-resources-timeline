@@ -20,9 +20,11 @@ foreach ($wrapper in @(
         $TokenIntegrityContract,
         $CleanupStateContract,
         (Join-Path $ToolRoot 'run-admin-amd-privilege-qualification.ps1'),
+        (Join-Path $ToolRoot 'run-admin-amd-system-counter-qualification.ps1'),
         (Join-Path $ToolRoot 'run-standard-user-amd-privilege-client.ps1'),
         (Join-Path $ToolRoot 'run-standard-user-amd-counter-discovery.ps1'),
-        (Join-Path $ToolRoot 'cleanup-admin-amd-privilege-qualification.ps1')
+        (Join-Path $ToolRoot 'cleanup-admin-amd-privilege-qualification.ps1'),
+        (Join-Path $ToolRoot 'cleanup-admin-amd-system-counter-qualification.ps1')
     )) {
     $parseErrors = $null
     $tokens = $null
@@ -122,6 +124,10 @@ Write-Host 'SC_CREATE_DISPLAY_NAME_WITH_SPACES_PRESERVED=PASS'
 $cleanupWrapper = Join-Path $ToolRoot 'cleanup-admin-amd-privilege-qualification.ps1'
 $cleanupSource = Get-Content -LiteralPath $cleanupWrapper -Raw
 $adminSetupSource = Get-Content -LiteralPath (Join-Path $ToolRoot 'run-admin-amd-privilege-qualification.ps1') -Raw
+$systemSetupWrapper = Join-Path $ToolRoot 'run-admin-amd-system-counter-qualification.ps1'
+$systemSetupSource = Get-Content -LiteralPath $systemSetupWrapper -Raw
+$systemCleanupWrapper = Join-Path $ToolRoot 'cleanup-admin-amd-system-counter-qualification.ps1'
+$systemCleanupSource = Get-Content -LiteralPath $systemCleanupWrapper -Raw
 foreach ($case in @(
         @{ exit = 0; state = 'Stopped'; pid = 0; present = $true; expected = 'SC_STOP_0_PROCEED_TO_DELETE' },
         @{ exit = 1062; state = 'Stopped'; pid = 0; present = $true; expected = 'SC_STOP_1062_PROCEED_TO_DELETE' },
@@ -160,6 +166,58 @@ Write-Host 'SC_STOP_1053_STILL_RUNNING=FAIL_CLOSED'
 Write-Host 'DELETE_RUNNING_SERVICE=FORBIDDEN'
 Write-Host 'UNRELATED_PROCESS_KILL=FORBIDDEN'
 Write-Host 'SC_EXE_ARGUMENT_SHAPE_AUDIT=PASS'
+
+foreach ($requiredSystemSetupContract in @(
+        'ResourceTimelineAmdSystemCounterQualification',
+        'NT AUTHORITY\SYSTEM',
+        "'LocalSystem'",
+        'S-1-5-18',
+        '--system-counter-service',
+        'timechart',
+        '--list',
+        'sampling = $false',
+        'setup_and_discovery_are_coupled = $true',
+        'Set-SystemDirectoryAcl',
+        '$ServiceSid'
+    )) {
+    if ($systemSetupSource -notmatch [regex]::Escape($requiredSystemSetupContract)) {
+        throw "SYSTEM counter setup contract is missing: $requiredSystemSetupContract"
+    }
+}
+if ($systemSetupSource -notmatch '9E5A012B0A95C84DD28CD607D99EF43C9BC4D700683F33890CDE6C2108794AC3') {
+    throw 'SYSTEM comparison wrapper is not pinned to the new release artifact hash.'
+}
+$historicalLocalServiceWrappers = @(
+    (Join-Path $ToolRoot 'run-admin-amd-privilege-qualification.ps1'),
+    (Join-Path $ToolRoot 'run-standard-user-amd-counter-discovery.ps1'),
+    (Join-Path $ToolRoot 'run-standard-user-amd-privilege-client.ps1')
+)
+foreach ($historicalWrapper in $historicalLocalServiceWrappers) {
+    if ((Get-Content -LiteralPath $historicalWrapper -Raw) -notmatch 'C9973BAAA01AF3C2673D8C70D8C7E626C577642505E6DFF7BA3C6026DEA63FB1') {
+        throw "Historical LocalService wrapper hash changed unexpectedly: $historicalWrapper"
+    }
+}
+if ($systemSetupSource -match '(?i)Start-Process.*-Verb\s+RunAs|runas(?:\.exe)?|PsExec') {
+    throw 'SYSTEM counter setup must not self-elevate or invoke another elevation tool.'
+}
+if ($systemSetupSource -match '(?i)--event|--output-dir|--duration|--interval|working_directory|registry_path|raw_command|executable_path|argv') {
+    throw 'SYSTEM counter setup must not expose a sampling or client-controlled command surface.'
+}
+if ($systemCleanupSource -notmatch 'SYSTEM-CLEANUP-RESULT-') {
+    throw 'SYSTEM cleanup evidence must use invocation-distinct filenames.'
+}
+if ($systemCleanupSource -match 'SYSTEM-CLEANUP-RESULT\.json') {
+    throw 'SYSTEM cleanup must not overwrite one fixed cleanup evidence filename.'
+}
+if ($systemCleanupSource -match '(?im)\bStop-Process\b|\btaskkill(?:\.exe)?\b') {
+    throw 'SYSTEM cleanup must not kill processes by broad or unrelated identity.'
+}
+Write-Host 'SYSTEM_COUNTER_SERVICE_CONTRACT=PASS'
+Write-Host 'SYSTEM_COUNTER_FIXED_TIMECHART_LIST=PASS'
+Write-Host 'SYSTEM_COUNTER_SETUP_NO_SELF_ELEVATION=PASS'
+Write-Host 'SYSTEM_CLEANUP_DUPLICATE_SAFE=PASS'
+Write-Host 'SYSTEM_WRAPPER_NEW_ARTIFACT_HASH=PASS'
+Write-Host 'LOCALSERVICE_HISTORICAL_ARTIFACT_HASH_PRESERVED=PASS'
 
 $windowsSourceText = Get-Content -LiteralPath $WindowsSource -Raw
 if ($windowsSourceText -match 'error\.code\(\)\.0\s+as\s+u32\s*==\s*ERROR_') {
@@ -278,6 +336,25 @@ if ($counterDiscoverySource -match '--event|--output-dir|--duration|--interval')
 }
 Write-Host 'COUNTER_DISCOVERY_CLIENT_WRAPPER_IS_NON_SAMPLING=PASS'
 
+$readmeSource = Get-Content -LiteralPath (Join-Path $ToolRoot 'README.md') -Raw
+$i2bStart = $readmeSource.IndexOf('## I2B human handoff: non-sampling counter discovery')
+$i2cStart = $readmeSource.IndexOf('## I2C human handoff: SYSTEM counter-discovery comparison')
+if ($i2bStart -lt 0 -or $i2cStart -le $i2bStart) {
+    throw 'README does not contain a bounded I2B handoff section.'
+}
+$activeI2bHandoff = $readmeSource.Substring($i2bStart, $i2cStart - $i2bStart)
+if ($activeI2bHandoff -notmatch 'run-standard-user-amd-counter-discovery\.ps1' -or
+    $activeI2bHandoff -match 'run-standard-user-amd-privilege-client\.ps1') {
+    throw 'README I2B handoff does not isolate the non-sampling client wrapper.'
+}
+if ($readmeSource -notmatch 'run-admin-amd-system-counter-qualification\.ps1' -or
+    $readmeSource -notmatch 'cleanup-admin-amd-system-counter-qualification\.ps1' -or
+    $readmeSource -notmatch 'NOT_EXECUTED / HUMAN_AUTHORIZATION_REQUIRED') {
+    throw 'README SYSTEM comparison handoff is incomplete.'
+}
+Write-Host 'README_I2B_NON_SAMPLING_HANDOFF=PASS'
+Write-Host 'README_SYSTEM_HANDOFF_NOT_EXECUTED=PASS'
+
 foreach ($requiredTokenDifferentialContract in @(
         'TokenPrivileges',
         'LookupPrivilegeNameW',
@@ -328,8 +405,12 @@ if ($summary.mutation_assertions.real_amd_runtime_count_during_task -ne 0 -or
     throw 'Synthetic mutation assertions are not clean.'
 }
 
-$serviceName = 'ResourceTimelineAmdPrivilegeQualification'
-if (Get-Service -Name $serviceName -ErrorAction SilentlyContinue) {
-    throw "Synthetic test refuses to run while the qualification service is registered: $serviceName"
+foreach ($serviceName in @(
+        'ResourceTimelineAmdPrivilegeQualification',
+        'ResourceTimelineAmdSystemCounterQualification'
+    )) {
+    if (Get-Service -Name $serviceName -ErrorAction SilentlyContinue) {
+        throw "Synthetic test refuses to run while the qualification service is registered: $serviceName"
+    }
 }
 Write-Host 'Synthetic qualification PASS. No service registration, AMD runtime, elevation, or AMD installation mutation was performed.'

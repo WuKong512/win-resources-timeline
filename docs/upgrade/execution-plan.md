@@ -208,7 +208,8 @@ AMD_PRIVILEGE_DEPLOYMENT = real bounded LocalService broker path qualified; AMD 
 AMD_LONG_LIVED_SESSION = planned
 AMD_TEMPERATURE_FREQUENCY = planned
 AMD_PRODUCTION_PROVIDER = planned
-NEXT_TASK = AMD-PRIVILEGE-I2B
+NEXT_TASK = AMD-PRIVILEGE-I2C
+NEXT_GATE = HUMAN_SYSTEM_COUNTER_DISCOVERY_SETUP_ONLY
 EXECUTION_PLAN_SINGLE_CURRENT_STATE = PASS
 ```
 
@@ -227,7 +228,7 @@ IPC_CANDIDATE = WINDOWS_NAMED_PIPE
 MINIMUM_REQUIRED_WINDOWS_PRIVILEGES = UNPROVEN
 I2_REAL_RUNTIME_GATE_CONSUMED = true
 LOCAL_SERVICE_POWER_COUNTER_ACCESS = FAILED_OR_UNAVAILABLE
-NEXT_TASK = AMD-PRIVILEGE-I2B
+NEXT_TASK = AMD-PRIVILEGE-I2C
 PRODUCTION_ADMISSION = NOT_COMPLETE
 ```
 
@@ -1037,9 +1038,11 @@ DIFFERENTIAL_INFERENCE_BOUNDARY = LocalService failure does not prove LocalSyste
 
 The LocalService handoff is the separate
 `run-standard-user-amd-counter-discovery.ps1` semantic client wrapper. The
-SYSTEM row is a comparison plan only; this task does not register or run a
-SYSTEM service. The token evidence schema is extended to record normalized
-privilege and relevant group state without token handles or user secrets.
+SYSTEM row was a comparison plan at the earlier I2B preparation point. I2C now
+adds a separate, isolated SYSTEM-only service harness without changing the
+LocalService broker contract or adding a SYSTEM fallback to production. The
+token evidence schema records normalized privilege and relevant group state
+without token handles or user secrets.
 
 Read-only installed-component forensics found the AMD registry installation
 root `D:\apps\AMDuProf\`, signed x64 `AMDuProfCLI.exe` version `5.3.521.0`
@@ -1070,3 +1073,71 @@ NEXT_GATE = HUMAN_COUNTER_DISCOVERY_DIFFERENTIAL
 
 `COUNTER_PRIVILEGE_DIFFERENTIAL_REQUIRED` remains the result classification;
 this does not mark AMD-PRIVILEGE-I2 PASS or select LocalSystem for production.
+
+## AMD-PRIVILEGE-I2C SYSTEM COUNTER DISCOVERY COMPARISON PREPARATION
+
+The completed LocalService differential side is authoritative real evidence and
+must not be rerun. Its duplicate cleanup invocation affected only the single
+cleanup summary, not the discovery artifacts or run validity:
+
+```text
+LOCAL_SERVICE_COUNTER_DISCOVERY = REAL_POWER_UNAVAILABLE
+LOCAL_SERVICE_SCOPE = 4b30b3d64b7e469cbce7c8080c84b7d4
+LOCAL_SERVICE_POWER_CATEGORY_PRESENT = false
+LOCAL_SERVICE_NO_COUNTERS_DIAGNOSTIC = true
+LOCAL_SERVICE_CLI_EXIT_CODE = 0
+LOCAL_SERVICE_DIFFERENTIAL_SIDE = COMPLETE
+DUPLICATE_CLEANUP = true
+DISCOVERY_EVIDENCE_PRESERVED = true
+LOCAL_SERVICE_RUN_VALID = true
+FIRST_CLEANUP_RESULT_OVERWRITTEN = true
+```
+
+I2C prepares exactly one future human-authorized SYSTEM comparison. It uses a
+distinct qualification-only service rather than mutating the LocalService
+contract:
+
+```text
+SYSTEM_DIFFERENTIAL_SIDE = PREPARED / NOT_EXECUTED
+SYSTEM_HARNESS_SERVICE = ResourceTimelineAmdSystemCounterQualification
+SYSTEM_ACCOUNT = NT AUTHORITY\SYSTEM
+SYSTEM_ACCOUNT_SID = S-1-5-18
+SYSTEM_SESSION = 0
+SYSTEM_SERVICE_SID_REQUIRED = true
+SYSTEM_HARNESS_MODE = DEDICATED_NON_IPC_SERVICE
+SYSTEM_FIXED_COMMAND = timechart --list
+SYSTEM_SAMPLING = false
+SYSTEM_SETUP_AND_DISCOVERY_ARE_COUPLED = true
+SYSTEM_SETUP_WRAPPER = run-admin-amd-system-counter-qualification.ps1
+SYSTEM_CLEANUP_WRAPPER = cleanup-admin-amd-system-counter-qualification.ps1
+SYSTEM_TOKEN_EVIDENCE_PREPARED = true
+SYSTEM_CLEANUP_DUPLICATE_SAFE = true
+SYSTEM_ARTIFACT_SHA256 = 9E5A012B0A95C84DD28CD607D99EF43C9BC4D700683F33890CDE6C2108794AC3
+LOCAL_SERVICE_REAL_ARTIFACT_SHA256 = C9973BAAA01AF3C2673D8C70D8C7E626C577642505E6DFF7BA3C6026DEA63FB1
+```
+
+The SYSTEM service derives the same AMD installation path and validates the
+same x64 CLI identity, uses only the fixed `timechart --list` arguments, and
+records bounded broker-owned stdout/stderr plus normalized Session 0 token
+evidence. It accepts no executable, argv, shell, environment, working
+directory, registry-path, or output-path input. Setup and discovery are coupled
+because starting the dedicated service triggers the single fixed non-sampling
+operation; this task did not start it. No named-pipe client is involved because
+the LocalService standard-user IPC path is already a real PASS and is not the
+variable under comparison.
+
+The future SYSTEM evidence root must contain isolated service-context, CLI
+identity, launch, result, stdout/stderr, and invocation-distinct cleanup
+artifacts. A future SYSTEM success or failure remains a differential fact; it
+does not by itself prove the global minimum privilege and does not select
+LocalSystem as the production service account.
+
+```text
+REAL_AMD_RUNTIME_DURING_PREPARATION = 0
+REAL_COUNTER_DISCOVERY_DURING_PREPARATION = 0
+SERVICE_RUNTIME_DURING_PREPARATION = 0
+PRODUCTION_ACCOUNT_SELECTION = UNRESOLVED
+LOCAL_SERVICE_TO_SYSTEM_SWITCH = NOT_AUTHORIZED
+I2_REAL_RUNTIME_GATE_CONSUMED = true
+NEXT_GATE = HUMAN_SYSTEM_COUNTER_DISCOVERY_SETUP_ONLY
+```

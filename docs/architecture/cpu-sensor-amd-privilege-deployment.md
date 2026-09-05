@@ -28,8 +28,8 @@ IPC_CANDIDATE = WINDOWS_NAMED_PIPE
 AMD_PRIVILEGE_I2 = real bounded LocalService IPC/AMD launch PASS; AMD counter backend unavailable
 I2_REAL_RUNTIME_GATE_CONSUMED = true
 LOCAL_SERVICE_POWER_COUNTER_ACCESS = FAILED_OR_UNAVAILABLE
-NEXT_GATE = HUMAN_COUNTER_DISCOVERY_DIFFERENTIAL
-NEXT_TASK = AMD-PRIVILEGE-I2B
+NEXT_GATE = HUMAN_SYSTEM_COUNTER_DISCOVERY_SETUP_ONLY
+NEXT_TASK = AMD-PRIVILEGE-I2C
 PRODUCTION_ADMISSION = NOT_COMPLETE
 ```
 
@@ -39,9 +39,10 @@ This task must not modify that evidence and must not repeat its AMD runtime.
 `AMD-PRIVILEGE-I2` has now consumed exactly one bounded real LocalService
 qualification run. The broker, secure IPC, identity, CLI launch, and cleanup
 boundaries passed, but AMD uProf reported that no counters were available from
-the LocalService context. `AMD-PRIVILEGE-I2B` prepares a non-sampling
-`timechart --list` differential; it does not select LocalSystem, alter AMD
-permissions, or admit a provider.
+the LocalService context. `AMD-PRIVILEGE-I2B` prepared a non-sampling
+`timechart --list` differential, and `AMD-PRIVILEGE-I2C` now prepares a
+distinct SYSTEM-only comparison harness. Neither selects LocalSystem, alters
+AMD permissions, or admits a provider.
 
 ## HISTORICAL / SUPERSEDED INITIAL DECISION AND STATUS
 
@@ -647,7 +648,7 @@ Administrator command is documented in
   PATH, or system state was changed.
 - No production AMD provider was registered.
 
-## AMD-PRIVILEGE-I2 CURRENT STATE
+## AMD-PRIVILEGE-I2 COMPLETION SNAPSHOT
 
 `AMD-PRIVILEGE-I2` prepares an independent qualification-only broker and
 synthetic security harness. It is not a production broker and has no
@@ -691,7 +692,7 @@ The first candidate is a qualification hypothesis only. Even a future
 LocalService runtime PASS may narrow the observed path to LocalService or
 less; it cannot by itself prove the absolute minimum Windows privilege.
 
-## AMD-PRIVILEGE-I2B CURRENT STATE
+## AMD-PRIVILEGE-I2B COMPLETION SNAPSHOT
 
 ```text
 RESULT = COUNTER_PRIVILEGE_DIFFERENTIAL_REQUIRED
@@ -708,6 +709,43 @@ I2_REAL_RUNTIME_GATE_CONSUMED = true
 NEXT_GATE = HUMAN_COUNTER_DISCOVERY_DIFFERENTIAL
 PRODUCTION_ADMISSION = NOT_COMPLETE
 ```
+
+## AMD-PRIVILEGE-I2C CURRENT STATE
+
+The LocalService counter-discovery side is complete real evidence at scope
+`4b30b3d64b7e469cbce7c8080c84b7d4`: the fixed non-sampling AMD uProf
+`timechart --list` operation reported `POWER_UNAVAILABLE` with the known
+no-counters diagnostic and exit code `0`. A duplicate cleanup invocation
+overwrote only the single cleanup summary; the discovery evidence remains
+authoritative and the LocalService run remains valid.
+
+```text
+LOCAL_SERVICE_COUNTER_DISCOVERY = REAL_POWER_UNAVAILABLE
+LOCAL_SERVICE_POWER_CATEGORY_PRESENT = false
+LOCAL_SERVICE_DIFFERENTIAL_SIDE = COMPLETE
+SYSTEM_DIFFERENTIAL_SIDE = PREPARED / NOT_EXECUTED
+SYSTEM_HARNESS_SERVICE = ResourceTimelineAmdSystemCounterQualification
+SYSTEM_SERVICE_ACCOUNT = NT AUTHORITY\SYSTEM
+SYSTEM_SERVICE_ACCOUNT_SID = S-1-5-18
+SYSTEM_SESSION = 0
+SYSTEM_FIXED_COMMAND = timechart --list
+SYSTEM_SAMPLING = false
+SYSTEM_HARNESS_MODE = DEDICATED_NON_IPC_SERVICE
+SYSTEM_SETUP_AND_DISCOVERY_ARE_COUPLED = true
+SYSTEM_TOKEN_DIFFERENTIAL_EVIDENCE_PREPARED = true
+SYSTEM_CLEANUP_DUPLICATE_SAFE = true
+LOCAL_SERVICE_REAL_ARTIFACT_SHA256 = C9973BAAA01AF3C2673D8C70D8C7E626C577642505E6DFF7BA3C6026DEA63FB1
+SYSTEM_PREPARATION_ARTIFACT_SHA256 = 9E5A012B0A95C84DD28CD607D99EF43C9BC4D700683F33890CDE6C2108794AC3
+PRODUCTION_ACCOUNT_SELECTION = UNRESOLVED
+LOCAL_SERVICE_TO_SYSTEM_SWITCH = NOT_AUTHORIZED
+NEXT_GATE = HUMAN_SYSTEM_COUNTER_DISCOVERY_SETUP_ONLY
+```
+
+The dedicated SYSTEM service and its Administrator-only setup/cleanup wrappers
+are qualification-only and were not executed during preparation. They preserve
+the fixed AMD CLI identity and `timechart --list` command while adding no
+arbitrary command surface, IPC path, production installer integration, or
+account-selection decision.
 
 The old architecture decision and early Service/Session 0 unknowns above are
 historical/superseded records. They remain to explain why the broker candidate

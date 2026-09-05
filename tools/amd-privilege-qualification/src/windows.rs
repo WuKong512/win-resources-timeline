@@ -15,7 +15,7 @@ use crate::{
     FIXED_EVENT, OUTPUT_SUBDIRECTORY, QUALIFICATION_ONLY, SERVICE_ACCOUNT_SID, SERVICE_NAME,
     SERVICE_SID_ACCOUNT,
 };
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::fs::{self, File};
@@ -94,6 +94,7 @@ const SE_GROUP_ENABLED: u32 = 0x0000_0004;
 
 static STOP_REQUESTED: AtomicBool = AtomicBool::new(false);
 static CONFIG: OnceLock<BrokerConfig> = OnceLock::new();
+static SYSTEM_COUNTER_CONFIG: OnceLock<SystemCounterConfig> = OnceLock::new();
 static STOP_EVENT: Mutex<Option<isize>> = Mutex::new(None);
 static STATUS_HANDLE: Mutex<Option<isize>> = Mutex::new(None);
 static SERVICE_ERROR_DETAILS: Mutex<Option<Value>> = Mutex::new(None);
@@ -134,10 +135,14 @@ fn win32_error_details(context: &str, win32_error: u32) -> Value {
 }
 
 fn service_error_evidence(error: String) -> Value {
+    service_error_evidence_for(SERVICE_NAME, error)
+}
+
+fn service_error_evidence_for(service_name: &str, error: String) -> Value {
     let mut evidence = json!({
         "schema": "amd-privilege-service-error/v1",
         "qualification_only": QUALIFICATION_ONLY,
-        "service_name": SERVICE_NAME,
+        "service_name": service_name,
         "error": error,
     });
     if let Some(details) = take_service_error_details() {
@@ -187,6 +192,17 @@ struct ServiceContextEvidence {
     context_valid: bool,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+struct SystemCounterConfig {
+    schema: String,
+    service_name: String,
+    service_account: String,
+    service_account_sid: String,
+    service_sid: String,
+    scope: String,
+    output_root: String,
+}
+
 #[derive(Clone)]
 struct BrokerState {
     config: BrokerConfig,
@@ -211,6 +227,30 @@ pub fn run_service() -> Result<(), String> {
         SERVICE_TABLE_ENTRYW {
             lpServiceName: PWSTR::from_raw(service_name.as_mut_ptr()),
             lpServiceProc: Some(service_main),
+        },
+        SERVICE_TABLE_ENTRYW {
+            lpServiceName: PWSTR::null(),
+            lpServiceProc: None,
+        },
+    ];
+    unsafe { StartServiceCtrlDispatcherW(table.as_ptr()) }
+        .map_err(|error| format!("StartServiceCtrlDispatcherW failed: {error}"))
+}
+
+/// Run the isolated, non-IPC SYSTEM comparison service.  This mode has a distinct fixed
+/// service name and configuration contract; it never enters the LocalService broker path and
+/// exposes only the fixed, non-sampling counter-discovery operation.
+pub fn run_system_counter_service() -> Result<(), String> {
+    let config = load_system_counter_config()?;
+    SYSTEM_COUNTER_CONFIG
+        .set(config)
+        .map_err(|_| "SYSTEM counter configuration was initialized twice".to_owned())?;
+    STOP_REQUESTED.store(false, Ordering::SeqCst);
+    let mut service_name = wide_null(crate::SYSTEM_COUNTER_SERVICE_NAME);
+    let table = [
+        SERVICE_TABLE_ENTRYW {
+            lpServiceName: PWSTR::from_raw(service_name.as_mut_ptr()),
+            lpServiceProc: Some(system_counter_service_main),
         },
         SERVICE_TABLE_ENTRYW {
             lpServiceName: PWSTR::null(),
@@ -253,6 +293,48 @@ unsafe extern "system" fn service_main(_argc: u32, _argv: *mut PWSTR) {
             let _ = crate::write_json(
                 &root.join("SERVICE-HARNESS-ERROR.json"),
                 &service_error_evidence(error),
+            );
+            let _ = set_service_status(status_handle, SERVICE_STOPPED, 1, 0, 0);
+        }
+    }
+    clear_status_handle(status_handle);
+}
+
+unsafe extern "system" fn system_counter_service_main(_argc: u32, _argv: *mut PWSTR) {
+    let Some(config) = SYSTEM_COUNTER_CONFIG.get().cloned() else {
+        return;
+    };
+    let root = PathBuf::from(&config.output_root);
+    let _ = fs::create_dir_all(&root);
+    let service_name = wide_null(&config.service_name);
+    let handler = unsafe {
+        RegisterServiceCtrlHandlerExW(
+            PCWSTR::from_raw(service_name.as_ptr()),
+            Some(service_handler),
+            None,
+        )
+    };
+    let Ok(status_handle) = handler else {
+        let _ = crate::write_json(
+            &root.join("SYSTEM-SERVICE-HARNESS-ERROR.json"),
+            &service_error_evidence_for(
+                &config.service_name,
+                "RegisterServiceCtrlHandlerExW failed".to_owned(),
+            ),
+        );
+        return;
+    };
+
+    set_status_handle(status_handle);
+    let _ = set_service_status(status_handle, SERVICE_START_PENDING, 0, 1, 30_000);
+    match system_counter_service_entry(status_handle, &config) {
+        Ok(()) => {
+            let _ = set_service_status(status_handle, SERVICE_STOPPED, 0, 0, 0);
+        }
+        Err(error) => {
+            let _ = crate::write_json(
+                &root.join("SYSTEM-SERVICE-HARNESS-ERROR.json"),
+                &service_error_evidence_for(&config.service_name, error),
             );
             let _ = set_service_status(status_handle, SERVICE_STOPPED, 1, 0, 0);
         }
@@ -431,6 +513,51 @@ fn service_entry(
         return abandon_startup_accept(&state.output_root, first_accept, Some(error));
     }
     broker_loop(&state, first_accept, stop_event.raw())
+}
+
+fn system_counter_service_entry(
+    status_handle: SERVICE_STATUS_HANDLE,
+    config: &SystemCounterConfig,
+) -> Result<(), String> {
+    let context = collect_service_context_for(
+        &config.service_name,
+        &config.service_account,
+        &config.service_account_sid,
+        Some(config.service_sid.clone()),
+        "amd-privilege-service-context/v2",
+    )?;
+    let root = Path::new(&config.output_root);
+    crate::write_json(&root.join("SYSTEM-SERVICE-CONTEXT.json"), &context)
+        .map_err(|error| format!("writing SYSTEM-SERVICE-CONTEXT.json failed: {error}"))?;
+    if !context.context_valid {
+        return Err(
+            "SYSTEM, Service SID, Session 0 and x64 context was not established".to_owned(),
+        );
+    }
+    if STOP_REQUESTED.load(Ordering::Acquire) {
+        return Ok(());
+    }
+    set_service_status(status_handle, SERVICE_RUNNING, 0, 0, 0)?;
+    let status = execute_counter_discovery_at(root, root, "system-counter-discovery")?;
+    crate::write_json(
+        &root.join("SYSTEM-COUNTER-DISCOVERY-SUMMARY.json"),
+        &json!({
+            "schema": "amd-system-counter-discovery-summary/v1",
+            "qualification_only": QUALIFICATION_ONLY,
+            "service_name": config.service_name,
+            "service_account": config.service_account,
+            "service_account_sid": config.service_account_sid,
+            "session_id": 0,
+            "fixed_cli_arguments": fixed_counter_discovery_arguments(),
+            "sampling": false,
+            "availability": status.availability.as_str(),
+            "cli_exit_code": status.cli_exit_code,
+            "power_category_present": status.power_category_present,
+            "no_orphan_child": status.no_orphan_child
+        }),
+    )
+    .map_err(|error| format!("writing SYSTEM-COUNTER-DISCOVERY-SUMMARY.json failed: {error}"))?;
+    Ok(())
 }
 
 fn abandon_startup_accept(
@@ -1072,13 +1199,22 @@ fn execute_counter_discovery(
     state: &BrokerState,
     request_id: &str,
 ) -> Result<CounterDiscoveryStatus, String> {
-    let (cli_path, artifact) = discover_cli()?;
-    let _ = crate::write_json(
-        &state.output_root.join("CLI-ARTIFACT-IDENTITY.json"),
-        &artifact,
-    );
     let discovery_root = state.output_root.join("counter-discovery");
-    fs::create_dir_all(&discovery_root)
+    execute_counter_discovery_at(&state.output_root, &discovery_root, request_id)
+}
+
+/// Execute the same fixed counter-discovery operation for the isolated SYSTEM service mode.
+/// `discovery_root` is supplied only by the fixed service configuration; it is never client
+/// controlled.  Keeping the runner shared ensures the LocalService and SYSTEM comparison uses
+/// the same executable discovery, argument vector, timeout, job ownership, and classifier.
+fn execute_counter_discovery_at(
+    output_root: &Path,
+    discovery_root: &Path,
+    request_id: &str,
+) -> Result<CounterDiscoveryStatus, String> {
+    let (cli_path, artifact) = discover_cli()?;
+    let _ = crate::write_json(&output_root.join("CLI-ARTIFACT-IDENTITY.json"), &artifact);
+    fs::create_dir_all(discovery_root)
         .map_err(|error| format!("creating counter-discovery evidence root failed: {error}"))?;
     let stdout_path = discovery_root.join("AMDuProfCLI-list.stdout.txt");
     let stderr_path = discovery_root.join("AMDuProfCLI-list.stderr.txt");
@@ -1114,6 +1250,7 @@ fn execute_counter_discovery(
             "qualification_only": QUALIFICATION_ONLY,
             "request_id": safe_request_file_component(request_id),
             "counter_discovery_only": true,
+            "sampling": false,
             "amd_runtime_executed": false,
             "cli_started_by_broker": true,
             "target_pid": target_pid,
@@ -1168,6 +1305,7 @@ fn execute_counter_discovery(
             "qualification_only": QUALIFICATION_ONLY,
             "request_id": safe_request_file_component(request_id),
             "arguments": fixed_counter_discovery_arguments(),
+            "sampling": false,
             "availability": availability.as_str(),
             "cli_exit_code": exit_code,
             "power_category_present": power_category_present,
@@ -1580,7 +1718,10 @@ fn fixed_cli_arguments(duration_ms: u32, interval_ms: u32, output_dir: &Path) ->
 }
 
 fn fixed_counter_discovery_arguments() -> Vec<String> {
-    vec!["timechart".to_owned(), "--list".to_owned()]
+    crate::SYSTEM_COUNTER_FIXED_ARGUMENTS
+        .iter()
+        .map(|argument| (*argument).to_owned())
+        .collect()
 }
 
 fn read_bounded_text(path: &Path) -> Result<String, String> {
@@ -2703,16 +2844,32 @@ fn send_request(stream: &mut File, request: &SemanticRequest) -> Result<BrokerRe
 }
 
 fn collect_service_context(config: &BrokerConfig) -> Result<ServiceContextEvidence, String> {
+    collect_service_context_for(
+        &config.service_name,
+        &config.service_account,
+        &config.service_account_sid,
+        config.service_sid.clone(),
+        "amd-privilege-service-context/v2",
+    )
+}
+
+fn collect_service_context_for(
+    service_name: &str,
+    service_account: &str,
+    expected_account_sid: &str,
+    service_sid: Option<String>,
+    schema: &str,
+) -> Result<ServiceContextEvidence, String> {
     let current = unsafe { GetCurrentProcess() };
     let token = open_process_token(current)?;
     let user_bytes = token_information(token.raw(), TokenUser)?;
     let user = unsafe { &*(user_bytes.as_ptr() as *const TOKEN_USER) };
     let account_sid = sid_to_string(user.User.Sid)?;
-    let service_sid = config.service_sid.clone();
     let service_sid_present = service_sid
         .as_deref()
         .is_some_and(|sid| token_contains_sid(token.raw(), TokenGroups, sid).unwrap_or(false));
-    let service_sid_type = query_service_sid_type().unwrap_or_else(|_| "UNKNOWN".to_owned());
+    let service_sid_type =
+        query_service_sid_type(service_name).unwrap_or_else(|_| "UNKNOWN".to_owned());
     let integrity_sid = token_information(token.raw(), TokenIntegrityLevel)
         .ok()
         .and_then(|bytes| {
@@ -2723,24 +2880,27 @@ fn collect_service_context(config: &BrokerConfig) -> Result<ServiceContextEviden
         .ok()
         .map(|bytes| unsafe { (*(bytes.as_ptr() as *const TOKEN_ELEVATION)).TokenIsElevated != 0 });
     let (enabled_privileges, disabled_privileges) = token_privilege_evidence(token.raw())?;
-    let token_groups_relevant_to_access =
-        collect_token_groups_relevant_to_access(token.raw(), service_sid.as_deref())?;
+    let token_groups_relevant_to_access = collect_token_groups_relevant_to_access(
+        token.raw(),
+        service_sid.as_deref(),
+        expected_account_sid,
+    )?;
     let session_id = process_session_id(unsafe { GetCurrentProcessId() });
     let process_architecture = if size_of::<usize>() == 8 {
         "x64"
     } else {
         "non-x64"
     };
-    let context_valid = account_sid.eq_ignore_ascii_case(SERVICE_ACCOUNT_SID)
+    let context_valid = account_sid.eq_ignore_ascii_case(expected_account_sid)
         && service_sid_present
         && session_id == Some(0)
         && process_architecture == "x64"
         && service_sid_type == REQUIRED_SERVICE_SID_TYPE;
     Ok(ServiceContextEvidence {
-        schema: "amd-privilege-service-context/v2".to_owned(),
+        schema: schema.to_owned(),
         qualification_only: QUALIFICATION_ONLY,
-        service_name: SERVICE_NAME.to_owned(),
-        service_account: crate::SERVICE_ACCOUNT.to_owned(),
+        service_name: service_name.to_owned(),
+        service_account: service_account.to_owned(),
         account_sid,
         service_sid,
         service_sid_present,
@@ -2953,6 +3113,7 @@ fn privilege_name(privilege: &LUID_AND_ATTRIBUTES) -> String {
 fn collect_token_groups_relevant_to_access(
     token: HANDLE,
     service_sid: Option<&str>,
+    account_sid: &str,
 ) -> Result<Vec<String>, String> {
     let bytes = token_information(token, TokenGroups)?;
     if bytes.len() < size_of::<TOKEN_GROUPS>() {
@@ -2969,7 +3130,7 @@ fn collect_token_groups_relevant_to_access(
         let sid = sid_to_string(group.Sid)?;
         let is_relevant = service_sid.is_some_and(|expected| sid.eq_ignore_ascii_case(expected))
             || sid.eq_ignore_ascii_case(crate::SYSTEM_SID)
-            || sid.eq_ignore_ascii_case(SERVICE_ACCOUNT_SID)
+            || sid.eq_ignore_ascii_case(account_sid)
             || sid == "S-1-5-20"
             || sid == "S-1-5-6"
             || sid.starts_with("S-1-5-32-")
@@ -2988,10 +3149,10 @@ fn collect_token_groups_relevant_to_access(
     Ok(relevant)
 }
 
-fn query_service_sid_type() -> Result<String, String> {
+fn query_service_sid_type(service_name: &str) -> Result<String, String> {
     let manager = unsafe { OpenSCManagerW(PCWSTR::null(), PCWSTR::null(), SC_MANAGER_CONNECT) }
         .map_err(|error| format!("OpenSCManagerW failed: {error}"))?;
-    let service_name = wide_null(SERVICE_NAME);
+    let service_name = wide_null(service_name);
     let service = unsafe {
         OpenServiceW(
             manager,
@@ -3065,6 +3226,32 @@ fn process_start_time(process: HANDLE) -> Option<u64> {
         .map(|_| (u64::from(creation.dwHighDateTime) << 32) | u64::from(creation.dwLowDateTime))
 }
 
+fn load_system_counter_config() -> Result<SystemCounterConfig, String> {
+    let path = system_counter_config_path();
+    let bytes = fs::read(&path)
+        .map_err(|error| format!("reading SYSTEM counter config failed: {error}"))?;
+    let config: SystemCounterConfig = serde_json::from_slice(&bytes)
+        .map_err(|error| format!("SYSTEM counter config is invalid: {error}"))?;
+    let expected_output_root = program_data_root()
+        .join(crate::SYSTEM_COUNTER_OUTPUT_SUBDIRECTORY)
+        .join(&config.scope);
+    let output_root_matches = Path::new(&config.output_root)
+        .to_string_lossy()
+        .eq_ignore_ascii_case(&expected_output_root.to_string_lossy());
+    if config.schema != "amd-system-counter-config/v1"
+        || config.service_name != crate::SYSTEM_COUNTER_SERVICE_NAME
+        || config.service_account != crate::SYSTEM_COUNTER_SERVICE_ACCOUNT
+        || config.service_account_sid != crate::SYSTEM_COUNTER_SERVICE_ACCOUNT_SID
+        || config.service_sid.is_empty()
+        || !config.service_sid.starts_with("S-1-5-80-")
+        || !output_root_matches
+        || crate::validate_scope(&config.scope).is_err()
+    {
+        return Err("SYSTEM counter config is outside the fixed qualification contract".to_owned());
+    }
+    Ok(config)
+}
+
 fn load_config() -> Result<BrokerConfig, String> {
     let path = config_path();
     let bytes =
@@ -3092,6 +3279,12 @@ pub fn config_path() -> PathBuf {
     program_data_root()
         .join(OUTPUT_SUBDIRECTORY)
         .join("BROKER-CONFIG.json")
+}
+
+pub fn system_counter_config_path() -> PathBuf {
+    program_data_root()
+        .join(crate::SYSTEM_COUNTER_OUTPUT_SUBDIRECTORY)
+        .join("SYSTEM-CONFIG.json")
 }
 
 pub fn program_data_root() -> PathBuf {
