@@ -38,6 +38,64 @@ pub const MAX_INTERVAL_MS: u32 = 10_000;
 pub const CLI_TIMEOUT_SAFETY_MS: u64 = 90_000;
 pub const CLIENT_DISCONNECT_POLICY: &str = "CANCEL_OWNED_SESSION";
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BrokerReadinessState {
+    listener_created: bool,
+    ready_published: bool,
+    service_running: bool,
+}
+
+impl BrokerReadinessState {
+    pub const fn new() -> Self {
+        Self {
+            listener_created: false,
+            ready_published: false,
+            service_running: false,
+        }
+    }
+
+    pub fn mark_first_listener_created(&mut self) {
+        self.listener_created = true;
+    }
+
+    pub fn publish_ready(&mut self) -> Result<(), &'static str> {
+        if !self.listener_created {
+            return Err("cannot publish broker ready before a live listener exists");
+        }
+        self.ready_published = true;
+        Ok(())
+    }
+
+    pub fn report_running(&mut self) -> Result<(), &'static str> {
+        if !self.listener_created {
+            return Err("cannot report service running before a live listener exists");
+        }
+        if !self.ready_published {
+            return Err("cannot report service running before broker ready");
+        }
+        self.service_running = true;
+        Ok(())
+    }
+
+    pub const fn listener_created(&self) -> bool {
+        self.listener_created
+    }
+
+    pub const fn ready_published(&self) -> bool {
+        self.ready_published
+    }
+
+    pub const fn service_running(&self) -> bool {
+        self.service_running
+    }
+}
+
+impl Default for BrokerReadinessState {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 static SESSION_COUNTER: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -831,14 +889,16 @@ pub fn build_pipe_dacl(
     Ok(PipeDaclEvidence {
         schema: "amd-privilege-pipe-dacl/v1".to_owned(),
         pipe_name,
-        owner: installing_user_sid.to_owned(),
+        // CreateNamedPipeW requires the owner to be a SID present in the broker token. The
+        // installing user is a client principal, not a broker token principal.
+        owner: SERVICE_ACCOUNT_SID.to_owned(),
         aces,
         installing_user_sid: installing_user_sid.to_owned(),
         service_sid: service_sid.to_owned(),
         broad_user_access_present,
         remote_clients_rejected: true,
         sddl: format!(
-            "O:{installing_user_sid}D:P(A;;GA;;;{installing_user_sid})(A;;GA;;;{service_sid})(A;;GA;;;{SYSTEM_SID})"
+            "O:{SERVICE_ACCOUNT_SID}D:P(A;;GA;;;{installing_user_sid})(A;;GA;;;{service_sid})(A;;GA;;;{SYSTEM_SID})"
         ),
     })
 }
@@ -1092,8 +1152,29 @@ mod tests {
         assert_eq!(evidence.aces.len(), 3);
         assert!(!evidence.broad_user_access_present);
         assert!(evidence.remote_clients_rejected);
+        assert_eq!(evidence.owner, SERVICE_ACCOUNT_SID);
+        assert!(evidence
+            .sddl
+            .starts_with(&format!("O:{SERVICE_ACCOUNT_SID}D:P")));
         assert!(evidence.sddl.contains("S-1-5-80-1-2-3-4-5"));
         assert!(evidence.sddl.contains(SYSTEM_SID));
+    }
+
+    #[test]
+    fn readiness_requires_live_listener_before_ready_and_running() {
+        let mut readiness = BrokerReadinessState::new();
+        assert!(readiness.publish_ready().is_err());
+        assert!(readiness.report_running().is_err());
+        assert!(!readiness.listener_created());
+        assert!(!readiness.ready_published());
+        assert!(!readiness.service_running());
+
+        readiness.mark_first_listener_created();
+        assert!(readiness.publish_ready().is_ok());
+        assert!(readiness.report_running().is_ok());
+        assert!(readiness.listener_created());
+        assert!(readiness.ready_published());
+        assert!(readiness.service_running());
     }
 
     #[test]

@@ -1,9 +1,10 @@
 use crate::package_power::{assess_cadence, parse_package_power_csv};
 use crate::{
-    authorize_client, build_pipe_dacl, check, decode_request, encode_json_frame, BrokerResponse,
-    ClientIdentity, MutationAssertions, ProtocolError, ResponseStatus, SemanticRequest,
-    SessionCoordinator, SessionError, SessionOwner, SessionResultSummary, SessionState,
-    SyntheticCheck, SyntheticQualificationSummary, MAX_FRAME_BYTES, PROTOCOL_VERSION,
+    authorize_client, build_pipe_dacl, check, decode_request, encode_json_frame,
+    BrokerReadinessState, BrokerResponse, ClientIdentity, MutationAssertions, ProtocolError,
+    ResponseStatus, SemanticRequest, SessionCoordinator, SessionError, SessionOwner,
+    SessionResultSummary, SessionState, SyntheticCheck, SyntheticQualificationSummary,
+    MAX_FRAME_BYTES, PROTOCOL_VERSION, SERVICE_ACCOUNT_SID,
 };
 use serde_json::json;
 use std::process::{Child, Command};
@@ -81,6 +82,36 @@ pub fn run(
             "PIPE_REMOTE_CLIENTS_REJECTED",
             acl_rejects_remote_clients(),
             "named-pipe creation uses PIPE_REJECT_REMOTE_CLIENTS",
+        ),
+        check(
+            "PIPE_OWNER_IS_BROKER_ACCOUNT",
+            pipe_owner_is_broker_account(),
+            "named-pipe SDDL owner is present in the LocalService broker token",
+        ),
+        check(
+            "PIPE_CREATE_FAILURE_DOES_NOT_PUBLISH_READY",
+            pipe_failure_does_not_publish_ready(),
+            "pipe creation failure cannot publish broker readiness",
+        ),
+        check(
+            "PIPE_CREATE_FAILURE_DOES_NOT_REPORT_RUNNING",
+            pipe_failure_does_not_report_running(),
+            "pipe creation failure cannot report SERVICE_RUNNING",
+        ),
+        check(
+            "PIPE_CREATE_SUCCESS_PRECEDES_READY",
+            pipe_create_success_precedes_ready(),
+            "the first live pipe is created before BROKER-READY",
+        ),
+        check(
+            "PIPE_CREATE_SUCCESS_PRECEDES_RUNNING",
+            pipe_create_success_precedes_running(),
+            "the first live pipe is created before SERVICE_RUNNING",
+        ),
+        check(
+            "READY_IMPLIES_FIRST_LISTENER_PREPARED",
+            ready_implies_first_listener_prepared(),
+            "published readiness implies a prepared first listener",
         ),
         check(
             "CLIENT_SID_CAPTURE",
@@ -294,6 +325,56 @@ fn acl_rejects_remote_clients() -> bool {
     build_pipe_dacl(&pipe, "S-1-5-21-1-2-3-1001", "S-1-5-80-1-2-3-4-5")
         .map(|dacl| dacl.remote_clients_rejected)
         .unwrap_or(false)
+}
+
+fn pipe_owner_is_broker_account() -> bool {
+    let pipe = crate::pipe_name_for_scope("0123456789abcdef0123456789abcdef").unwrap();
+    build_pipe_dacl(&pipe, "S-1-5-21-1-2-3-1001", "S-1-5-80-1-2-3-4-5")
+        .map(|dacl| dacl.owner == SERVICE_ACCOUNT_SID)
+        .unwrap_or(false)
+}
+
+fn pipe_failure_does_not_publish_ready() -> bool {
+    let readiness = BrokerReadinessState::new();
+    !readiness.listener_created()
+        && !readiness.ready_published()
+        && readiness.clone().publish_ready().is_err()
+}
+
+fn pipe_failure_does_not_report_running() -> bool {
+    let readiness = BrokerReadinessState::new();
+    !readiness.listener_created()
+        && !readiness.service_running()
+        && readiness.clone().report_running().is_err()
+}
+
+fn pipe_create_success_precedes_ready() -> bool {
+    let mut readiness = BrokerReadinessState::new();
+    if readiness.publish_ready().is_ok() {
+        return false;
+    }
+    readiness.mark_first_listener_created();
+    readiness.publish_ready().is_ok() && readiness.ready_published()
+}
+
+fn pipe_create_success_precedes_running() -> bool {
+    let mut readiness = BrokerReadinessState::new();
+    if readiness.report_running().is_ok() {
+        return false;
+    }
+    readiness.mark_first_listener_created();
+    if readiness.report_running().is_ok() {
+        return false;
+    }
+    readiness.publish_ready().is_ok()
+        && readiness.report_running().is_ok()
+        && readiness.service_running()
+}
+
+fn ready_implies_first_listener_prepared() -> bool {
+    let mut readiness = BrokerReadinessState::new();
+    readiness.mark_first_listener_created();
+    readiness.publish_ready().is_ok() && readiness.listener_created() && readiness.ready_published()
 }
 
 fn client_identity_captured() -> bool {

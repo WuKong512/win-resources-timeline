@@ -501,3 +501,63 @@ Medium, MediumPlus, High, System, null, and malformed values; no setup, client,
 pipe connection, Service registration, or AMD runtime is performed by those
 tests. The two historical setup scopes remain separate and are not reclassified
 as AMD failures.
+
+## AMD-PRIVILEGE-I2 PRE-SEMANTIC IPC LISTENER INCIDENT
+
+The third manually authorized setup created the LocalService broker and emitted
+`BROKER-READY.json` for scope `b258cfa5077f447198a13824d511091a`. The standard-
+user shell passed the real x64, same-user, non-administrator, Medium-integrity
+preflight, but the single client invocation failed opening the scoped named pipe
+with OS error 2. The Administrator cleanup passed and retained the complete
+scope. No client authentication, semantic request, session, or AMD CLI launch
+evidence exists in that scope.
+
+```text
+THIRD_MANUAL_I2_SETUP = BROKER_READY_FILE_OBSERVED
+THIRD_MANUAL_I2_SCOPE = b258cfa5077f447198a13824d511091a
+STANDARD_USER_CLIENT = BLOCKED_PRE_SEMANTIC_IPC_RUNTIME
+PIPE_OPEN = FAILED_OS_ERROR_2
+SEMANTIC_REQUEST_SENT = false
+SESSION_CREATED = false
+AMD_RUNTIME_EXECUTED = false
+THIRD_SETUP_CLEANUP = PASS
+REAL_AMD_RUNTIME_COUNT_DURING_INCIDENT_C = 0
+I2_REAL_AMD_RUNTIME_GATE_CONSUMED = false
+```
+
+The preserved `SERVICE-HARNESS-ERROR.json` records the exact broker failure:
+`CreateNamedPipeW failed: 1307`. Windows error 1307 means that the security ID
+cannot be assigned as the object owner. The preserved `PIPE_DACL.json` showed
+that the installing user SID was used as the SDDL owner even though that user
+was not present in the LocalService broker token. The explicit installing-user,
+Service SID, and SYSTEM allow ACEs were otherwise retained and broad user
+access remained absent. These are two distinct findings:
+
+```text
+PRIMARY_RUNTIME_FAILURE = CreateNamedPipeW failed: 1307 (invalid pipe owner SID)
+PIPE_CREATE_ROOT_CAUSE = PIPE_DACL_OWNER_SET_TO_INSTALLING_USER_SID_NOT_PRESENT_AS_LOCALSERVICE_BROKER_TOKEN_OWNER
+READINESS_CONTRACT_DEFECT = BROKER_READY_PUBLISHED_BEFORE_PIPE_LISTENER_CREATION
+BROKER_READY_PUBLISHED_BEFORE_LISTENER = true
+```
+
+The qualification-only broker repair uses the LocalService account SID
+(`S-1-5-19`) as the pipe security descriptor owner, keeps the three narrow
+allow ACEs, and creates the first live named-pipe instance before publishing
+`PIPE-LISTENER-READY.json`, `BROKER-READY.json`, or reporting
+`SERVICE_RUNNING`. The first listener is passed directly into the broker loop;
+it is not created and dropped as a readiness probe. Synthetic sequencing tests
+cover pipe failure, ready/running ordering, and the invariant that published
+readiness implies a live first listener. The Administrator setup wrapper also
+requires the exact qualification Service to still be `Running` after
+`BROKER-READY.json` appears. Historical scope `b258cfa5077f447198a13824d511091a`
+is immutable and is not reclassified as an AMD runtime failure.
+
+```text
+PRE_SEMANTIC_IPC_HARNESS_DEFECT = CLOSED
+I2_REAL_RUNTIME_GATE = NOT_YET_CONSUMED
+NEXT_MANUAL_RUNTIME = HUMAN_REQUIRED
+OLD_FROZEN_ARTIFACT_SHA256 = F76313FF123689C66A15112D43B1F87C33FE8DAD241AD6B98F0511247C3797A0
+OLD_ARTIFACT_STATUS = superseded
+NEW_FROZEN_ARTIFACT_ARCHITECTURE = x64
+NEW_FROZEN_ARTIFACT_SHA256 = BD15EDE1CB886844CE6DC628926C4F54C98AB2BD6A22091A18301B2017B987AF
+```

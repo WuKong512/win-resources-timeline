@@ -278,9 +278,22 @@ fn service_entry(
         coordinator: SessionCoordinator::new(),
         output_root: PathBuf::from(&config.output_root),
     };
-    set_service_running_hint(&state.output_root)?;
-    set_service_status(status_handle, SERVICE_RUNNING, 0, 0, 0)?;
-    broker_loop(&state)
+    let mut readiness = crate::BrokerReadinessState::new();
+    let first_pipe = create_pipe(&state.config)?;
+    readiness.mark_first_listener_created();
+    set_listener_handle(first_pipe.raw);
+    let readiness_result = (|| {
+        set_listener_ready_hint(&state.output_root, &state.config)?;
+        readiness.publish_ready().map_err(str::to_owned)?;
+        set_service_running_hint(&state.output_root)?;
+        readiness.report_running().map_err(str::to_owned)?;
+        set_service_status(status_handle, SERVICE_RUNNING, 0, 0, 0)
+    })();
+    if let Err(error) = readiness_result {
+        clear_listener_handle(first_pipe.raw);
+        return Err(error);
+    }
+    broker_loop(&state, first_pipe)
 }
 
 fn set_service_running_hint(root: &Path) -> Result<(), String> {
@@ -293,6 +306,8 @@ fn set_service_running_hint(root: &Path) -> Result<(), String> {
             "ipc": "WINDOWS_NAMED_PIPE",
             "semantic_protocol_only": true,
             "pipe_reject_remote_clients": true,
+            "listener_created": true,
+            "live_listener_handle": true,
             "client_disconnect_policy": CLIENT_DISCONNECT_POLICY,
             "active_sessions": 1
         }),
@@ -300,9 +315,45 @@ fn set_service_running_hint(root: &Path) -> Result<(), String> {
     .map_err(|error| format!("writing BROKER-READY.json failed: {error}"))
 }
 
-fn broker_loop(state: &BrokerState) -> Result<(), String> {
+fn set_listener_ready_hint(root: &Path, config: &BrokerConfig) -> Result<(), String> {
+    crate::write_json(
+        &root.join("PIPE-LISTENER-READY.json"),
+        &json!({
+            "schema": "amd-privilege-pipe-listener-ready/v1",
+            "qualification_only": QUALIFICATION_ONLY,
+            "pipe_name": config.pipe_name,
+            "listener_created": true,
+            "pipe_reject_remote_clients": true,
+            "semantic_protocol_only": true
+        }),
+    )
+    .map_err(|error| format!("writing PIPE-LISTENER-READY.json failed: {error}"))
+}
+
+fn set_listener_handle(raw: HANDLE) {
+    let mut listener = LISTENER
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    *listener = Some(raw.0 as isize);
+}
+
+fn clear_listener_handle(raw: HANDLE) {
+    let mut listener = LISTENER
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if listener.is_some_and(|handle| handle == raw.0 as isize) {
+        *listener = None;
+    }
+}
+
+fn broker_loop(state: &BrokerState, first_pipe: PipeHandle) -> Result<(), String> {
+    let mut pending_pipe = Some(first_pipe);
     while !STOP_REQUESTED.load(Ordering::Acquire) {
-        let pipe = match create_pipe(&state.config) {
+        let pipe = match pending_pipe.take() {
+            Some(pipe) => Ok(pipe),
+            None => create_pipe(&state.config),
+        };
+        let pipe = match pipe {
             Ok(pipe) => pipe,
             Err(error) => {
                 if STOP_REQUESTED.load(Ordering::Acquire) {
@@ -312,12 +363,7 @@ fn broker_loop(state: &BrokerState) -> Result<(), String> {
             }
         };
         let raw = pipe.raw;
-        {
-            let mut listener = LISTENER
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
-            *listener = Some(raw.0 as isize);
-        }
+        set_listener_handle(raw);
         let connected = match unsafe { ConnectNamedPipe(raw, None) } {
             Ok(()) => true,
             Err(error) if error.code().0 as u32 == 535 => true,
@@ -326,14 +372,7 @@ fn broker_loop(state: &BrokerState) -> Result<(), String> {
                 false
             }
         };
-        {
-            let mut listener = LISTENER
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
-            if listener.is_some_and(|handle| handle == raw.0 as isize) {
-                *listener = None;
-            }
-        }
+        clear_listener_handle(raw);
         if !connected {
             drop(pipe);
             if STOP_REQUESTED.load(Ordering::Acquire) {

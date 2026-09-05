@@ -9,7 +9,7 @@ $ServiceName = 'ResourceTimelineAmdPrivilegeQualification'
 $ServiceAccount = 'NT AUTHORITY\LocalService'
 $ServiceSidAccount = "NT SERVICE\$ServiceName"
 $ArtifactPath = Join-Path $PSScriptRoot 'target\release\amd-privilege-qualification.exe'
-$ExpectedArtifactSha256 = 'F76313FF123689C66A15112D43B1F87C33FE8DAD241AD6B98F0511247C3797A0'
+$ExpectedArtifactSha256 = 'BD15EDE1CB886844CE6DC628926C4F54C98AB2BD6A22091A18301B2017B987AF'
 $QualificationRoot = Join-Path $env:ProgramData 'ResourceTimeline\qualification\amd-privilege'
 $ConfigPath = Join-Path $QualificationRoot 'BROKER-CONFIG.json'
 . (Join-Path $PSScriptRoot 'sc-argument-contract.ps1')
@@ -241,6 +241,11 @@ try {
     }
     if (-not (Test-Path -LiteralPath $readyPath -PathType Leaf)) {
         throw 'Broker did not publish BROKER-READY.json within the bounded setup wait.'
+    }
+    $serviceState = Get-Service -Name $ServiceName -ErrorAction SilentlyContinue
+    if ($null -eq $serviceState -or $serviceState.Status -ne 'Running') {
+        $observedStatus = if ($null -eq $serviceState) { 'ABSENT' } else { [string]$serviceState.Status }
+        throw "BROKER-READY.json exists but qualification service is not Running (observed status: $observedStatus)."
     }
     Write-Host "Broker is ready. Keep this Administrator shell for cleanup; the standard-user client is a separate non-elevated shell."
     Write-Host "Config: $ConfigPath"
