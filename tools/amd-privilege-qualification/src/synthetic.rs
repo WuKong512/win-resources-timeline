@@ -2,9 +2,11 @@ use crate::package_power::{assess_cadence, parse_package_power_csv};
 use crate::{
     authorize_client, build_pipe_dacl, check, decode_request, encode_json_frame,
     hresult_from_win32_contract, hresult_matches_win32_contract, identity_contract_allows_dispatch,
-    identity_resource_contract_is_closed, service_stop_contract_is_valid,
-    win32_code_from_hresult_contract, BrokerReadinessState, BrokerResponse, ClientIdentity,
-    FirstAcceptState, IdentityContractObservation, MutationAssertions, ProtocolError,
+    identity_resource_contract_is_closed, pending_accept_cancel_is_drained,
+    pending_accept_release_is_safe, pending_accept_state_after_cancel,
+    service_stop_contract_is_valid, win32_code_from_hresult_contract, BrokerReadinessState,
+    BrokerResponse, ClientIdentity, FirstAcceptState, IdentityContractObservation,
+    MutationAssertions, PendingAcceptCompletion, PendingAcceptLifecycleState, ProtocolError,
     ResponseStatus, SemanticRequest, SessionCoordinator, SessionError, SessionOwner,
     SessionResultSummary, SessionState, SyntheticCheck, SyntheticQualificationSummary,
     MAX_FRAME_BYTES, PROTOCOL_VERSION, SERVICE_ACCOUNT_SID,
@@ -155,6 +157,51 @@ pub fn run(
             "PENDING_OVERLAPPED_STORAGE_REMAINS_STABLE",
             pending_overlapped_storage_remains_stable(),
             "pending accept state owns stable OVERLAPPED storage",
+        ),
+        check(
+            "IO_PENDING_CANNOT_RELEASE_BEFORE_TERMINAL_COMPLETION",
+            io_pending_cannot_release_before_terminal_completion(),
+            "an IO_PENDING accept cannot release kernel-visible resources before completion",
+        ),
+        check(
+            "EARLY_STOP_AFTER_ARM_CANCELS_AND_DRAINS",
+            early_stop_after_arm_cancels_and_drains(),
+            "early service stop requires cancellation followed by terminal completion",
+        ),
+        check(
+            "READINESS_FAILURE_AFTER_ARM_CANCELS_AND_DRAINS",
+            readiness_failure_after_arm_cancels_and_drains(),
+            "startup readiness failure drains the exact pending accept",
+        ),
+        check(
+            "RUNNING_STATUS_FAILURE_AFTER_ARM_CANCELS_AND_DRAINS",
+            running_status_failure_after_arm_cancels_and_drains(),
+            "SERVICE_RUNNING failure drains the exact pending accept",
+        ),
+        check(
+            "CANCEL_REQUEST_ALONE_DOES_NOT_COUNT_AS_DRAINED",
+            cancel_request_alone_does_not_count_as_drained(),
+            "CancelIoEx is not treated as completion by itself",
+        ),
+        check(
+            "ERROR_OPERATION_ABORTED_COUNTS_AS_TERMINAL_CANCELLATION",
+            operation_aborted_counts_as_terminal_cancellation(),
+            "ERROR_OPERATION_ABORTED is terminal after cancellation",
+        ),
+        check(
+            "NORMAL_COMPLETION_RACING_WITH_CANCEL_IS_SAFE",
+            normal_completion_racing_with_cancel_is_safe(),
+            "normal completion racing with cancellation is safely releasable",
+        ),
+        check(
+            "ERROR_NOT_FOUND_CANCEL_RACE_DOES_NOT_FREE_UNCONFIRMED_OVERLAPPED",
+            error_not_found_cancel_race_does_not_free_unconfirmed_overlapped(),
+            "ERROR_NOT_FOUND from CancelIoEx still requires completion observation",
+        ),
+        check(
+            "OVERLAPPED_ADDRESS_STABLE_WHILE_PENDING",
+            pending_overlapped_storage_remains_stable(),
+            "OVERLAPPED storage remains stable for the entire pending lifetime",
         ),
         check(
             "STOP_CANCELS_PENDING_ACCEPT",
@@ -650,6 +697,53 @@ fn pending_overlapped_storage_remains_stable() -> bool {
     let address = storage.as_ptr();
     let moved = storage;
     moved.as_ptr() == address
+}
+
+fn io_pending_cannot_release_before_terminal_completion() -> bool {
+    !pending_accept_release_is_safe(PendingAcceptLifecycleState::IoPending)
+        && !pending_accept_release_is_safe(PendingAcceptLifecycleState::CancelRequested)
+        && pending_accept_release_is_safe(PendingAcceptLifecycleState::TerminalCompletionObserved)
+}
+
+fn early_stop_after_arm_cancels_and_drains() -> bool {
+    let state = pending_accept_state_after_cancel(PendingAcceptCompletion::OperationAborted);
+    pending_accept_cancel_is_drained(state)
+        && !pending_accept_cancel_is_drained(PendingAcceptLifecycleState::CancelRequested)
+}
+
+fn readiness_failure_after_arm_cancels_and_drains() -> bool {
+    let startup_state = PendingAcceptLifecycleState::IoPending;
+    let after_cancel = pending_accept_state_after_cancel(PendingAcceptCompletion::Failed);
+    startup_state == PendingAcceptLifecycleState::IoPending
+        && pending_accept_release_is_safe(after_cancel)
+        && pending_accept_cancel_is_drained(after_cancel)
+}
+
+fn running_status_failure_after_arm_cancels_and_drains() -> bool {
+    let after_cancel = pending_accept_state_after_cancel(PendingAcceptCompletion::Failed);
+    pending_accept_release_is_safe(after_cancel) && pending_accept_cancel_is_drained(after_cancel)
+}
+
+fn cancel_request_alone_does_not_count_as_drained() -> bool {
+    let state = pending_accept_state_after_cancel(PendingAcceptCompletion::NotObserved);
+    !pending_accept_cancel_is_drained(state) && !pending_accept_release_is_safe(state)
+}
+
+fn operation_aborted_counts_as_terminal_cancellation() -> bool {
+    let state = pending_accept_state_after_cancel(PendingAcceptCompletion::OperationAborted);
+    pending_accept_cancel_is_drained(state) && pending_accept_release_is_safe(state)
+}
+
+fn normal_completion_racing_with_cancel_is_safe() -> bool {
+    let state = pending_accept_state_after_cancel(PendingAcceptCompletion::Normal);
+    pending_accept_release_is_safe(state) && pending_accept_cancel_is_drained(state)
+}
+
+fn error_not_found_cancel_race_does_not_free_unconfirmed_overlapped() -> bool {
+    let before_completion = pending_accept_state_after_cancel(PendingAcceptCompletion::NotObserved);
+    let after_completion = pending_accept_state_after_cancel(PendingAcceptCompletion::Normal);
+    !pending_accept_release_is_safe(before_completion)
+        && pending_accept_release_is_safe(after_completion)
 }
 
 fn stop_cancels_pending_accept() -> bool {

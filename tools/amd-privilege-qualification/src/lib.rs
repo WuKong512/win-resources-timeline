@@ -49,6 +49,66 @@ pub enum FirstAcceptState {
     IoPending,
 }
 
+/// Lifecycle states used by the pending-accept ownership contract.
+///
+/// An `IoPending` accept owns kernel-visible OVERLAPPED storage.  A cancellation request is
+/// only an intent to cancel; the resources become releasable after a terminal completion has
+/// been observed.  The Windows implementation enforces this contract with
+/// `GetOverlappedResult(..., true)` before releasing the owned pipe, event, or OVERLAPPED.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PendingAcceptLifecycleState {
+    Created,
+    IoPending,
+    CancelRequested,
+    TerminalCompletionObserved,
+    Connected,
+    Failed,
+    Released,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PendingAcceptCompletion {
+    NotObserved,
+    Normal,
+    OperationAborted,
+    Failed,
+}
+
+/// Models the only safe outcomes after a cancellation request.  In particular, a cancellation
+/// request without a completion observation remains `CancelRequested` and is not releasable.
+pub const fn pending_accept_state_after_cancel(
+    completion: PendingAcceptCompletion,
+) -> PendingAcceptLifecycleState {
+    match completion {
+        PendingAcceptCompletion::NotObserved => PendingAcceptLifecycleState::CancelRequested,
+        PendingAcceptCompletion::Normal => PendingAcceptLifecycleState::Connected,
+        PendingAcceptCompletion::OperationAborted => {
+            PendingAcceptLifecycleState::TerminalCompletionObserved
+        }
+        PendingAcceptCompletion::Failed => PendingAcceptLifecycleState::Failed,
+    }
+}
+
+/// Returns whether it is safe to release an accept's kernel-visible resources.
+pub const fn pending_accept_release_is_safe(state: PendingAcceptLifecycleState) -> bool {
+    matches!(
+        state,
+        PendingAcceptLifecycleState::TerminalCompletionObserved
+            | PendingAcceptLifecycleState::Connected
+            | PendingAcceptLifecycleState::Failed
+    )
+}
+
+/// Returns whether cancellation has been followed by an authoritative terminal observation.
+pub const fn pending_accept_cancel_is_drained(state: PendingAcceptLifecycleState) -> bool {
+    matches!(
+        state,
+        PendingAcceptLifecycleState::TerminalCompletionObserved
+            | PendingAcceptLifecycleState::Connected
+            | PendingAcceptLifecycleState::Failed
+    )
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct BrokerReadinessState {
     listener_created: bool,
@@ -1304,6 +1364,25 @@ mod tests {
         );
         assert!(readiness.ready_published());
         assert!(readiness.service_running());
+    }
+
+    #[test]
+    fn pending_accept_requires_terminal_completion_before_release() {
+        assert!(!pending_accept_release_is_safe(
+            PendingAcceptLifecycleState::IoPending
+        ));
+        assert!(!pending_accept_release_is_safe(
+            pending_accept_state_after_cancel(PendingAcceptCompletion::NotObserved)
+        ));
+        assert!(pending_accept_release_is_safe(
+            pending_accept_state_after_cancel(PendingAcceptCompletion::OperationAborted)
+        ));
+        assert!(pending_accept_release_is_safe(
+            pending_accept_state_after_cancel(PendingAcceptCompletion::Normal)
+        ));
+        assert!(pending_accept_cancel_is_drained(
+            pending_accept_state_after_cancel(PendingAcceptCompletion::Failed)
+        ));
     }
 
     #[test]

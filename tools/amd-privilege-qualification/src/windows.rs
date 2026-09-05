@@ -29,8 +29,8 @@ use std::time::{Duration, Instant};
 use windows::core::{HRESULT, PCWSTR, PWSTR};
 use windows::Win32::Foundation::{
     CloseHandle, GetLastError, ERROR_BROKEN_PIPE, ERROR_IO_PENDING, ERROR_MORE_DATA,
-    ERROR_OPERATION_ABORTED, ERROR_PIPE_CONNECTED, HANDLE, HLOCAL, WAIT_FAILED, WAIT_OBJECT_0,
-    WIN32_ERROR,
+    ERROR_NOT_FOUND, ERROR_OPERATION_ABORTED, ERROR_PIPE_CONNECTED, HANDLE, HLOCAL, WAIT_FAILED,
+    WAIT_OBJECT_0, WIN32_ERROR,
 };
 use windows::Win32::Security::Authorization::{
     ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1,
@@ -403,12 +403,12 @@ fn service_entry(
     let first_pipe = create_pipe(&state.config)?;
     let first_accept = arm_pipe_accept(first_pipe)?;
     if STOP_REQUESTED.load(Ordering::Acquire) {
-        return Ok(());
+        return abandon_startup_accept(&state.output_root, first_accept, None);
     }
     readiness.mark_first_listener_created();
-    readiness
-        .mark_first_accept_armed(first_accept.readiness_state())
-        .map_err(str::to_owned)?;
+    if let Err(error) = readiness.mark_first_accept_armed(first_accept.readiness_state()) {
+        return abandon_startup_accept(&state.output_root, first_accept, Some(error.to_owned()));
+    }
     let readiness_result = (|| {
         set_listener_ready_hint(
             &state.output_root,
@@ -420,8 +420,68 @@ fn service_entry(
         readiness.report_running().map_err(str::to_owned)?;
         set_service_status(status_handle, SERVICE_RUNNING, 0, 0, 0)
     })();
-    readiness_result?;
+    if let Err(error) = readiness_result {
+        return abandon_startup_accept(&state.output_root, first_accept, Some(error));
+    }
     broker_loop(&state, first_accept, stop_event.raw())
+}
+
+fn abandon_startup_accept(
+    output_root: &Path,
+    accept: ArmedPipeAccept,
+    primary_failure: Option<String>,
+) -> Result<(), String> {
+    let cancellation_requested = accept.is_io_pending();
+    let drain_result = accept.cancel_and_drain();
+    let (terminal_state, drained, drain_error) = match &drain_result {
+        Ok(state) => (pending_accept_terminal_state_name(*state), true, None),
+        Err(error) => ("FAILED", false, Some(error.clone())),
+    };
+    let primary_label = primary_failure
+        .as_deref()
+        .unwrap_or("STOP_REQUESTED_BEFORE_READY");
+    let _ = crate::write_json(
+        &output_root.join("PENDING-ACCEPT-CLEANUP.json"),
+        &json!({
+            "schema": "amd-privilege-pending-accept-cleanup/v1",
+            "qualification_only": QUALIFICATION_ONLY,
+            "primary_startup_failure": primary_label,
+            "pending_accept_cancellation_requested": cancellation_requested,
+            "pending_accept_terminal_state": terminal_state,
+            "pending_accept_drained": drained,
+            "pending_accept_drain_error": drain_error,
+        }),
+    );
+
+    match (primary_failure, drain_result) {
+        (None, Ok(_)) => Ok(()),
+        (None, Err(error)) => Err(format!(
+            "stop requested before readiness, but pending accept drain failed: {error}"
+        )),
+        (Some(error), Ok(_)) => Err(error),
+        (Some(error), Err(drain_error)) => Err(format!(
+            "{error}; pending accept drain failed: {drain_error}"
+        )),
+    }
+}
+
+fn pending_accept_terminal_state_name(state: PendingAcceptTerminalState) -> &'static str {
+    match state {
+        PendingAcceptTerminalState::Connected => "CONNECTED",
+        PendingAcceptTerminalState::Cancelled => "CANCELLED",
+    }
+}
+
+fn return_after_accept_drain<T>(
+    accept: ArmedPipeAccept,
+    primary_error: String,
+) -> Result<T, String> {
+    match accept.cancel_and_drain() {
+        Ok(_) => Err(primary_error),
+        Err(drain_error) => Err(format!(
+            "{primary_error}; pending accept drain failed: {drain_error}"
+        )),
+    }
 }
 
 fn set_service_running_hint(
@@ -515,7 +575,13 @@ fn broker_loop(
         thread::spawn(move || handle_connection(stream, state));
     }
     state.coordinator.cancel_active_on_shutdown();
-    Ok(())
+    if let Some(accept) = pending_accept.take() {
+        accept.cancel_and_drain().map(|_| ()).map_err(|error| {
+            format!("draining pending named-pipe accept during shutdown failed: {error}")
+        })
+    } else {
+        Ok(())
+    }
 }
 
 fn handle_connection(mut stream: NamedPipeStream, state: BrokerState) {
@@ -1530,13 +1596,22 @@ fn create_io_event() -> Result<OwnedHandle, String> {
     OwnedHandle::new(event, "CreateEventW")
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PendingAcceptTerminalState {
+    Connected,
+    Cancelled,
+}
+
 struct ArmedPipeAccept {
-    pipe: PipeHandle,
-    connect_event: OwnedHandle,
+    pipe: Option<PipeHandle>,
+    connect_event: Option<OwnedHandle>,
     // This Box is intentional: Windows may dereference the OVERLAPPED after ConnectNamedPipe
-    // returns ERROR_IO_PENDING.  Its address remains stable until wait/cancel consumes this value.
-    overlapped: Box<OVERLAPPED>,
+    // returns ERROR_IO_PENDING.  Its address remains stable until wait/cancel observes terminal
+    // completion.  The Option allows Drop to leak the exact resources rather than release memory
+    // while Windows could still reference it if an exceptional drain failure occurs.
+    overlapped: Option<Box<OVERLAPPED>>,
     state: crate::FirstAcceptState,
+    pending_io_consumed: bool,
 }
 
 impl ArmedPipeAccept {
@@ -1545,11 +1620,162 @@ impl ArmedPipeAccept {
     }
 
     fn overlapped_ptr(&self) -> *const OVERLAPPED {
-        self.overlapped.as_ref() as *const OVERLAPPED
+        self.overlapped
+            .as_deref()
+            .map_or(std::ptr::null(), |overlapped| {
+                overlapped as *const OVERLAPPED
+            })
     }
 
-    fn into_pipe(self) -> PipeHandle {
+    fn pipe_raw(&self) -> HANDLE {
         self.pipe
+            .as_ref()
+            .expect("armed pipe accept must own a pipe until consumed")
+            .raw
+    }
+
+    fn connect_event_raw(&self) -> HANDLE {
+        self.connect_event
+            .as_ref()
+            .expect("armed pipe accept must own a connect event until consumed")
+            .raw()
+    }
+
+    fn is_io_pending(&self) -> bool {
+        matches!(self.state, crate::FirstAcceptState::IoPending) && !self.pending_io_consumed
+    }
+
+    fn mark_normal_completion(&mut self) {
+        self.state = crate::FirstAcceptState::Connected;
+        self.pending_io_consumed = true;
+    }
+
+    fn mark_cancelled_completion(&mut self) {
+        self.pending_io_consumed = true;
+    }
+
+    fn into_pipe(mut self) -> Result<PipeHandle, String> {
+        if self.is_io_pending() {
+            return Err(
+                "cannot release a pending named-pipe accept before terminal completion".to_owned(),
+            );
+        }
+        self.pending_io_consumed = true;
+        self.pipe
+            .take()
+            .ok_or_else(|| "named-pipe accept handle was already consumed".to_owned())
+    }
+
+    fn cancel_and_drain(mut self) -> Result<PendingAcceptTerminalState, String> {
+        self.cancel_and_drain_in_place()
+    }
+
+    fn cancel_and_drain_in_place(&mut self) -> Result<PendingAcceptTerminalState, String> {
+        if self.pending_io_consumed {
+            return Ok(
+                if matches!(self.state, crate::FirstAcceptState::IoPending) {
+                    PendingAcceptTerminalState::Cancelled
+                } else {
+                    PendingAcceptTerminalState::Connected
+                },
+            );
+        }
+        if !matches!(self.state, crate::FirstAcceptState::IoPending) {
+            self.pending_io_consumed = true;
+            return Ok(PendingAcceptTerminalState::Connected);
+        }
+
+        let Some(pipe) = self.pipe.as_ref() else {
+            return Err("pending named-pipe accept lost its pipe handle".to_owned());
+        };
+        let overlapped = self.overlapped_ptr();
+        if overlapped.is_null() {
+            return Err("pending named-pipe accept lost its OVERLAPPED storage".to_owned());
+        }
+
+        let cancel_error = unsafe { CancelIoEx(pipe.raw, Some(overlapped)) }.err();
+        let unexpected_cancel_error = cancel_error
+            .as_ref()
+            .filter(|error| !error_is_win32(error, ERROR_NOT_FOUND))
+            .map(ToString::to_string);
+        if let Some(error) = cancel_error
+            .as_ref()
+            .filter(|error| !error_is_win32(error, ERROR_NOT_FOUND))
+        {
+            record_windows_service_error("CancelIoEx for pending named-pipe accept", error);
+        }
+
+        let mut transferred = 0_u32;
+        let completion =
+            unsafe { GetOverlappedResult(pipe.raw, overlapped, &mut transferred, true) };
+        match completion {
+            Ok(()) => {
+                self.mark_normal_completion();
+                if let Some(error) = unexpected_cancel_error {
+                    return Err(format!(
+                        "CancelIoEx failed after named-pipe accept completed normally: {error}"
+                    ));
+                }
+                Ok(PendingAcceptTerminalState::Connected)
+            }
+            Err(error) if error_is_win32(&error, ERROR_OPERATION_ABORTED) => {
+                self.mark_cancelled_completion();
+                if let Some(cancel_error) = unexpected_cancel_error {
+                    return Err(format!(
+                        "CancelIoEx failed although pending accept completed as aborted: {cancel_error}"
+                    ));
+                }
+                Ok(PendingAcceptTerminalState::Cancelled)
+            }
+            Err(error) => {
+                self.mark_cancelled_completion();
+                record_windows_service_error(
+                    "GetOverlappedResult while draining pending named-pipe accept",
+                    &error,
+                );
+                let completion_error = format!(
+                    "GetOverlappedResult while draining pending named-pipe accept failed: {error}"
+                );
+                if let Some(cancel_error) = unexpected_cancel_error {
+                    Err(format!("{cancel_error}; {completion_error}"))
+                } else {
+                    Err(completion_error)
+                }
+            }
+        }
+    }
+}
+
+impl Drop for ArmedPipeAccept {
+    fn drop(&mut self) {
+        if !self.is_io_pending() {
+            return;
+        }
+
+        // Normal paths call cancel_and_drain explicitly.  Drop is deliberately non-blocking: it
+        // requests cancellation and leaks the exact resources if a future path forgets to drain,
+        // rather than introducing an unbounded destructor wait or freeing memory that Windows may
+        // still reference.  The leak is a last-resort safety net, not a completion claim.
+        let cancel_error = match (self.pipe.as_ref(), self.overlapped.as_ref()) {
+            (Some(pipe), Some(overlapped)) => unsafe {
+                CancelIoEx(pipe.raw, Some(overlapped.as_ref() as *const OVERLAPPED)).err()
+            },
+            _ => None,
+        };
+        remember_service_error_details(json!({
+            "pending_accept_drop_cancellation_requested": true,
+            "pending_accept_drop_drained": false,
+            "pending_accept_drop_cancel_error": cancel_error.as_ref().map(ToString::to_string),
+        }));
+        if let Some(pipe) = self.pipe.take() {
+            std::mem::forget(pipe);
+        }
+        if let Some(event) = self.connect_event.take() {
+            std::mem::forget(event);
+        }
+        if let Some(overlapped) = self.overlapped.take() {
+            std::mem::forget(overlapped);
+        }
     }
 }
 
@@ -1581,39 +1807,54 @@ fn arm_pipe_accept(pipe: PipeHandle) -> Result<ArmedPipeAccept, String> {
         }
     };
     Ok(ArmedPipeAccept {
-        pipe,
-        connect_event,
-        overlapped,
+        pipe: Some(pipe),
+        connect_event: Some(connect_event),
+        overlapped: Some(overlapped),
         state,
+        pending_io_consumed: false,
     })
 }
 
 fn wait_for_pipe_accept(
-    accept: ArmedPipeAccept,
+    mut accept: ArmedPipeAccept,
     stop_event: HANDLE,
 ) -> Result<Option<PipeHandle>, String> {
     if !matches!(accept.state, crate::FirstAcceptState::IoPending) {
-        return Ok((!STOP_REQUESTED.load(Ordering::Acquire)).then(|| accept.into_pipe()));
+        if STOP_REQUESTED.load(Ordering::Acquire) {
+            return match accept.cancel_and_drain() {
+                Ok(_) => Ok(None),
+                Err(error) => Err(error),
+            };
+        }
+        return accept.into_pipe().map(Some);
     }
 
-    let handles = [accept.connect_event.raw(), stop_event];
+    let handles = [accept.connect_event_raw(), stop_event];
     let wait_result = unsafe { WaitForMultipleObjects(&handles, false, INFINITE) };
     match wait_result.0 {
         value if value == WAIT_OBJECT_0.0 => {
             let mut transferred = 0_u32;
             match unsafe {
                 GetOverlappedResult(
-                    accept.pipe.raw,
+                    accept.pipe_raw(),
                     accept.overlapped_ptr(),
                     &mut transferred,
                     false,
                 )
             } {
-                Ok(()) => Ok((!STOP_REQUESTED.load(Ordering::Acquire)).then(|| accept.into_pipe())),
+                Ok(()) => {
+                    accept.mark_normal_completion();
+                    if STOP_REQUESTED.load(Ordering::Acquire) {
+                        Ok(None)
+                    } else {
+                        accept.into_pipe().map(Some)
+                    }
+                }
                 Err(error)
                     if STOP_REQUESTED.load(Ordering::Acquire)
                         && error_is_win32(&error, ERROR_OPERATION_ABORTED) =>
                 {
+                    accept.mark_cancelled_completion();
                     Ok(None)
                 }
                 Err(error) => {
@@ -1621,42 +1862,29 @@ fn wait_for_pipe_accept(
                         "GetOverlappedResult for named-pipe connect",
                         &error,
                     );
-                    Err(format!(
-                        "GetOverlappedResult for named-pipe connect failed: {error}"
-                    ))
+                    return_after_accept_drain(
+                        accept,
+                        format!("GetOverlappedResult for named-pipe connect failed: {error}"),
+                    )
                 }
             }
         }
-        value if value == WAIT_OBJECT_0.0 + 1 => {
-            let _ = unsafe { CancelIoEx(accept.pipe.raw, Some(accept.overlapped_ptr())) };
-            let mut transferred = 0_u32;
-            match unsafe {
-                GetOverlappedResult(
-                    accept.pipe.raw,
-                    accept.overlapped_ptr(),
-                    &mut transferred,
-                    true,
-                )
-            } {
-                Ok(()) => Ok(None),
-                Err(error) if error_is_win32(&error, ERROR_OPERATION_ABORTED) => Ok(None),
-                Err(error) => {
-                    record_windows_service_error(
-                        "GetOverlappedResult after named-pipe accept cancellation",
-                        &error,
-                    );
-                    Err(format!(
-                        "GetOverlappedResult after named-pipe accept cancellation failed: {error}"
-                    ))
-                }
-            }
-        }
+        value if value == WAIT_OBJECT_0.0 + 1 => match accept.cancel_and_drain() {
+            Ok(_) => Ok(None),
+            Err(error) => Err(error),
+        },
         value if value == WAIT_FAILED.0 => {
             let win32_error = unsafe { GetLastError().0 };
             record_win32_service_error("WaitForMultipleObjects", win32_error);
-            Err(format!("WaitForMultipleObjects failed: {win32_error}"))
+            return_after_accept_drain(
+                accept,
+                format!("WaitForMultipleObjects failed: {win32_error}"),
+            )
         }
-        value => Err(format!("unexpected WaitForMultipleObjects result: {value}")),
+        value => return_after_accept_drain(
+            accept,
+            format!("unexpected WaitForMultipleObjects result: {value}"),
+        ),
     }
 }
 

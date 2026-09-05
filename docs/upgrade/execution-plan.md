@@ -732,3 +732,54 @@ The historical Incident E scope and its error evidence remain immutable and
 are not reclassified as an AMD runtime failure. The cleanup `1062` path has
 real-machine reaccreditation, but the live running-Service stop-event path
 still requires a future successfully running broker.
+
+## AMD-PRIVILEGE-I2 PENDING ACCEPT LIFETIME CLOSURE
+
+Static review at the next pre-runtime gate found that an `IO_PENDING` first
+accept could be dropped on early stop or readiness failure before terminal
+completion had been observed. This was a lifecycle defect only; no new
+qualification setup, Service, client, IPC connection, or AMD runtime was
+executed.
+
+```text
+DEFECT = PRE_RUNTIME_PENDING_ACCEPT_LIFETIME_GUARD_MISSING
+DISCOVERED_BY = STATIC_CODE_REVIEW
+IO_PENDING_OVERLAPPED_RELEASE_BEFORE_COMPLETION_POSSIBLE_BEFORE_REPAIR = true
+EARLY_STOP_AFTER_ARM_SAFE = true
+READINESS_FAILURE_AFTER_ARM_SAFE = true
+SET_SERVICE_RUNNING_FAILURE_AFTER_ARM_SAFE = true
+CANCEL_AND_DRAIN = CancelIoEx exact OVERLAPPED + GetOverlappedResult terminal wait
+CANCEL_REQUEST_ALONE_COUNTS_AS_COMPLETION = false
+ERROR_OPERATION_ABORTED_TERMINAL = true
+ERROR_NOT_FOUND_CANCEL_RACE_REQUIRES_COMPLETION = true
+NORMAL_COMPLETION_CANCEL_RACE_SAFE = true
+FIRST_ARMED_ACCEPT_REUSED = true
+OVERLAPPED_STORAGE_STABLE_UNTIL_TERMINAL_COMPLETION = true
+PENDING_ACCEPT_LIFETIME_GUARD = CLOSED
+REAL_AMD_RUNTIME_COUNT_DURING_REPAIR = 0
+SERVICE_REGISTRATION_COUNT_DURING_REPAIR = 0
+REAL_IPC_CLIENT_COUNT_DURING_REPAIR = 0
+I2_REAL_RUNTIME_GATE_CONSUMED = false
+NEXT_GATE = HUMAN_SETUP_ONLY
+```
+
+Startup early-return and readiness-failure paths now explicitly cancel and
+drain the exact pending accept before returning. The accept owner also has a
+non-blocking Drop safety net: if a future exceptional path still forgets the
+explicit drain, it requests cancellation and leaks the exact pipe, event, and
+`OVERLAPPED` rather than freeing storage that Windows may still reference.
+Normal broker and stop paths continue to wait for authoritative completion,
+reuse the first armed accept, and preserve the existing HRESULT normalization,
+named-pipe impersonation, LocalService, Service SID, and overlapped stop
+architecture.
+
+The previous release artifact is historical and immutable. The new offline
+x64 release artifact is the only artifact referenced by the active wrappers:
+
+```text
+OLD_FROZEN_ARTIFACT_SHA256 = A656B0E95AA2BAEB0E09FE729AA502C23BF09C6F894766680D49026720B790CD
+OLD_ARTIFACT_STATUS = superseded
+NEW_FROZEN_ARTIFACT_ARCHITECTURE = x64
+NEW_FROZEN_ARTIFACT_SHA256 = DD73C52BBC1E38103580351ED49D50F044C7F7A35463406791C5AE51876754AF
+NEXT_GATE = HUMAN_SETUP_ONLY
+```
