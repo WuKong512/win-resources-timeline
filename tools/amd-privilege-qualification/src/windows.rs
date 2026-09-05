@@ -6,17 +6,20 @@
 
 use crate::package_power::{assess_cadence, parse_package_power_csv};
 use crate::{
-    authorize_client, build_pipe_dacl, decode_request, encode_json_frame, request_id_from_json,
+    authorize_client, build_pipe_dacl, classify_counter_discovery, decode_request,
+    encode_json_frame, no_counters_available_diagnostic, request_id_from_json,
     response_for_protocol_error, response_for_session_error, BrokerConfig, BrokerResponse,
-    ClientIdentity, ProviderStatus, ResponseStatus, SemanticRequest, SessionCoordinator,
-    SessionResultSummary, SessionState, CLIENT_DISCONNECT_POLICY, FIXED_EVENT, OUTPUT_SUBDIRECTORY,
-    QUALIFICATION_ONLY, SERVICE_ACCOUNT_SID, SERVICE_NAME, SERVICE_SID_ACCOUNT,
+    ClientIdentity, CounterDiscoveryAvailability, CounterDiscoveryStatus, ProviderStatus,
+    ResponseStatus, SemanticRequest, SessionCoordinator, SessionResultSummary, SessionState,
+    CLIENT_DISCONNECT_POLICY, COUNTER_DISCOVERY_MAX_OUTPUT_BYTES, COUNTER_DISCOVERY_TIMEOUT_MS,
+    FIXED_EVENT, OUTPUT_SUBDIRECTORY, QUALIFICATION_ONLY, SERVICE_ACCOUNT_SID, SERVICE_NAME,
+    SERVICE_SID_ACCOUNT,
 };
 use serde::Serialize;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::fs::{self, File};
-use std::io::{self, Write};
+use std::io::{self, Read, Write};
 use std::mem::size_of;
 use std::os::windows::io::{AsRawHandle, FromRawHandle};
 use std::os::windows::process::CommandExt;
@@ -41,9 +44,10 @@ use windows::Win32::Security::WinTrust::{
     WTD_STATEACTION_IGNORE, WTD_UI_NONE,
 };
 use windows::Win32::Security::{
-    GetTokenInformation, RevertToSelf, TokenElevation, TokenGroups, TokenIntegrityLevel,
-    TokenSessionId, TokenUser, TOKEN_ELEVATION, TOKEN_GROUPS, TOKEN_INFORMATION_CLASS,
-    TOKEN_MANDATORY_LABEL, TOKEN_QUERY, TOKEN_USER,
+    GetTokenInformation, LookupPrivilegeNameW, RevertToSelf, TokenElevation, TokenGroups,
+    TokenIntegrityLevel, TokenPrivileges, TokenSessionId, TokenUser, LUID_AND_ATTRIBUTES,
+    SE_PRIVILEGE_ENABLED, TOKEN_ELEVATION, TOKEN_GROUPS, TOKEN_INFORMATION_CLASS,
+    TOKEN_MANDATORY_LABEL, TOKEN_PRIVILEGES, TOKEN_QUERY, TOKEN_USER,
 };
 use windows::Win32::Storage::FileSystem::{
     CreateFileW, GetFileVersionInfoSizeW, GetFileVersionInfoW, ReadFile, VerQueryValueW, WriteFile,
@@ -177,6 +181,9 @@ struct ServiceContextEvidence {
     process_architecture: String,
     integrity_sid: Option<String>,
     token_elevated: Option<bool>,
+    enabled_privileges: Vec<String>,
+    disabled_privileges: Vec<String>,
+    token_groups_relevant_to_access: Vec<String>,
     context_valid: bool,
 }
 
@@ -1018,6 +1025,9 @@ fn dispatch_request(
             };
             BrokerResponse::new(request_id, ResponseStatus::Ok).with_provider_status(status)
         }
+        SemanticRequest::GetAmdCounterAvailability { request_id, .. } => {
+            discover_counter_availability(request_id, state)
+        }
         SemanticRequest::StartAmdPowerSession {
             request_id,
             duration_ms,
@@ -1035,6 +1045,146 @@ fn dispatch_request(
             ..
         } => cancel_session(request_id, session_id, identity, state),
     }
+}
+
+fn discover_counter_availability(request_id: &str, state: &BrokerState) -> BrokerResponse {
+    match execute_counter_discovery(state, request_id) {
+        Ok(status) => {
+            BrokerResponse::new(request_id, ResponseStatus::Ok).with_counter_discovery(status)
+        }
+        Err(error) => BrokerResponse::new(request_id, ResponseStatus::Failed)
+            .with_message(error)
+            .with_counter_discovery(CounterDiscoveryStatus {
+                availability: CounterDiscoveryAvailability::DiscoveryFailed,
+                cli_exit_code: None,
+                power_category_present: false,
+                no_orphan_child: true,
+            }),
+    }
+}
+
+/// Execute only the fixed, semantic counter-discovery capability.  This path is intentionally
+/// separate from `execute_real_amd_session`: it uses `timechart --list`, never requests an event,
+/// duration, interval, or output CSV, and is bounded by the same broker-owned child/job contract.
+/// It is reachable only after an explicit `GetAmdCounterAvailability` request and is not invoked by
+/// setup, readiness, or the existing client qualification operation.
+fn execute_counter_discovery(
+    state: &BrokerState,
+    request_id: &str,
+) -> Result<CounterDiscoveryStatus, String> {
+    let (cli_path, artifact) = discover_cli()?;
+    let _ = crate::write_json(
+        &state.output_root.join("CLI-ARTIFACT-IDENTITY.json"),
+        &artifact,
+    );
+    let discovery_root = state.output_root.join("counter-discovery");
+    fs::create_dir_all(&discovery_root)
+        .map_err(|error| format!("creating counter-discovery evidence root failed: {error}"))?;
+    let stdout_path = discovery_root.join("AMDuProfCLI-list.stdout.txt");
+    let stderr_path = discovery_root.join("AMDuProfCLI-list.stderr.txt");
+    let stdout = File::create(&stdout_path)
+        .map_err(|error| format!("creating counter-discovery stdout failed: {error}"))?;
+    let stderr = File::create(&stderr_path)
+        .map_err(|error| format!("creating counter-discovery stderr failed: {error}"))?;
+    let args = fixed_counter_discovery_arguments();
+    let bin = cli_path.parent().unwrap_or_else(|| Path::new("."));
+    let mut command = Command::new(&cli_path);
+    command
+        .args(&args)
+        .current_dir(bin)
+        .stdout(Stdio::from(stdout))
+        .stderr(Stdio::from(stderr))
+        .creation_flags(CREATE_NO_WINDOW);
+    let child = command
+        .spawn()
+        .map_err(|error| format!("starting bounded counter discovery failed: {error}"))?;
+    let target_pid = child.id();
+    let target_process_start_time = process_start_time(HANDLE(child.as_raw_handle())).unwrap_or(0);
+    let mut owned = OwnedChild::new(child);
+    if let Err(error) = owned.assign_job() {
+        let no_orphan = owned.terminate_and_wait();
+        return Err(format!(
+            "counter discovery job assignment failed: {error}; no_orphan_child={no_orphan}"
+        ));
+    }
+    let _ = crate::write_json(
+        &discovery_root.join("AMD-COUNTER-DISCOVERY-LAUNCH.json"),
+        &json!({
+            "schema": "amd-privilege-counter-discovery-launch/v1",
+            "qualification_only": QUALIFICATION_ONLY,
+            "request_id": safe_request_file_component(request_id),
+            "counter_discovery_only": true,
+            "amd_runtime_executed": false,
+            "cli_started_by_broker": true,
+            "target_pid": target_pid,
+            "target_process_start_time": target_process_start_time,
+            "executable_derived_by_broker": true,
+            "arguments": args,
+            "working_directory": bin,
+            "stdout_path": stdout_path,
+            "stderr_path": stderr_path,
+            "timeout_ms": COUNTER_DISCOVERY_TIMEOUT_MS
+        }),
+    );
+
+    let deadline = Instant::now() + Duration::from_millis(COUNTER_DISCOVERY_TIMEOUT_MS);
+    loop {
+        if STOP_REQUESTED.load(Ordering::Acquire) {
+            let no_orphan = owned.terminate_and_wait();
+            return Err(format!(
+                "counter discovery canceled during service stop; no_orphan_child={no_orphan}"
+            ));
+        }
+        match owned.child.try_wait() {
+            Ok(Some(_)) => break,
+            Ok(None) if Instant::now() < deadline => thread::sleep(Duration::from_millis(50)),
+            Ok(None) => {
+                let no_orphan = owned.terminate_and_wait();
+                return Err(format!(
+                    "counter discovery timed out; no_orphan_child={no_orphan}"
+                ));
+            }
+            Err(error) => {
+                let no_orphan = owned.terminate_and_wait();
+                return Err(format!(
+                    "waiting for counter discovery failed: {error}; no_orphan_child={no_orphan}"
+                ));
+            }
+        }
+    }
+
+    let exit_code = owned.exit_code();
+    let stdout_text = read_bounded_text(&stdout_path)?;
+    let stderr_text = read_bounded_text(&stderr_path)?;
+    let availability = classify_counter_discovery(exit_code, &stdout_text, &stderr_text);
+    let power_category_present = stdout_text
+        .lines()
+        .any(|line| line.trim().to_ascii_lowercase().contains("power"));
+    let no_orphan_child = owned.child.try_wait().ok().flatten().is_some();
+    let _ = crate::write_json(
+        &discovery_root.join("AMD-COUNTER-DISCOVERY-RESULT.json"),
+        &json!({
+            "schema": "amd-privilege-counter-discovery-result/v1",
+            "qualification_only": QUALIFICATION_ONLY,
+            "request_id": safe_request_file_component(request_id),
+            "arguments": fixed_counter_discovery_arguments(),
+            "availability": availability.as_str(),
+            "cli_exit_code": exit_code,
+            "power_category_present": power_category_present,
+            "no_counters_available_diagnostic": no_counters_available_diagnostic(&stderr_text),
+            "stdout_path": stdout_path,
+            "stderr_path": stderr_path,
+            "raw_output_bounded": true,
+            "no_orphan_child": no_orphan_child,
+            "amd_runtime_executed": false
+        }),
+    );
+    Ok(CounterDiscoveryStatus {
+        availability,
+        cli_exit_code: exit_code,
+        power_category_present,
+        no_orphan_child,
+    })
 }
 
 fn start_session(
@@ -1314,12 +1464,41 @@ fn execute_real_amd_session(
     let csv_path = match find_output_csv(&session_root) {
         Ok(path) => path,
         Err(error) => {
-            let mut summary = empty_summary(Some("OUTPUT_OR_COUNTER_FAILED"));
+            let stderr_text = read_bounded_text(&stderr_path).ok();
+            let no_counters = stderr_text
+                .as_deref()
+                .is_some_and(no_counters_available_diagnostic);
+            if no_counters {
+                let _ = crate::write_json(
+                    &session_root.join("AMD-CLI-COUNTER-DIAGNOSTIC.json"),
+                    &json!({
+                        "schema": "amd-privilege-cli-counter-diagnostic/v1",
+                        "session_id": session_id,
+                        "classification": "NO_COUNTERS_AVAILABLE",
+                        "broker_classification": "COUNTERS_UNAVAILABLE",
+                        "cli_exit_code": exit_code,
+                        "csv_count": 0,
+                        "stderr_path": stderr_path,
+                        "stderr_bounded_match": true,
+                        "package_power_sampling": "NOT_RUN"
+                    }),
+                );
+            }
+            let classification = if no_counters {
+                "COUNTERS_UNAVAILABLE"
+            } else {
+                "OUTPUT_OR_COUNTER_FAILED"
+            };
+            let mut summary = empty_summary(Some(classification));
             summary.amd_runtime_executed = true;
             summary.cli_started_by_broker = true;
             summary.cli_exit_code = exit_code;
             summary.no_orphan_child = true;
-            summary.failure_classification = Some(format!("OUTPUT_OR_COUNTER_FAILED: {error}"));
+            summary.failure_classification = Some(if no_counters {
+                "COUNTERS_UNAVAILABLE: NO_COUNTERS_AVAILABLE".to_owned()
+            } else {
+                format!("OUTPUT_OR_COUNTER_FAILED: {error}")
+            });
             return Err(RealSessionError::Failed(summary));
         }
     };
@@ -1398,6 +1577,24 @@ fn fixed_cli_arguments(duration_ms: u32, interval_ms: u32, output_dir: &Path) ->
         "--output-dir".to_owned(),
         output_dir.to_string_lossy().into_owned(),
     ]
+}
+
+fn fixed_counter_discovery_arguments() -> Vec<String> {
+    vec!["timechart".to_owned(), "--list".to_owned()]
+}
+
+fn read_bounded_text(path: &Path) -> Result<String, String> {
+    let mut file = File::open(path).map_err(|error| error.to_string())?;
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes)
+        .map_err(|error| error.to_string())?;
+    if bytes.len() > COUNTER_DISCOVERY_MAX_OUTPUT_BYTES {
+        return Err(format!(
+            "AMD CLI diagnostic exceeded {} bytes",
+            COUNTER_DISCOVERY_MAX_OUTPUT_BYTES
+        ));
+    }
+    Ok(String::from_utf8_lossy(&bytes).into_owned())
 }
 
 fn find_output_csv(root: &Path) -> Result<PathBuf, String> {
@@ -2361,6 +2558,24 @@ fn write_response(writer: &mut NamedPipeStream, response: &BrokerResponse) -> Re
 pub fn run_client(options: ClientOptions) -> Result<(), String> {
     let config = load_config()?;
     let mut stream = open_client_pipe(&config.pipe_name)?;
+    if options.operation == "counter-discovery" {
+        let request = SemanticRequest::GetAmdCounterAvailability {
+            protocol_version: crate::PROTOCOL_VERSION,
+            request_id: next_request_id("counter-discovery"),
+        };
+        let response = send_request(&mut stream, &request)?;
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&response).map_err(|error| error.to_string())?
+        );
+        if response.status != ResponseStatus::Ok {
+            return Err(format!(
+                "counter discovery request returned {:?}",
+                response.status
+            ));
+        }
+        return Ok(());
+    }
     let status_request = SemanticRequest::GetAmdProviderStatus {
         protocol_version: crate::PROTOCOL_VERSION,
         request_id: next_request_id("status"),
@@ -2507,6 +2722,9 @@ fn collect_service_context(config: &BrokerConfig) -> Result<ServiceContextEviden
     let token_elevated = token_information(token.raw(), TokenElevation)
         .ok()
         .map(|bytes| unsafe { (*(bytes.as_ptr() as *const TOKEN_ELEVATION)).TokenIsElevated != 0 });
+    let (enabled_privileges, disabled_privileges) = token_privilege_evidence(token.raw())?;
+    let token_groups_relevant_to_access =
+        collect_token_groups_relevant_to_access(token.raw(), service_sid.as_deref())?;
     let session_id = process_session_id(unsafe { GetCurrentProcessId() });
     let process_architecture = if size_of::<usize>() == 8 {
         "x64"
@@ -2519,7 +2737,7 @@ fn collect_service_context(config: &BrokerConfig) -> Result<ServiceContextEviden
         && process_architecture == "x64"
         && service_sid_type == REQUIRED_SERVICE_SID_TYPE;
     Ok(ServiceContextEvidence {
-        schema: "amd-privilege-service-context/v1".to_owned(),
+        schema: "amd-privilege-service-context/v2".to_owned(),
         qualification_only: QUALIFICATION_ONLY,
         service_name: SERVICE_NAME.to_owned(),
         service_account: crate::SERVICE_ACCOUNT.to_owned(),
@@ -2532,6 +2750,9 @@ fn collect_service_context(config: &BrokerConfig) -> Result<ServiceContextEviden
         process_architecture: process_architecture.to_owned(),
         integrity_sid,
         token_elevated,
+        enabled_privileges,
+        disabled_privileges,
+        token_groups_relevant_to_access,
         context_valid,
     })
 }
@@ -2681,6 +2902,92 @@ fn token_contains_sid(
     Ok(false)
 }
 
+fn token_privilege_evidence(token: HANDLE) -> Result<(Vec<String>, Vec<String>), String> {
+    let bytes = token_information(token, TokenPrivileges)?;
+    if bytes.len() < size_of::<TOKEN_PRIVILEGES>() {
+        return Err("TokenPrivileges returned an undersized buffer".to_owned());
+    }
+    let privileges = unsafe { &*(bytes.as_ptr() as *const TOKEN_PRIVILEGES) };
+    let available =
+        (bytes.len().saturating_sub(size_of::<u32>())) / size_of::<LUID_AND_ATTRIBUTES>();
+    let count = (privileges.PrivilegeCount as usize).min(available).min(128);
+    let base = privileges.Privileges.as_ptr();
+    let mut enabled = Vec::new();
+    let mut disabled = Vec::new();
+    for index in 0..count {
+        let privilege = unsafe { *base.add(index) };
+        let name = privilege_name(&privilege);
+        if privilege.Attributes.0 & SE_PRIVILEGE_ENABLED.0 != 0 {
+            enabled.push(name);
+        } else {
+            disabled.push(name);
+        }
+    }
+    enabled.sort_unstable();
+    disabled.sort_unstable();
+    Ok((enabled, disabled))
+}
+
+fn privilege_name(privilege: &LUID_AND_ATTRIBUTES) -> String {
+    let mut buffer = [0_u16; 256];
+    let mut length = buffer.len() as u32;
+    let result = unsafe {
+        LookupPrivilegeNameW(
+            PCWSTR::null(),
+            &privilege.Luid,
+            PWSTR::from_raw(buffer.as_mut_ptr()),
+            &mut length,
+        )
+    };
+    if result.is_ok() {
+        let length = (length as usize).min(buffer.len());
+        String::from_utf16_lossy(&buffer[..length])
+    } else {
+        format!(
+            "LUID_{:08X}_{:08X}",
+            privilege.Luid.HighPart as u32, privilege.Luid.LowPart
+        )
+    }
+}
+
+fn collect_token_groups_relevant_to_access(
+    token: HANDLE,
+    service_sid: Option<&str>,
+) -> Result<Vec<String>, String> {
+    let bytes = token_information(token, TokenGroups)?;
+    if bytes.len() < size_of::<TOKEN_GROUPS>() {
+        return Err("TokenGroups returned an undersized buffer".to_owned());
+    }
+    let groups = unsafe { &*(bytes.as_ptr() as *const TOKEN_GROUPS) };
+    let available = (bytes.len().saturating_sub(size_of::<u32>()))
+        / size_of::<windows::Win32::Security::SID_AND_ATTRIBUTES>();
+    let count = (groups.GroupCount as usize).min(available).min(256);
+    let base = groups.Groups.as_ptr();
+    let mut relevant = Vec::new();
+    for index in 0..count {
+        let group = unsafe { *base.add(index) };
+        let sid = sid_to_string(group.Sid)?;
+        let is_relevant = service_sid.is_some_and(|expected| sid.eq_ignore_ascii_case(expected))
+            || sid.eq_ignore_ascii_case(crate::SYSTEM_SID)
+            || sid.eq_ignore_ascii_case(SERVICE_ACCOUNT_SID)
+            || sid == "S-1-5-20"
+            || sid == "S-1-5-6"
+            || sid.starts_with("S-1-5-32-")
+            || sid.starts_with("S-1-5-80-");
+        if is_relevant {
+            let enabled = group.Attributes & SE_GROUP_ENABLED != 0;
+            let deny_only = group.Attributes & 0x0000_0010 != 0;
+            relevant.push(format!(
+                "{sid}:{}{}",
+                if enabled { "ENABLED" } else { "DISABLED" },
+                if deny_only { ":DENY_ONLY" } else { "" }
+            ));
+        }
+    }
+    relevant.sort_unstable();
+    Ok(relevant)
+}
+
 fn query_service_sid_type() -> Result<String, String> {
     let manager = unsafe { OpenSCManagerW(PCWSTR::null(), PCWSTR::null(), SC_MANAGER_CONNECT) }
         .map_err(|error| format!("OpenSCManagerW failed: {error}"))?;
@@ -2817,6 +3124,14 @@ mod tests {
         assert_eq!(args[4], "1000");
         assert_eq!(args[6], "5");
         assert!(!args.iter().any(|arg| arg == "--help" || arg == "--version"));
+    }
+
+    #[test]
+    fn fixed_counter_discovery_arguments_are_exact_and_bounded() {
+        assert_eq!(
+            fixed_counter_discovery_arguments(),
+            vec!["timechart".to_owned(), "--list".to_owned()]
+        );
     }
 
     #[test]

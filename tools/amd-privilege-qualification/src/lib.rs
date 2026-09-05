@@ -37,6 +37,9 @@ pub const MIN_INTERVAL_MS: u32 = 1_000;
 pub const MAX_INTERVAL_MS: u32 = 10_000;
 pub const CLI_TIMEOUT_SAFETY_MS: u64 = 90_000;
 pub const CLIENT_DISCONNECT_POLICY: &str = "CANCEL_OWNED_SESSION";
+pub const COUNTER_DISCOVERY_REQUEST_TYPE: &str = "GetAmdCounterAvailability";
+pub const COUNTER_DISCOVERY_MAX_OUTPUT_BYTES: usize = 16 * 1024;
+pub const COUNTER_DISCOVERY_TIMEOUT_MS: u64 = 30_000;
 
 /// The only ConnectNamedPipe outcomes that establish a valid first accept contract.
 ///
@@ -395,11 +398,75 @@ pub const fn client_pipe_mode_failure_is_fail_closed(
     handle_closed && !request_sent
 }
 
+/// The bounded semantic result of the fixed `timechart --list` capability.  This is deliberately
+/// separate from a power sampling/session result: listing counter categories does not collect a
+/// timechart and therefore does not consume the real AMD sampling gate by itself.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum CounterDiscoveryAvailability {
+    PowerAvailable,
+    PowerUnavailable,
+    DiscoveryFailed,
+}
+
+impl CounterDiscoveryAvailability {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::PowerAvailable => "POWER_AVAILABLE",
+            Self::PowerUnavailable => "POWER_UNAVAILABLE",
+            Self::DiscoveryFailed => "DISCOVERY_FAILED",
+        }
+    }
+}
+
+/// Match only the bounded, known AMD uProf counter-backend diagnostic.  The historical typo
+/// `avialable` is intentionally accepted because it was emitted by the installed CLI, while the
+/// surrounding `no counters` phrase prevents arbitrary stderr from being treated as this result.
+pub fn no_counters_available_diagnostic(stderr: &str) -> bool {
+    if stderr.len() > COUNTER_DISCOVERY_MAX_OUTPUT_BYTES {
+        return false;
+    }
+    let normalized = stderr.to_ascii_lowercase();
+    normalized.contains("no counters")
+        && (normalized.contains("available") || normalized.contains("avialable"))
+}
+
+/// Classify a fixed `timechart --list` result without trusting exit code zero on its own.
+/// Captured output is bounded before matching so a future diagnostic cannot turn this helper into
+/// an unbounded parser or an arbitrary command result interpreter.
+pub fn classify_counter_discovery(
+    exit_code: Option<i32>,
+    stdout: &str,
+    stderr: &str,
+) -> CounterDiscoveryAvailability {
+    if stdout.len() > COUNTER_DISCOVERY_MAX_OUTPUT_BYTES
+        || stderr.len() > COUNTER_DISCOVERY_MAX_OUTPUT_BYTES
+    {
+        return CounterDiscoveryAvailability::DiscoveryFailed;
+    }
+    if no_counters_available_diagnostic(stderr) {
+        return CounterDiscoveryAvailability::PowerUnavailable;
+    }
+    let power_category_present = stdout.lines().any(|line| {
+        let line = line.trim().to_ascii_lowercase();
+        line.contains("power")
+    });
+    if exit_code == Some(0) && power_category_present {
+        CounterDiscoveryAvailability::PowerAvailable
+    } else {
+        CounterDiscoveryAvailability::DiscoveryFailed
+    }
+}
+
 /// Requests are semantic capabilities.  There is deliberately no executable, argv, shell,
 /// working-directory, environment, registry-path, or output-path field in this type.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SemanticRequest {
     GetAmdProviderStatus {
+        protocol_version: u32,
+        request_id: String,
+    },
+    GetAmdCounterAvailability {
         protocol_version: u32,
         request_id: String,
     },
@@ -425,6 +492,7 @@ impl SemanticRequest {
     pub fn request_type(&self) -> &'static str {
         match self {
             Self::GetAmdProviderStatus { .. } => "GetAmdProviderStatus",
+            Self::GetAmdCounterAvailability { .. } => COUNTER_DISCOVERY_REQUEST_TYPE,
             Self::StartAmdPowerSession { .. } => "StartAmdPowerSession",
             Self::GetAmdSessionStatus { .. } => "GetAmdSessionStatus",
             Self::CancelAmdSession { .. } => "CancelAmdSession",
@@ -434,6 +502,9 @@ impl SemanticRequest {
     pub fn protocol_version(&self) -> u32 {
         match self {
             Self::GetAmdProviderStatus {
+                protocol_version, ..
+            }
+            | Self::GetAmdCounterAvailability {
                 protocol_version, ..
             }
             | Self::StartAmdPowerSession {
@@ -451,6 +522,7 @@ impl SemanticRequest {
     pub fn request_id(&self) -> &str {
         match self {
             Self::GetAmdProviderStatus { request_id, .. }
+            | Self::GetAmdCounterAvailability { request_id, .. }
             | Self::StartAmdPowerSession { request_id, .. }
             | Self::GetAmdSessionStatus { request_id, .. }
             | Self::CancelAmdSession { request_id, .. } => request_id,
@@ -466,6 +538,14 @@ impl SemanticRequest {
                 "protocol_version": protocol_version,
                 "request_id": request_id,
                 "request_type": "GetAmdProviderStatus"
+            }),
+            Self::GetAmdCounterAvailability {
+                protocol_version,
+                request_id,
+            } => json!({
+                "protocol_version": protocol_version,
+                "request_id": request_id,
+                "request_type": COUNTER_DISCOVERY_REQUEST_TYPE
             }),
             Self::StartAmdPowerSession {
                 protocol_version,
@@ -546,16 +626,23 @@ pub fn decode_request(bytes: &[u8]) -> Result<SemanticRequest, ProtocolError> {
         .to_owned();
 
     match request_type.as_str() {
-        "GetAmdProviderStatus" => {
+        "GetAmdProviderStatus" | "GetAmdCounterAvailability" => {
             let wire: ProviderStatusWire = serde_json::from_value(value.clone())
                 .map_err(|error| ProtocolError::InvalidRequest(error.to_string()))?;
             ensure_request_type(&wire.request_type, &request_type)?;
             ensure_protocol(wire.protocol_version)?;
             ensure_request_id(&wire.request_id)?;
-            Ok(SemanticRequest::GetAmdProviderStatus {
-                protocol_version: wire.protocol_version,
-                request_id: wire.request_id,
-            })
+            if request_type == "GetAmdProviderStatus" {
+                Ok(SemanticRequest::GetAmdProviderStatus {
+                    protocol_version: wire.protocol_version,
+                    request_id: wire.request_id,
+                })
+            } else {
+                Ok(SemanticRequest::GetAmdCounterAvailability {
+                    protocol_version: wire.protocol_version,
+                    request_id: wire.request_id,
+                })
+            }
         }
         "StartAmdPowerSession" => {
             let wire: StartSessionWire = serde_json::from_value(value.clone())
@@ -713,6 +800,14 @@ pub struct ProviderStatus {
     pub reason: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CounterDiscoveryStatus {
+    pub availability: CounterDiscoveryAvailability,
+    pub cli_exit_code: Option<i32>,
+    pub power_category_present: bool,
+    pub no_orphan_child: bool,
+}
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum SessionState {
@@ -758,6 +853,8 @@ pub struct BrokerResponse {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub provider_status: Option<ProviderStatus>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub counter_discovery: Option<CounterDiscoveryStatus>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub session: Option<SessionSnapshot>,
 }
 
@@ -769,6 +866,7 @@ impl BrokerResponse {
             status,
             message: None,
             provider_status: None,
+            counter_discovery: None,
             session: None,
         }
     }
@@ -785,6 +883,11 @@ impl BrokerResponse {
 
     pub fn with_provider_status(mut self, provider_status: ProviderStatus) -> Self {
         self.provider_status = Some(provider_status);
+        self
+    }
+
+    pub fn with_counter_discovery(mut self, counter_discovery: CounterDiscoveryStatus) -> Self {
+        self.counter_discovery = Some(counter_discovery);
         self
     }
 }
@@ -1304,6 +1407,65 @@ mod tests {
         let request = decode_request(&valid_start()).unwrap();
         assert_eq!(request.request_type(), "StartAmdPowerSession");
         assert_eq!(request.protocol_version(), PROTOCOL_VERSION);
+    }
+
+    #[test]
+    fn counter_discovery_is_a_fixed_semantic_request() {
+        let request = SemanticRequest::GetAmdCounterAvailability {
+            protocol_version: PROTOCOL_VERSION,
+            request_id: "counter-list".to_owned(),
+        };
+        assert_eq!(request.request_type(), COUNTER_DISCOVERY_REQUEST_TYPE);
+        assert_eq!(
+            decode_request(&serde_json::to_vec(&request.to_value()).unwrap()).unwrap(),
+            request
+        );
+        let value = request.to_value();
+        assert_eq!(value.as_object().unwrap().len(), 3);
+        assert!(!value
+            .as_object()
+            .unwrap()
+            .keys()
+            .any(|key| key.contains("path") || key.contains("argv") || key.contains("command")));
+    }
+
+    #[test]
+    fn counter_discovery_classifies_zero_exit_no_counter_diagnostic() {
+        assert_eq!(
+            classify_counter_discovery(Some(0), "", "ERROR: There is no counters avialable\r\n"),
+            CounterDiscoveryAvailability::PowerUnavailable
+        );
+        assert!(no_counters_available_diagnostic(
+            "ERROR: There is no counters available"
+        ));
+        assert!(no_counters_available_diagnostic(
+            "ERROR: There is no counters avialable"
+        ));
+    }
+
+    #[test]
+    fn counter_discovery_requires_supported_power_category() {
+        assert_eq!(
+            classify_counter_discovery(Some(0), "Power\nFrequency\n", ""),
+            CounterDiscoveryAvailability::PowerAvailable
+        );
+        assert_eq!(
+            classify_counter_discovery(Some(0), "Core\nThread\n", ""),
+            CounterDiscoveryAvailability::DiscoveryFailed
+        );
+        assert_eq!(
+            classify_counter_discovery(Some(1), "Power\n", "failed"),
+            CounterDiscoveryAvailability::DiscoveryFailed
+        );
+    }
+
+    #[test]
+    fn counter_discovery_output_is_bounded() {
+        let oversized = "x".repeat(COUNTER_DISCOVERY_MAX_OUTPUT_BYTES + 1);
+        assert_eq!(
+            classify_counter_discovery(Some(0), &oversized, ""),
+            CounterDiscoveryAvailability::DiscoveryFailed
+        );
     }
 
     #[test]

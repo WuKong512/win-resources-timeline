@@ -26,7 +26,7 @@ The future broker path is explicit and narrow:
 standard-user client
     -> scoped Windows named pipe with explicit DACL
     -> LocalService broker + Service SID
-    -> broker-derived AMD installation path and fixed `power` request
+    -> broker-derived AMD installation path and fixed semantic capability
     -> broker-owned ProgramData output
     -> validated package-power parser
     -> typed response over the pipe
@@ -36,6 +36,7 @@ The request schema contains only:
 
 ```text
 GetAmdProviderStatus
+GetAmdCounterAvailability
 StartAmdPowerSession { duration_ms, interval_ms }
 GetAmdSessionStatus { session_id }
 CancelAmdSession { session_id }
@@ -45,6 +46,13 @@ The broker rejects unknown fields, unknown request types, incompatible
 protocol versions, oversized messages, invalid bounds, stale session IDs, and
 non-owner cancellation. It never accepts an executable path, raw argv, shell
 command, working directory, environment, registry path, or output path.
+
+`GetAmdCounterAvailability` is a qualification-only, non-sampling capability.
+The broker derives the validated AMD CLI and executes exactly `timechart --list`
+with broker-owned stdout/stderr, a bounded timeout, and a kill-on-job-close job.
+It never accepts a command or argv from the client and never starts a power
+timechart. The prepared standard-user handoff is
+`run-standard-user-amd-counter-discovery.ps1`; it is not run by automated tests.
 
 ## Synthetic qualification
 
@@ -69,9 +77,9 @@ preparation. They are intentionally separate:
    creates the scoped config/output ACLs, and starts the broker. This preflight
    reads metadata only and does not start AMD uProf.
 2. A normal, non-elevated x64 PowerShell runs
-   `run-standard-user-amd-privilege-client.ps1`. It sends only the semantic
-   status/start/status requests and holds one pipe connection for the bounded
-   normal-completion run.
+    `run-standard-user-amd-privilege-client.ps1`. It sends only the semantic
+    status/start/status requests and holds one pipe connection for the bounded
+    normal-completion run.
 3. The Administrator runs `cleanup-admin-amd-privilege-qualification.ps1`.
    It stops and deletes only the fixed qualification service and records
    cleanup evidence. Qualification evidence is retained for audit; AMD
@@ -82,6 +90,16 @@ The real run is at most one bounded `LocalService + Service SID + Session 0`
 AMD package-power session. Cancellation is qualified synthetically and is not
 performed against a real AMD runtime.
 
+The next differential gate is deliberately separate from that consumed run:
+one human-authorized `GetAmdCounterAvailability` request in a LocalService
+Session 0 broker context and one equivalent `timechart --list` request in a
+SYSTEM Session 0 comparison context, with the same broker-derived executable,
+fixed arguments, output policy, timeout, and token evidence schema. No account
+switch or SYSTEM fallback is authorized by this preparation.
+The fixed two-context plan is retained at
+`counter-discovery-differential-plan.json`; its SYSTEM entry is plan-only until
+separately authorized.
+
 ## Frozen future-run artifact
 
 The manually authorized wrappers are pinned to this release artifact; changing
@@ -91,7 +109,7 @@ the binary requires rebuilding and recording a new hash before any future run:
 path = tools/amd-privilege-qualification/target/release/amd-privilege-qualification.exe
 architecture = x64
 build_mode = release / cargo --offline
-sha256 = 9FEB2BC942C74A6627BBC2716B450171C96A8E66617CE0624A3FC0FF69F3C464
+sha256 = C9973BAAA01AF3C2673D8C70D8C7E626C577642505E6DFF7BA3C6026DEA63FB1
 broker_authenticode = NotSigned; exact SHA-256 is required by both wrappers
 ```
 

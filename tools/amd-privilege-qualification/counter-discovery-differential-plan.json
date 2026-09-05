@@ -1,0 +1,75 @@
+{
+  "schema": "amd-privilege-counter-discovery-differential-plan/v1",
+  "qualification_only": true,
+  "human_authorization_required": true,
+  "sampling": false,
+  "fixed_request_type": "GetAmdCounterAvailability",
+  "fixed_cli_arguments": [
+    "timechart",
+    "--list"
+  ],
+  "executable_derived_by_broker": true,
+  "working_directory_derived_by_broker": true,
+  "output_root_owned_by_broker": true,
+  "bounded_timeout_ms": 30000,
+  "job_owned_child": true,
+  "controlled_comparison_fields": [
+    "account_sid",
+    "service_sid",
+    "session_id",
+    "integrity_sid",
+    "token_elevated",
+    "enabled_privileges",
+    "disabled_privileges",
+    "token_groups_relevant_to_access",
+    "process_architecture",
+    "amd_cli_path",
+    "amd_cli_sha256",
+    "amd_cli_file_version",
+    "amd_cli_signature_validation",
+    "working_directory",
+    "fixed_cli_arguments",
+    "relevant_environment",
+    "amd_backend_service_inventory",
+    "amd_device_or_object_access_observation",
+    "amd_registry_view_and_path_access",
+    "output_root_access"
+  ],
+  "evidence_interpretation": {
+    "observed_fact": "The same fixed non-sampling counter-discovery operation is compared under two Session 0 service identities.",
+    "inference_not_permitted": [
+      "A LocalService failure alone does not prove LocalSystem is the minimum required account.",
+      "A SYSTEM success alone does not identify the specific missing capability.",
+      "No privilege, ACL, device, registry, or AMD installation mutation is authorized by this plan."
+    ]
+  },
+  "contexts": [
+    {
+      "label": "LocalService",
+      "account": "NT AUTHORITY\\LOCAL SERVICE",
+      "account_sid": "S-1-5-19",
+      "session_id": 0,
+      "execution": "HUMAN_AUTHORIZATION_REQUIRED"
+    },
+    {
+      "label": "SYSTEM",
+      "account": "NT AUTHORITY\\SYSTEM",
+      "account_sid": "S-1-5-18",
+      "session_id": 0,
+      "execution": "HUMAN_AUTHORIZATION_REQUIRED"
+    }
+  ],
+  "token_evidence_fields": [
+    "account_sid",
+    "service_sid",
+    "session_id",
+    "integrity_sid",
+    "token_elevated",
+    "enabled_privileges",
+    "disabled_privileges",
+    "token_groups_relevant_to_access",
+    "process_architecture"
+  ],
+  "account_switch_not_authorized_by_preparation": true,
+  "real_amd_runtime_during_preparation": 0
+}

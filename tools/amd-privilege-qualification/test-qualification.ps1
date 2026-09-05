@@ -21,6 +21,7 @@ foreach ($wrapper in @(
         $CleanupStateContract,
         (Join-Path $ToolRoot 'run-admin-amd-privilege-qualification.ps1'),
         (Join-Path $ToolRoot 'run-standard-user-amd-privilege-client.ps1'),
+        (Join-Path $ToolRoot 'run-standard-user-amd-counter-discovery.ps1'),
         (Join-Path $ToolRoot 'cleanup-admin-amd-privilege-qualification.ps1')
     )) {
     $parseErrors = $null
@@ -255,6 +256,42 @@ Write-Host 'CLIENT_SECURITY_SQOS_PRESERVED=PASS'
 Write-Host 'CLIENT_SYNCHRONOUS_IO_PRESERVED=PASS'
 Write-Host 'CLIENT_EFFECTIVE_MESSAGE_READ_MODE_VERIFIED=PASS'
 
+foreach ($requiredCounterDiscoveryContract in @(
+        'GetAmdCounterAvailability',
+        'fixed_counter_discovery_arguments',
+        'timechart',
+        '--list',
+        'COUNTER_DISCOVERY_MAX_OUTPUT_BYTES',
+        'classify_counter_discovery',
+        'COUNTERS_UNAVAILABLE'
+    )) {
+    if ($windowsSourceText -notmatch [regex]::Escape($requiredCounterDiscoveryContract)) {
+        throw "Counter-discovery contract is missing: $requiredCounterDiscoveryContract"
+    }
+}
+Write-Host 'COUNTER_DISCOVERY_FIXED_TIMECHART_LIST_CONTRACT=PASS'
+Write-Host 'COUNTER_DISCOVERY_NO_USER_COMMAND_SURFACE=PASS'
+
+$counterDiscoverySource = Get-Content -LiteralPath (Join-Path $ToolRoot 'run-standard-user-amd-counter-discovery.ps1') -Raw
+if ($counterDiscoverySource -match '--event|--output-dir|--duration|--interval') {
+    throw 'Counter-discovery client wrapper must not expose a sampling command surface.'
+}
+Write-Host 'COUNTER_DISCOVERY_CLIENT_WRAPPER_IS_NON_SAMPLING=PASS'
+
+foreach ($requiredTokenDifferentialContract in @(
+        'TokenPrivileges',
+        'LookupPrivilegeNameW',
+        'enabled_privileges',
+        'disabled_privileges',
+        'token_groups_relevant_to_access',
+        'amd-privilege-service-context/v2'
+    )) {
+    if ($windowsSourceText -notmatch [regex]::Escape($requiredTokenDifferentialContract)) {
+        throw "Token differential evidence contract is missing: $requiredTokenDifferentialContract"
+    }
+}
+Write-Host 'TOKEN_DIFFERENTIAL_EVIDENCE_CONTRACT=PASS'
+
 Remove-Item -LiteralPath $EvidenceRoot -Recurse -Force -ErrorAction SilentlyContinue
 New-Item -ItemType Directory -Force -Path $EvidenceRoot | Out-Null
 
@@ -270,6 +307,17 @@ if ($LASTEXITCODE -ne 0) { throw 'synthetic qualification executable returned fa
 $summary = Get-Content -LiteralPath (Join-Path $EvidenceRoot 'SYNTHETIC-QUALIFICATION.json') -Raw | ConvertFrom-Json
 if ($summary.result -ne 'PASS' -or $summary.amd_runtime_executed -ne $false) {
     throw 'Synthetic qualification summary did not pass without AMD execution.'
+}
+foreach ($requiredSyntheticCheck in @(
+        'COUNTER_DISCOVERY_FIXED_SEMANTIC_REQUEST',
+        'COUNTER_DISCOVERY_NO_COUNTERS_EXIT_ZERO',
+        'COUNTER_DISCOVERY_POWER_PRESENT',
+        'COUNTER_DISCOVERY_UNKNOWN_FAILURE'
+    )) {
+    $check = @($summary.checks | Where-Object { $_.name -eq $requiredSyntheticCheck })
+    if ($check.Count -ne 1 -or $check[0].status -ne 'PASS') {
+        throw "Counter-discovery synthetic check did not pass: $requiredSyntheticCheck"
+    }
 }
 if ($summary.mutation_assertions.real_amd_runtime_count_during_task -ne 0 -or
     $summary.mutation_assertions.service_registration_count_during_task -ne 0 -or

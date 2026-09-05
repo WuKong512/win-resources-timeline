@@ -204,11 +204,11 @@ AMD_CLI_BOUNDED_SESSION = completed
 SPIKE_RESULT = PASS_WITH_FOLLOW_UPS
 PRODUCTION_ADMISSION = NOT_COMPLETE
 AMD_SERVICE_CONTEXT = completed / PASS
-AMD_PRIVILEGE_DEPLOYMENT = prepared / awaiting authorized LocalService + IPC runtime qualification
+AMD_PRIVILEGE_DEPLOYMENT = real bounded LocalService broker path qualified; AMD counter backend unavailable in LocalService context
 AMD_LONG_LIVED_SESSION = planned
 AMD_TEMPERATURE_FREQUENCY = planned
 AMD_PRODUCTION_PROVIDER = planned
-NEXT_TASK = AMD-PRIVILEGE-I2
+NEXT_TASK = AMD-PRIVILEGE-I2B
 EXECUTION_PLAN_SINGLE_CURRENT_STATE = PASS
 ```
 
@@ -225,7 +225,9 @@ SERVICE_ACCOUNT_FIRST_QUALIFICATION_SID = S-1-5-19
 SERVICE_SID_REQUIRED = true
 IPC_CANDIDATE = WINDOWS_NAMED_PIPE
 MINIMUM_REQUIRED_WINDOWS_PRIVILEGES = UNPROVEN
-NEXT_TASK = AMD-PRIVILEGE-I2
+I2_REAL_RUNTIME_GATE_CONSUMED = true
+LOCAL_SERVICE_POWER_COUNTER_ACCESS = FAILED_OR_UNAVAILABLE
+NEXT_TASK = AMD-PRIVILEGE-I2B
 PRODUCTION_ADMISSION = NOT_COMPLETE
 ```
 
@@ -416,7 +418,12 @@ additional metrics、storage/integration 和 final provider admission 有意保�
 `AMD-PRIVILEGE-I2` implementation” 是 `HISTORICAL / SUPERSEDED`，不再是
 当前 execution gate。
 
-## AMD-PRIVILEGE-I2 CURRENT STATE
+## AMD-PRIVILEGE-I2 PRE-RUNTIME CURRENT STATE (HISTORICAL / SUPERSEDED)
+
+The following snapshot records the pre-runtime preparation state. It is
+superseded by the authoritative real I2 result and the I2B differential
+preparation section below; the values are retained to preserve the execution
+history and are not the current gate.
 
 `AMD-PRIVILEGE-I2` is the current task and is prepared but remains pre-runtime
 until the single authorized LocalService + IPC qualification completes. It must
@@ -954,3 +961,112 @@ NEXT_GATE = HUMAN_SETUP_ONLY
 
 No qualification wrapper was run during this repair. The real AMD runtime
 gate remains unconsumed.
+
+## AMD-PRIVILEGE-I2B COUNTER AVAILABILITY DIFFERENTIAL PREPARATION
+
+The bounded real I2 run consumed the real-runtime gate and reached the AMD
+counter backend from the LocalService broker. It must not be rerun as part of
+this preparation. The authoritative result is retained under scope
+`88eeff2c2aa54252a9e8473b9773bc26`; the current repair context could not read
+that protected ProgramData scope directly, so the persisted run facts below
+are recorded from the authoritative handoff rather than regenerated or
+modified.
+
+```text
+INCIDENT_H_SCOPE = 88eeff2c2aa54252a9e8473b9773bc26
+REAL_RUNTIME_GATE = CONSUMED
+LOCAL_SERVICE_AMD_CLI_LAUNCH = REAL_PASS
+LOCAL_SERVICE_AMD_CLI_EXIT_CODE = 0
+LOCAL_SERVICE_AMD_STDERR = ERROR: There is no counters avialable
+CSV_COUNT_RECURSIVE = 0
+PACKAGE_POWER_SAMPLING = NOT_RUN
+PRIMARY_FAILURE = AMD_UPROF_COUNTER_BACKEND_UNAVAILABLE_FROM_LOCAL_SERVICE_CONTEXT
+OUTPUT_DISCOVERY_ROOT_CAUSE = false
+LOCAL_SERVICE_POWER_COUNTER_ACCESS = FAILED_OR_UNAVAILABLE
+SYSTEM_VS_LOCAL_SERVICE_DIFFERENTIAL = PENDING_FORENSIC_QUALIFICATION
+I2_REAL_RUNTIME_GATE_CONSUMED = true
+```
+
+This is not classified as an output-discovery failure: AMD uProf itself
+reported that no counters were available, despite returning exit code `0`.
+The complete standard-user → authenticated named-pipe → LocalService → AMD
+CLI launch path, including process ownership and cleanup, remains a real PASS.
+The minimum required Windows privilege/account is still unresolved; no
+LocalSystem fallback or production account selection is authorized.
+
+The qualification package now prepares a second, non-sampling semantic
+capability:
+
+```text
+COUNTER_DISCOVERY_REQUEST = GetAmdCounterAvailability
+COUNTER_DISCOVERY_COMMAND = timechart --list
+COUNTER_DISCOVERY_ARGUMENTS = fixed / broker-owned
+COUNTER_DISCOVERY_OUTPUT = broker-owned stdout + stderr evidence
+COUNTER_DISCOVERY_TIMEOUT = bounded / job-owned child
+COUNTER_DISCOVERY_RESULT = POWER_AVAILABLE | POWER_UNAVAILABLE | DISCOVERY_FAILED
+COUNTERS_UNAVAILABLE_DIAGNOSTIC = bounded no-counters stderr match
+CLI_ZERO_EXIT_SEMANTIC_ERROR_HANDLING = PREPARED
+```
+
+The capability does not accept executable paths, argv, shell commands,
+working directories, environment, registry paths, or output paths from the
+client. `timechart --list` is never invoked by setup, the existing sampling
+client, synthetic tests, or this repair. A diagnostic `exit 0` plus the known
+fatal no-counters message is classified as `POWER_UNAVAILABLE`/
+`NO_COUNTERS_AVAILABLE`, not as an output-discovery defect.
+
+The controlled future differential keeps the executable, fixed `timechart
+--list` arguments, broker-owned evidence policy, bounded timeout/job, and
+token-evidence schema constant:
+
+```text
+LOCAL_SERVICE_LIST_CONTEXT_PREPARED = true
+LOCAL_SERVICE_LIST_ACCOUNT = NT AUTHORITY\LOCAL SERVICE
+LOCAL_SERVICE_LIST_ACCOUNT_SID = S-1-5-19
+LOCAL_SERVICE_LIST_SESSION = 0
+SYSTEM_LIST_CONTEXT_PREPARED = true
+SYSTEM_LIST_ACCOUNT = NT AUTHORITY\SYSTEM
+SYSTEM_LIST_ACCOUNT_SID = S-1-5-18
+SYSTEM_LIST_SESSION = 0
+SYSTEM_LIST_EXECUTION = HUMAN_AUTHORIZATION_REQUIRED / PLAN_ONLY
+TOKEN_DIFFERENTIAL_EVIDENCE_PREPARED = true
+TOKEN_DIFFERENTIAL_FIELDS = account_sid, service_sid, session_id, integrity_sid, token_elevated, enabled_privileges, disabled_privileges, token_groups_relevant_to_access, process_architecture
+CONTROLLED_DIFFERENTIAL_FIELDS = amd_cli_path, amd_cli_sha256, amd_cli_file_version, amd_cli_signature_validation, working_directory, fixed_cli_arguments, relevant_environment, amd_backend_service_inventory, amd_device_or_object_access_observation, amd_registry_view_and_path_access, output_root_access
+DIFFERENTIAL_INFERENCE_BOUNDARY = LocalService failure does not prove LocalSystem is minimum; no ACL, privilege, device, registry, or AMD installation mutation authorized
+```
+
+The LocalService handoff is the separate
+`run-standard-user-amd-counter-discovery.ps1` semantic client wrapper. The
+SYSTEM row is a comparison plan only; this task does not register or run a
+SYSTEM service. The token evidence schema is extended to record normalized
+privilege and relevant group state without token handles or user secrets.
+
+Read-only installed-component forensics found the AMD registry installation
+root `D:\apps\AMDuProf\`, signed x64 `AMDuProfCLI.exe` version `5.3.521.0`
+with SHA-256
+`D0812D64963DD98F7C339CAC72F650461F95FF84E757A99767C7981B4111FBAC`, and
+signed AMD components `AMDPowerProfiler.sys` and
+`AMDProfilerLoadService.exe`. The current read-only service enumeration API
+was denied in this repair context; direct service-registry inspection showed
+`AMDPowerProfiler` running/manual as a kernel driver and
+`AMDProfilerLoadService` running/automatic as `LocalSystem`. No driver,
+service, registry, installation, device ACL, or AMD binary was modified.
+
+```text
+AMD_BACKEND_READ_ONLY_FORENSICS = PASS_WITH_SERVICE_ENUMERATION_DENIED
+AMD_POWER_DRIVER = AMDPowerProfiler.sys / signed / running / manual kernel driver
+AMD_LOAD_SERVICE = AMDProfilerLoadService.exe / signed / running / automatic / LocalSystem
+AMD_RELATED_PROVISIONING_SERVICE = AmdPpkgSvc / signed / running / automatic / LocalSystem
+LOCAL_SERVICE_TO_SYSTEM_SWITCH = NOT_AUTHORIZED
+OLD_ACTIVE_ARTIFACT_SHA256 = 9FEB2BC942C74A6627BBC2716B450171C96A8E66617CE0624A3FC0FF69F3C464
+OLD_ACTIVE_ARTIFACT_STATUS = SUPERSEDED
+NEW_FROZEN_ARTIFACT_ARCHITECTURE = x64
+NEW_FROZEN_ARTIFACT_SHA256 = C9973BAAA01AF3C2673D8C70D8C7E626C577642505E6DFF7BA3C6026DEA63FB1
+REAL_AMD_RUNTIME_DURING_REPAIR = 0
+SERVICE_RUNTIME_DURING_REPAIR = 0
+REAL_IPC_CLIENT_DURING_REPAIR = 0
+NEXT_GATE = HUMAN_COUNTER_DISCOVERY_DIFFERENTIAL
+```
+
+`COUNTER_PRIVILEGE_DIFFERENTIAL_REQUIRED` remains the result classification;
+this does not mark AMD-PRIVILEGE-I2 PASS or select LocalSystem for production.

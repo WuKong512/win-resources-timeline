@@ -1,16 +1,16 @@
 use crate::package_power::{assess_cadence, parse_package_power_csv};
 use crate::{
-    authorize_client, build_pipe_dacl, check, classify_message_frame, decode_request,
-    encode_json_frame, hresult_from_win32_contract, hresult_matches_win32_contract,
+    authorize_client, build_pipe_dacl, check, classify_counter_discovery, classify_message_frame,
+    decode_request, encode_json_frame, hresult_from_win32_contract, hresult_matches_win32_contract,
     identity_contract_allows_dispatch, identity_resource_contract_is_closed,
     pending_accept_cancel_is_drained, pending_accept_release_is_safe,
     pending_accept_state_after_cancel, service_stop_contract_is_valid,
     win32_code_from_hresult_contract, BrokerReadinessState, BrokerResponse, ClientIdentity,
-    FirstAcceptState, IdentityContractObservation, MessageFrameResult, MutationAssertions,
-    PendingAcceptCompletion, PendingAcceptLifecycleState, ProtocolError, ResponseStatus,
-    SemanticRequest, SessionCoordinator, SessionError, SessionOwner, SessionResultSummary,
-    SessionState, SyntheticCheck, SyntheticQualificationSummary, MAX_FRAME_BYTES, PROTOCOL_VERSION,
-    SERVICE_ACCOUNT_SID,
+    CounterDiscoveryAvailability, FirstAcceptState, IdentityContractObservation,
+    MessageFrameResult, MutationAssertions, PendingAcceptCompletion, PendingAcceptLifecycleState,
+    ProtocolError, ResponseStatus, SemanticRequest, SessionCoordinator, SessionError, SessionOwner,
+    SessionResultSummary, SessionState, SyntheticCheck, SyntheticQualificationSummary,
+    MAX_FRAME_BYTES, PROTOCOL_VERSION, SERVICE_ACCOUNT_SID,
 };
 use serde_json::json;
 use std::process::{Child, Command};
@@ -43,6 +43,26 @@ pub fn run(
             "OVERSIZED_REQUEST_REJECTED",
             oversized_request_rejected(),
             "request larger than the bounded frame is rejected",
+        ),
+        check(
+            "COUNTER_DISCOVERY_FIXED_SEMANTIC_REQUEST",
+            counter_discovery_request_is_semantic_only(),
+            "counter discovery exposes only the fixed semantic capability",
+        ),
+        check(
+            "COUNTER_DISCOVERY_NO_COUNTERS_EXIT_ZERO",
+            counter_discovery_no_counters_exit_zero(),
+            "exit code zero plus the fatal no-counters diagnostic is unavailable",
+        ),
+        check(
+            "COUNTER_DISCOVERY_POWER_PRESENT",
+            counter_discovery_power_present(),
+            "a bounded --list result containing Power is available",
+        ),
+        check(
+            "COUNTER_DISCOVERY_UNKNOWN_FAILURE",
+            counter_discovery_unknown_failure(),
+            "unrecognized counter-discovery output remains a discovery failure",
         ),
         check(
             "RAW_EXECUTABLE_SURFACE_ABSENT",
@@ -628,6 +648,40 @@ fn unknown_request_rejected() -> bool {
 fn oversized_request_rejected() -> bool {
     let bytes = vec![b'x'; MAX_FRAME_BYTES + 1];
     matches!(decode_request(&bytes), Err(ProtocolError::OversizedRequest))
+}
+
+fn counter_discovery_request_is_semantic_only() -> bool {
+    let request = SemanticRequest::GetAmdCounterAvailability {
+        protocol_version: PROTOCOL_VERSION,
+        request_id: "counter-list".to_owned(),
+    };
+    let value = request.to_value();
+    request.request_type() == crate::COUNTER_DISCOVERY_REQUEST_TYPE
+        && value.as_object().is_some_and(|object| {
+            object.len() == 3
+                && !object.keys().any(|key| {
+                    key.contains("executable")
+                        || key.contains("argv")
+                        || key.contains("command")
+                        || key.contains("output")
+                        || key.contains("path")
+                })
+        })
+}
+
+fn counter_discovery_no_counters_exit_zero() -> bool {
+    classify_counter_discovery(Some(0), "", "ERROR: There is no counters avialable\r\n")
+        == CounterDiscoveryAvailability::PowerUnavailable
+}
+
+fn counter_discovery_power_present() -> bool {
+    classify_counter_discovery(Some(0), "Power\nFrequency\n", "")
+        == CounterDiscoveryAvailability::PowerAvailable
+}
+
+fn counter_discovery_unknown_failure() -> bool {
+    classify_counter_discovery(Some(1), "", "unexpected failure")
+        == CounterDiscoveryAvailability::DiscoveryFailed
 }
 
 fn message_frame(payload: &[u8]) -> Vec<u8> {

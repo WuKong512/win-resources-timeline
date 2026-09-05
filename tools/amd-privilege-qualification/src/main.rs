@@ -38,8 +38,8 @@ fn main() {
             }
             Some("--client") => {
                 let operation = args.get(1).map(String::as_str).unwrap_or("get-status");
-                if !matches!(operation, "get-status" | "start") {
-                    eprintln!("client operation must be get-status or start");
+                if !matches!(operation, "get-status" | "counter-discovery" | "start") {
+                    eprintln!("client operation must be get-status, counter-discovery, or start");
                     std::process::exit(2);
                 }
                 let duration_ms = option_value(&args, "--duration-ms").unwrap_or(10_000);
@@ -77,7 +77,7 @@ fn option_value(args: &[String], name: &str) -> Option<u32> {
 
 fn usage_and_exit() -> ! {
     eprintln!(
-        "usage: amd-privilege-qualification --synthetic [--evidence-root PATH] | --broker | --client get-status|start"
+        "usage: amd-privilege-qualification --synthetic [--evidence-root PATH] | --broker | --client get-status|counter-discovery|start"
     );
     std::process::exit(2)
 }
