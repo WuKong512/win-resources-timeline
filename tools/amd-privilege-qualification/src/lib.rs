@@ -96,6 +96,63 @@ impl Default for BrokerReadinessState {
     }
 }
 
+/// Returns whether a buffered first request may be dispatched after the broker has
+/// authenticated the connected named-pipe client.  The Windows implementation obtains
+/// each value from the kernel; this pure contract keeps the security ordering testable
+/// without registering a service or opening a real pipe.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct IdentityContractObservation {
+    pub first_frame_buffered: bool,
+    pub impersonation_succeeded: bool,
+    pub token_user_captured: bool,
+    pub token_integrity_captured: bool,
+    pub token_session_captured: bool,
+    pub pipe_pid_captured: bool,
+    pub process_start_time_kernel_verified: bool,
+    pub impersonation_reverted: bool,
+    pub client_claimed_identity_trusted: bool,
+}
+
+pub const fn identity_contract_allows_dispatch(observation: IdentityContractObservation) -> bool {
+    observation.first_frame_buffered
+        && observation.impersonation_succeeded
+        && observation.token_user_captured
+        && observation.token_integrity_captured
+        && observation.token_session_captured
+        && observation.pipe_pid_captured
+        && observation.process_start_time_kernel_verified
+        && observation.impersonation_reverted
+        && !observation.client_claimed_identity_trusted
+}
+
+pub const fn identity_resource_contract_is_closed(
+    impersonation_token_closed: bool,
+    client_process_handle_closed: bool,
+) -> bool {
+    impersonation_token_closed && client_process_handle_closed
+}
+
+/// The accept loop must be woken by the service stop event, report STOP_PENDING before
+/// waiting, and request cancellation of any exact owned active session.  `busy_spin` is
+/// deliberately inverted: a stop contract is invalid if it depends on polling.
+pub const fn service_stop_contract_is_valid(
+    stop_requested: bool,
+    accept_loop_signaled: bool,
+    pending_pipe_accept_cancellable: bool,
+    stop_pending_reported: bool,
+    stopped_reported: bool,
+    active_session_cancel_requested: bool,
+    busy_spin: bool,
+) -> bool {
+    stop_requested
+        && accept_loop_signaled
+        && pending_pipe_accept_cancellable
+        && stop_pending_reported
+        && stopped_reported
+        && active_session_cancel_requested
+        && !busy_spin
+}
+
 static SESSION_COUNTER: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Debug, Clone, PartialEq, Eq)]

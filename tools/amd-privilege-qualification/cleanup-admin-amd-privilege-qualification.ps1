@@ -5,6 +5,8 @@ param()
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
+. (Join-Path $PSScriptRoot 'cleanup-state-contract.ps1')
+
 $ServiceName = 'ResourceTimelineAmdPrivilegeQualification'
 $ArtifactPath = Join-Path $PSScriptRoot 'target\release\amd-privilege-qualification.exe'
 $QualificationRoot = Join-Path $env:ProgramData 'ResourceTimeline\qualification\amd-privilege'
@@ -20,32 +22,39 @@ if (-not [Environment]::Is64BitProcess) {
 }
 
 $sc = Join-Path $env:SystemRoot 'System32\sc.exe'
-$service = Get-Service -Name $ServiceName -ErrorAction SilentlyContinue
-if ($null -ne $service) {
-    & $sc stop $ServiceName | Out-Null
-    if ($LASTEXITCODE -ne 0 -and $LASTEXITCODE -ne 1062) {
-        throw "sc.exe stop failed with exit code $LASTEXITCODE"
-    }
-    $deadline = [DateTime]::UtcNow.AddSeconds(30)
-    do {
-        Start-Sleep -Milliseconds 250
-        $service = Get-Service -Name $ServiceName -ErrorAction SilentlyContinue
-    } while ($null -ne $service -and $service.Status -ne 'Stopped' -and [DateTime]::UtcNow -lt $deadline)
-    $service = Get-Service -Name $ServiceName -ErrorAction SilentlyContinue
-    if ($null -ne $service -and $service.Status -ne 'Stopped') {
-        throw 'Qualification service did not stop within the bounded cleanup wait.'
-    }
-    & $sc delete $ServiceName | Out-Null
-    if ($LASTEXITCODE -ne 0) {
-        throw "sc.exe delete failed with exit code $LASTEXITCODE"
-    }
+$outputRoot = $null
+if (Test-Path -LiteralPath $ConfigPath -PathType Leaf) {
+    $config = Get-Content -LiteralPath $ConfigPath -Raw | ConvertFrom-Json
+    $outputRoot = [string]$config.output_root
 }
-$deadline = [DateTime]::UtcNow.AddSeconds(30)
-while ($null -ne (Get-Service -Name $ServiceName -ErrorAction SilentlyContinue) -and [DateTime]::UtcNow -lt $deadline) {
-    Start-Sleep -Milliseconds 250
-}
-if (Get-Service -Name $ServiceName -ErrorAction SilentlyContinue) {
-    throw "Qualification service registration still exists: $ServiceName"
+
+$scStopExitCode = $null
+$serviceStateAfterStopWait = 'NOT_REQUESTED'
+$servicePidAfterStopWait = 0L
+$stopControlResult = 'NOT_REQUESTED'
+$serviceRegistrationRemoved = $false
+$serviceProcessGone = $false
+$cliProcessGone = $false
+$brokerProcesses = @()
+$cliSessions = @()
+
+function Get-QualificationServiceSnapshot {
+    $service = Get-CimInstance -ClassName Win32_Service -Filter "Name='$ServiceName'" -ErrorAction Stop |
+        Select-Object -First 1
+    if ($null -eq $service) {
+        return [pscustomobject]@{
+            present = $false
+            state = 'ABSENT'
+            process_id = 0L
+            start_name = $null
+        }
+    }
+    return [pscustomobject]@{
+        present = $true
+        state = [string]$service.State
+        process_id = [int64]$service.ProcessId
+        start_name = [string]$service.StartName
+    }
 }
 
 function Get-OwnedBrokerProcesses {
@@ -82,19 +91,105 @@ function Test-ExactProcessGone {
     }
 }
 
-$brokerDeadline = [DateTime]::UtcNow.AddSeconds(30)
-do {
-    $brokerProcesses = @(Get-OwnedBrokerProcesses)
-    if ($brokerProcesses.Count -eq 0) { break }
-    Start-Sleep -Milliseconds 250
-} while ([DateTime]::UtcNow -lt $brokerDeadline)
-$serviceProcessGone = (@(Get-OwnedBrokerProcesses).Count -eq 0)
+function Write-CleanupEvidence {
+    $result = [ordered]@{
+        schema = 'amd-privilege-cleanup/v1'
+        qualification_only = $true
+        service_name = $ServiceName
+        sc_stop_exit_code = $scStopExitCode
+        service_state_after_stop_wait = $serviceStateAfterStopWait
+        service_pid_after_stop_wait = $servicePidAfterStopWait
+        stop_control_result = $stopControlResult
+        service_registration_removed = $serviceRegistrationRemoved
+        service_process_gone_after_cleanup = $serviceProcessGone
+        cli_process_gone_after_cleanup = $cliProcessGone
+        broker_process_count_after_cleanup = @($brokerProcesses).Count
+        cli_session_processes_checked = $cliSessions.Count
+        amd_installation_mutated = $false
+        amd_registry_mutated = $false
+        note = 'Qualification evidence is retained for audit; only the owned service registration was removed.'
+        recorded_at_utc = [DateTime]::UtcNow.ToString('o')
+    }
+    if ($outputRoot -and (Test-Path -LiteralPath $outputRoot -PathType Container)) {
+        $result | ConvertTo-Json -Depth 10 |
+            Set-Content -LiteralPath (Join-Path $outputRoot 'CLEANUP-RESULT.json') -Encoding utf8
+        Write-Host "Cleanup evidence retained at $outputRoot"
+    }
+}
 
-$outputRoot = $null
-$cliSessions = @()
-if (Test-Path -LiteralPath $ConfigPath -PathType Leaf) {
-    $config = Get-Content -LiteralPath $ConfigPath -Raw | ConvertFrom-Json
-    $outputRoot = [string]$config.output_root
+try {
+    $initial = Get-QualificationServiceSnapshot
+    if ($initial.present) {
+        & $sc stop $ServiceName | Out-Null
+        $scStopExitCode = [int]$LASTEXITCODE
+
+        $deadline = [DateTime]::UtcNow.AddSeconds(30)
+        do {
+            $snapshot = Get-QualificationServiceSnapshot
+            if (-not $snapshot.present -or
+                ($snapshot.state -eq 'Stopped' -and $snapshot.process_id -eq 0)) {
+                break
+            }
+            Start-Sleep -Milliseconds 250
+        } while ([DateTime]::UtcNow -lt $deadline)
+
+        $snapshot = Get-QualificationServiceSnapshot
+        if ($snapshot.present) {
+            $serviceStateAfterStopWait = $snapshot.state
+            $servicePidAfterStopWait = [int64]$snapshot.process_id
+        }
+        else {
+            $serviceStateAfterStopWait = 'ABSENT'
+            $servicePidAfterStopWait = 0L
+        }
+        $stopControlResult = Resolve-QualificationStopDisposition `
+            -StopExitCode $scStopExitCode `
+            -ServiceState $serviceStateAfterStopWait `
+            -ServiceProcessId $servicePidAfterStopWait `
+            -ServicePresent $snapshot.present
+        if ($stopControlResult -eq 'FAIL_CLOSED_SERVICE_NOT_STOPPED_PID0') {
+            Write-CleanupEvidence
+            throw "Qualification service did not reach Stopped/PID 0 after sc.exe stop exit $scStopExitCode; cleanup failed closed."
+        }
+
+        if ($snapshot.present) {
+            & $sc delete $ServiceName | Out-Null
+            $deleteExitCode = [int]$LASTEXITCODE
+            if ($deleteExitCode -ne 0) {
+                Write-CleanupEvidence
+                throw "sc.exe delete failed with exit code $deleteExitCode"
+            }
+        }
+        $serviceRegistrationRemoved = $true
+    }
+    else {
+        $scStopExitCode = 1062
+        $serviceStateAfterStopWait = 'ABSENT'
+        $servicePidAfterStopWait = 0L
+        $stopControlResult = 'SERVICE_ABSENT'
+        $serviceRegistrationRemoved = $true
+    }
+
+    $deadline = [DateTime]::UtcNow.AddSeconds(30)
+    do {
+        $snapshot = Get-QualificationServiceSnapshot
+        if (-not $snapshot.present) { break }
+        Start-Sleep -Milliseconds 250
+    } while ([DateTime]::UtcNow -lt $deadline)
+    if ((Get-QualificationServiceSnapshot).present) {
+        Write-CleanupEvidence
+        throw "Qualification service registration still exists: $ServiceName"
+    }
+
+    $brokerDeadline = [DateTime]::UtcNow.AddSeconds(30)
+    do {
+        $brokerProcesses = @(Get-OwnedBrokerProcesses)
+        if ($brokerProcesses.Count -eq 0) { break }
+        Start-Sleep -Milliseconds 250
+    } while ([DateTime]::UtcNow -lt $brokerDeadline)
+    $brokerProcesses = @(Get-OwnedBrokerProcesses)
+    $serviceProcessGone = ($brokerProcesses.Count -eq 0)
+
     if ($outputRoot -and (Test-Path -LiteralPath $outputRoot -PathType Container)) {
         foreach ($launchFile in @(Get-ChildItem -LiteralPath $outputRoot -Filter 'AMD-CLI-LAUNCH-*.json' -File -ErrorAction SilentlyContinue)) {
             $launch = Get-Content -LiteralPath $launchFile.FullName -Raw | ConvertFrom-Json
@@ -104,9 +199,18 @@ if (Test-Path -LiteralPath $ConfigPath -PathType Leaf) {
             }
         }
     }
-}
-$cliDeadline = [DateTime]::UtcNow.AddSeconds(30)
-do {
+    $cliDeadline = [DateTime]::UtcNow.AddSeconds(30)
+    do {
+        $cliProcessGone = $true
+        foreach ($session in $cliSessions) {
+            if (-not (Test-ExactProcessGone -ProcessId $session.process_id -ProcessStartTime $session.process_start_time)) {
+                $cliProcessGone = $false
+                break
+            }
+        }
+        if ($cliProcessGone) { break }
+        Start-Sleep -Milliseconds 250
+    } while ([DateTime]::UtcNow -lt $cliDeadline)
     $cliProcessGone = $true
     foreach ($session in $cliSessions) {
         if (-not (Test-ExactProcessGone -ProcessId $session.process_id -ProcessStartTime $session.process_start_time)) {
@@ -114,36 +218,14 @@ do {
             break
         }
     }
-    if ($cliProcessGone) { break }
-    Start-Sleep -Milliseconds 250
-} while ([DateTime]::UtcNow -lt $cliDeadline)
-$cliProcessGone = $true
-foreach ($session in $cliSessions) {
-    if (-not (Test-ExactProcessGone -ProcessId $session.process_id -ProcessStartTime $session.process_start_time)) {
-        $cliProcessGone = $false
-        break
-    }
-}
 
-$result = [ordered]@{
-    schema = 'amd-privilege-cleanup/v1'
-    qualification_only = $true
-    service_name = $ServiceName
-    service_registration_removed = $true
-    service_process_gone_after_cleanup = $serviceProcessGone
-    cli_process_gone_after_cleanup = $cliProcessGone
-    broker_process_count_after_cleanup = @($brokerProcesses).Count
-    cli_session_processes_checked = $cliSessions.Count
-    amd_installation_mutated = $false
-    amd_registry_mutated = $false
-    note = 'Qualification evidence is retained for audit; only the owned service registration was removed.'
-    recorded_at_utc = [DateTime]::UtcNow.ToString('o')
+    Write-CleanupEvidence
+    if (-not $serviceProcessGone -or -not $cliProcessGone) {
+        throw 'Owned broker or AMD CLI process identity remained after bounded cleanup wait; evidence was retained and no unrelated process was killed.'
+    }
+    Write-Host "Removed only qualification service registration: $ServiceName"
 }
-if ($outputRoot -and (Test-Path -LiteralPath $outputRoot -PathType Container)) {
-        $result | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath (Join-Path $outputRoot 'CLEANUP-RESULT.json') -Encoding utf8
-        Write-Host "Cleanup evidence retained at $outputRoot"
+catch {
+    try { Write-CleanupEvidence } catch { }
+    throw
 }
-if (-not $serviceProcessGone -or -not $cliProcessGone) {
-    throw 'Owned broker or AMD CLI process identity remained after bounded cleanup wait; evidence was retained and no unrelated process was killed.'
-}
-Write-Host "Removed only qualification service registration: $ServiceName"

@@ -561,3 +561,99 @@ OLD_ARTIFACT_STATUS = superseded
 NEW_FROZEN_ARTIFACT_ARCHITECTURE = x64
 NEW_FROZEN_ARTIFACT_SHA256 = BD15EDE1CB886844CE6DC628926C4F54C98AB2BD6A22091A18301B2017B987AF
 ```
+
+## AMD-PRIVILEGE-I2 CLIENT IDENTITY + SERVICE STOP/CLEANUP INCIDENT D
+
+The fourth manually authorized setup reached the repaired live-listener
+contract successfully for scope `a8e0c3a5d8f94f53bf2dc5382511acde`. The pipe
+connection was established by the one authorized Medium-integrity client
+attempt, but the LocalService broker attempted to inspect the standard-user
+client with `OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION)` under its own
+primary token. Windows returned `ERROR_ACCESS_DENIED` (`0x80070005`) before
+the broker request-read/decode/dispatch loop. The client then observed the
+expected pipe-close error. No semantic request was dispatched and no AMD
+runtime was executed.
+
+```text
+FOURTH_MANUAL_I2_SCOPE = a8e0c3a5d8f94f53bf2dc5382511acde
+FOURTH_SETUP = PASS
+PIPE_CREATE = PASS
+LIVE_LISTENER = PASS
+PIPE_CONNECTION = PASS
+CLIENT_IDENTITY_CAPTURE = FAIL_OPENPROCESS_ACCESS_DENIED
+BROKER_RESPONSE = identity-error / ACCESS_DENIED
+CLIENT_AUTH_COUNT = 0
+CLIENT_REQUEST_COUNT = 0
+SESSION_OWNER_COUNT = 0
+SESSION_RESULT_COUNT = 0
+AMD_CLI_LAUNCH_COUNT = 0
+PACKAGE_POWER_RESULT_COUNT = 0
+AMD_RUNTIME_EXECUTED = false
+REAL_AMD_RUNTIME_COUNT = 0
+I2_REAL_RUNTIME_GATE_CONSUMED = false
+FIRST_CLEANUP_ATTEMPT = SC_STOP_1053
+NORMAL_CLEANUP_WRAPPER_COMPLETED = false
+MANUAL_RECOVERY_OBSERVED = Service Stopped / PID 0
+SERVICE_REGISTRATION_MANUALLY_DELETED = true
+SC_DELETE_EXIT = 0
+FINAL_SERVICE_REGISTRATION = absent
+FINAL_EXACT_BROKER_PROCESS_COUNT = 0
+```
+
+The incident is classified as
+`BROKER_CLIENT_IDENTITY_CAPTURE_FAILED`, specifically
+`LOCALSERVICE_OPENPROCESS_STANDARD_USER_CLIENT_ACCESS_DENIED`. The client
+frame may have been written to the pipe, but the broker did not authenticate,
+decode, or dispatch it. The preserved evidence contains no
+`CLIENT-AUTH-*.json`, `CLIENT-REQUEST-*.json`, session, CLI-launch, or
+package-power result file.
+
+The offline repair authenticates through the named-pipe security boundary:
+the broker buffers the first bounded frame, calls
+`ImpersonateNamedPipeClient`, reads `TokenUser`, `TokenIntegrityLevel`, and
+`TokenSessionId` from the impersonation token, and obtains the exact
+`GetNamedPipeClientProcessId` PID plus `GetProcessTimes` start time while
+impersonating that client. It then always calls `RevertToSelf` before
+authorization and dispatch. Client-claimed identity is not trusted, and the
+PID/start-time owner binding remains kernel verified. The client now opens the
+pipe with explicit `SECURITY_SQOS_PRESENT | SECURITY_IMPERSONATION` flags.
+
+The synchronous accept path was also replaced with an overlapped
+`ConnectNamedPipe` contract waiting on both the connect event and a broker
+stop event. Stop control reports `SERVICE_STOP_PENDING`, signals the accept
+loop without requiring another client, cancels the pending exact listener I/O,
+requests cancellation of the exact active session, and reaches
+`SERVICE_STOPPED` through the existing service-main path. The cleanup wrapper
+now records the `sc stop` result and authoritative SCM state, allowing a
+nonzero control result such as 1053 to proceed only after `Stopped` and
+`PID 0` are observed; it never deletes a running service or kills unrelated
+processes.
+
+```text
+CLIENT_IDENTITY_CAPTURE_DEFECT = CLOSED_OFFLINE_PENDING_REAL_REACCEPTANCE
+SERVICE_STOP_DEFECT = CLOSED_OFFLINE_PENDING_REAL_REACCEPTANCE
+CLEANUP_WRAPPER_DEFECT = CLOSED
+CLIENT_IDENTITY_SOURCE = NAMED_PIPE_CLIENT_IMPERSONATION_TOKEN
+CLIENT_PID_SOURCE = GetNamedPipeClientProcessId
+CLIENT_PROCESS_START_TIME_SOURCE = GetProcessTimes_under_impersonated_client_context
+CLIENT_USER_SID_SOURCE = TokenUser
+CLIENT_INTEGRITY_SOURCE = TokenIntegrityLevel
+CLIENT_SESSION_ID_SOURCE = TokenSessionId
+REVERT_TO_SELF_GUARANTEED = true
+PID_START_TIME_BINDING_PRESERVED = true
+PIPE_ACCEPT_MODE = FILE_FLAG_OVERLAPPED + OVERLAPPED + STOP_EVENT
+STOP_PENDING_REPORTED = true
+STOP_ACCEPT_LOOP_CANCELLABLE = true
+NEXT_MANUAL_RUNTIME = HUMAN_REQUIRED
+```
+
+The artifact used by Incident D remains historical and immutable. Because the
+broker behavior changed, it is superseded by a new offline x64 release build:
+
+```text
+OLD_FROZEN_ARTIFACT_SHA256 = BD15EDE1CB886844CE6DC628926C4F54C98AB2BD6A22091A18301B2017B987AF
+OLD_ARTIFACT_STATUS = superseded
+NEW_FROZEN_ARTIFACT_ARCHITECTURE = x64
+NEW_FROZEN_ARTIFACT_SHA256 = 0FC205A9CCB186291905F3D7E0983DC7DCCDE47DAD7B5903F6E9F56BC935E017
+I2_REAL_RUNTIME_GATE = NOT_YET_CONSUMED
+```

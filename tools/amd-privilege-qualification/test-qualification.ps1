@@ -12,10 +12,12 @@ $EvidenceRoot = Join-Path $TargetRoot 'evidence'
 $Binary = Join-Path $ToolRoot 'target\debug\amd-privilege-qualification.exe'
 $ScArgumentContract = Join-Path $ToolRoot 'sc-argument-contract.ps1'
 $TokenIntegrityContract = Join-Path $ToolRoot 'token-integrity-contract.ps1'
+$CleanupStateContract = Join-Path $ToolRoot 'cleanup-state-contract.ps1'
 
 foreach ($wrapper in @(
         $ScArgumentContract,
         $TokenIntegrityContract,
+        $CleanupStateContract,
         (Join-Path $ToolRoot 'run-admin-amd-privilege-qualification.ps1'),
         (Join-Path $ToolRoot 'run-standard-user-amd-privilege-client.ps1'),
         (Join-Path $ToolRoot 'cleanup-admin-amd-privilege-qualification.ps1')
@@ -113,6 +115,49 @@ Write-Host 'SC_CREATE_ARGV_SHAPE=PASS'
 Write-Host 'SC_CREATE_BINPATH_VALUE_PRESERVED=PASS'
 Write-Host 'SC_CREATE_ACCOUNT_WITH_SPACE_PRESERVED=PASS'
 Write-Host 'SC_CREATE_DISPLAY_NAME_WITH_SPACES_PRESERVED=PASS'
+
+. $CleanupStateContract
+$cleanupWrapper = Join-Path $ToolRoot 'cleanup-admin-amd-privilege-qualification.ps1'
+$cleanupSource = Get-Content -LiteralPath $cleanupWrapper -Raw
+$adminSetupSource = Get-Content -LiteralPath (Join-Path $ToolRoot 'run-admin-amd-privilege-qualification.ps1') -Raw
+foreach ($case in @(
+        @{ exit = 0; state = 'Stopped'; pid = 0; present = $true; expected = 'SC_STOP_0_PROCEED_TO_DELETE' },
+        @{ exit = 1062; state = 'Stopped'; pid = 0; present = $true; expected = 'SC_STOP_1062_PROCEED_TO_DELETE' },
+        @{ exit = 1053; state = 'Stopped'; pid = 0; present = $true; expected = 'SC_STOP_NONZERO_THEN_STOPPED_PID0_PROCEED_TO_DELETE' },
+        @{ exit = 1053; state = 'Running'; pid = 7348; present = $true; expected = 'FAIL_CLOSED_SERVICE_NOT_STOPPED_PID0' }
+    )) {
+    $actual = Resolve-QualificationStopDisposition `
+        -StopExitCode $case.exit `
+        -ServiceState $case.state `
+        -ServiceProcessId $case.pid `
+        -ServicePresent $case.present
+    if ($actual -cne $case.expected) {
+        throw "Cleanup stop disposition mismatch for exit $($case.exit), state $($case.state), pid $($case.pid). expected=$($case.expected) actual=$actual"
+    }
+}
+if ($cleanupSource -match '(?im)\bStop-Process\b|\btaskkill(?:\.exe)?\b') {
+    throw 'Cleanup wrapper must not kill processes by broad or unrelated identity.'
+}
+if ($adminSetupSource -match "System32\\sc\.exe'\)\s+(stop|delete)") {
+    throw 'Setup failure cleanup must use the bounded owned cleanup wrapper, not direct stop/delete.'
+}
+foreach ($requiredField in @(
+        'sc_stop_exit_code',
+        'service_state_after_stop_wait',
+        'service_pid_after_stop_wait',
+        'stop_control_result'
+    )) {
+    if ($cleanupSource -notmatch [regex]::Escape($requiredField)) {
+        throw "Cleanup evidence field is missing: $requiredField"
+    }
+}
+Write-Host 'SC_STOP_0=PASS'
+Write-Host 'SC_STOP_1062=PASS'
+Write-Host 'SC_STOP_1053_THEN_STOPPED_PID0=PROCEEDS_TO_DELETE'
+Write-Host 'SC_STOP_1053_STILL_RUNNING=FAIL_CLOSED'
+Write-Host 'DELETE_RUNNING_SERVICE=FORBIDDEN'
+Write-Host 'UNRELATED_PROCESS_KILL=FORBIDDEN'
+Write-Host 'SC_EXE_ARGUMENT_SHAPE_AUDIT=PASS'
 
 Remove-Item -LiteralPath $EvidenceRoot -Recurse -Force -ErrorAction SilentlyContinue
 New-Item -ItemType Directory -Force -Path $EvidenceRoot | Out-Null

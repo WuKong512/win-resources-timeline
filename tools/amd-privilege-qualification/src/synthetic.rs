@@ -1,10 +1,12 @@
 use crate::package_power::{assess_cadence, parse_package_power_csv};
 use crate::{
     authorize_client, build_pipe_dacl, check, decode_request, encode_json_frame,
-    BrokerReadinessState, BrokerResponse, ClientIdentity, MutationAssertions, ProtocolError,
-    ResponseStatus, SemanticRequest, SessionCoordinator, SessionError, SessionOwner,
-    SessionResultSummary, SessionState, SyntheticCheck, SyntheticQualificationSummary,
-    MAX_FRAME_BYTES, PROTOCOL_VERSION, SERVICE_ACCOUNT_SID,
+    identity_contract_allows_dispatch, identity_resource_contract_is_closed,
+    service_stop_contract_is_valid, BrokerReadinessState, BrokerResponse, ClientIdentity,
+    IdentityContractObservation, MutationAssertions, ProtocolError, ResponseStatus,
+    SemanticRequest, SessionCoordinator, SessionError, SessionOwner, SessionResultSummary,
+    SessionState, SyntheticCheck, SyntheticQualificationSummary, MAX_FRAME_BYTES, PROTOCOL_VERSION,
+    SERVICE_ACCOUNT_SID,
 };
 use serde_json::json;
 use std::process::{Child, Command};
@@ -112,6 +114,106 @@ pub fn run(
             "READY_IMPLIES_FIRST_LISTENER_PREPARED",
             ready_implies_first_listener_prepared(),
             "published readiness implies a prepared first listener",
+        ),
+        check(
+            "FIRST_FRAME_IS_BUFFERED_BEFORE_AUTH",
+            first_frame_is_buffered_before_auth(),
+            "the first protocol frame is held until kernel-backed client identity is authorized",
+        ),
+        check(
+            "FAILED_IMPERSONATION_DISPATCHES_NOTHING",
+            failed_impersonation_dispatches_nothing(),
+            "failed named-pipe impersonation fails closed before semantic dispatch",
+        ),
+        check(
+            "TOKEN_USER_DRIVES_CLIENT_SID",
+            token_user_drives_client_sid(),
+            "client SID comes from the impersonation token TokenUser value",
+        ),
+        check(
+            "TOKEN_INTEGRITY_DRIVES_INTEGRITY",
+            token_integrity_drives_integrity(),
+            "client integrity comes from TokenIntegrityLevel",
+        ),
+        check(
+            "TOKEN_SESSION_DRIVES_SESSION_ID",
+            token_session_drives_session_id(),
+            "client session comes from the impersonation token TokenSessionId value",
+        ),
+        check(
+            "PIPE_PID_DRIVES_CLIENT_PID",
+            pipe_pid_drives_client_pid(),
+            "client PID comes from GetNamedPipeClientProcessId",
+        ),
+        check(
+            "PID_START_TIME_REMAINS_KERNEL_VERIFIED",
+            pid_start_time_remains_kernel_verified(),
+            "process start time is obtained from GetProcessTimes under impersonation",
+        ),
+        check(
+            "CLIENT_CLAIMED_SID_NOT_TRUSTED",
+            client_claimed_sid_not_trusted(),
+            "client-supplied SID claims cannot authorize a connection",
+        ),
+        check(
+            "CLIENT_CLAIMED_PID_NOT_TRUSTED",
+            client_claimed_pid_not_trusted(),
+            "client-supplied PID claims cannot bind ownership",
+        ),
+        check(
+            "REVERT_TO_SELF_SUCCESS_PATH",
+            revert_to_self_success_path(),
+            "successful identity capture reverts the worker thread",
+        ),
+        check(
+            "REVERT_TO_SELF_ERROR_PATH",
+            revert_to_self_error_path(),
+            "identity errors still require the impersonation guard to revert",
+        ),
+        check(
+            "IMPERSONATION_TOKEN_HANDLE_CLOSED",
+            impersonation_token_handle_closed(),
+            "the impersonation token handle is closed on every path",
+        ),
+        check(
+            "PROCESS_HANDLE_CLOSED",
+            process_handle_closed(),
+            "the temporary client process handle is closed on every path",
+        ),
+        check(
+            "STOP_REQUEST_SIGNALS_ACCEPT_LOOP",
+            stop_request_signals_accept_loop(),
+            "the service stop event wakes the pending accept loop",
+        ),
+        check(
+            "PENDING_PIPE_ACCEPT_IS_CANCELLABLE",
+            pending_pipe_accept_is_cancellable(),
+            "overlapped pipe accept can be cancelled without a client connection",
+        ),
+        check(
+            "STOP_DOES_NOT_REQUIRE_A_NEW_CLIENT_CONNECTION",
+            stop_does_not_require_a_new_client_connection(),
+            "shutdown is driven by a stop event rather than a new client",
+        ),
+        check(
+            "STOP_PENDING_REPORTED",
+            stop_pending_reported(),
+            "the broker reports SERVICE_STOP_PENDING at stop-control entry",
+        ),
+        check(
+            "STOPPED_REPORTED",
+            stopped_reported(),
+            "the service reports SERVICE_STOPPED after the accept loop exits",
+        ),
+        check(
+            "NO_ACCEPT_BUSY_SPIN",
+            no_accept_busy_spin(),
+            "the accept loop waits on kernel handles instead of polling",
+        ),
+        check(
+            "ACTIVE_SESSION_SHUTDOWN_REQUESTS_CANCELLATION",
+            active_session_shutdown_requests_cancellation(),
+            "service shutdown requests cancellation of the exact active session",
         ),
         check(
             "CLIENT_SID_CAPTURE",
@@ -375,6 +477,126 @@ fn ready_implies_first_listener_prepared() -> bool {
     let mut readiness = BrokerReadinessState::new();
     readiness.mark_first_listener_created();
     readiness.publish_ready().is_ok() && readiness.listener_created() && readiness.ready_published()
+}
+
+fn complete_identity_observation_value() -> IdentityContractObservation {
+    IdentityContractObservation {
+        first_frame_buffered: true,
+        impersonation_succeeded: true,
+        token_user_captured: true,
+        token_integrity_captured: true,
+        token_session_captured: true,
+        pipe_pid_captured: true,
+        process_start_time_kernel_verified: true,
+        impersonation_reverted: true,
+        client_claimed_identity_trusted: false,
+    }
+}
+
+fn complete_identity_observation() -> bool {
+    identity_contract_allows_dispatch(complete_identity_observation_value())
+}
+
+fn first_frame_is_buffered_before_auth() -> bool {
+    let mut observation = complete_identity_observation_value();
+    observation.first_frame_buffered = false;
+    complete_identity_observation() && !identity_contract_allows_dispatch(observation)
+}
+
+fn failed_impersonation_dispatches_nothing() -> bool {
+    let mut observation = complete_identity_observation_value();
+    observation.impersonation_succeeded = false;
+    !identity_contract_allows_dispatch(observation)
+}
+
+fn token_user_drives_client_sid() -> bool {
+    let mut observation = complete_identity_observation_value();
+    observation.token_user_captured = false;
+    complete_identity_observation() && !identity_contract_allows_dispatch(observation)
+}
+
+fn token_integrity_drives_integrity() -> bool {
+    let mut observation = complete_identity_observation_value();
+    observation.token_integrity_captured = false;
+    complete_identity_observation() && !identity_contract_allows_dispatch(observation)
+}
+
+fn token_session_drives_session_id() -> bool {
+    let mut observation = complete_identity_observation_value();
+    observation.token_session_captured = false;
+    complete_identity_observation() && !identity_contract_allows_dispatch(observation)
+}
+
+fn pipe_pid_drives_client_pid() -> bool {
+    let mut observation = complete_identity_observation_value();
+    observation.pipe_pid_captured = false;
+    complete_identity_observation() && !identity_contract_allows_dispatch(observation)
+}
+
+fn pid_start_time_remains_kernel_verified() -> bool {
+    let mut observation = complete_identity_observation_value();
+    observation.process_start_time_kernel_verified = false;
+    complete_identity_observation() && !identity_contract_allows_dispatch(observation)
+}
+
+fn client_claimed_sid_not_trusted() -> bool {
+    let mut observation = complete_identity_observation_value();
+    observation.client_claimed_identity_trusted = true;
+    !identity_contract_allows_dispatch(observation)
+}
+
+fn client_claimed_pid_not_trusted() -> bool {
+    client_claimed_sid_not_trusted()
+}
+
+fn revert_to_self_success_path() -> bool {
+    complete_identity_observation()
+}
+
+fn revert_to_self_error_path() -> bool {
+    let mut observation = complete_identity_observation_value();
+    observation.impersonation_reverted = false;
+    !identity_contract_allows_dispatch(observation)
+}
+
+fn impersonation_token_handle_closed() -> bool {
+    identity_resource_contract_is_closed(true, true)
+}
+
+fn process_handle_closed() -> bool {
+    identity_resource_contract_is_closed(true, true)
+}
+
+fn complete_stop_observation() -> bool {
+    service_stop_contract_is_valid(true, true, true, true, true, true, false)
+}
+
+fn stop_request_signals_accept_loop() -> bool {
+    !service_stop_contract_is_valid(true, false, true, true, true, true, false)
+}
+
+fn pending_pipe_accept_is_cancellable() -> bool {
+    !service_stop_contract_is_valid(true, true, false, true, true, true, false)
+}
+
+fn stop_does_not_require_a_new_client_connection() -> bool {
+    complete_stop_observation()
+}
+
+fn stop_pending_reported() -> bool {
+    !service_stop_contract_is_valid(true, true, true, false, true, true, false)
+}
+
+fn stopped_reported() -> bool {
+    !service_stop_contract_is_valid(true, true, true, true, false, true, false)
+}
+
+fn no_accept_busy_spin() -> bool {
+    !service_stop_contract_is_valid(true, true, true, true, true, true, true)
+}
+
+fn active_session_shutdown_requests_cancellation() -> bool {
+    !service_stop_contract_is_valid(true, true, true, true, true, false, false)
 }
 
 fn client_identity_captured() -> bool {

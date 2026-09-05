@@ -15,7 +15,7 @@ use crate::{
 use serde::Serialize;
 use serde_json::json;
 use sha2::{Digest, Sha256};
-use std::fs::{self, File, OpenOptions};
+use std::fs::{self, File};
 use std::io::{self, Read, Write};
 use std::mem::size_of;
 use std::os::windows::io::{AsRawHandle, FromRawHandle};
@@ -27,7 +27,10 @@ use std::sync::{Mutex, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant};
 use windows::core::{PCWSTR, PWSTR};
-use windows::Win32::Foundation::{CloseHandle, GetLastError, HANDLE, HLOCAL};
+use windows::Win32::Foundation::{
+    CloseHandle, GetLastError, ERROR_BROKEN_PIPE, ERROR_IO_PENDING, ERROR_MORE_DATA,
+    ERROR_OPERATION_ABORTED, ERROR_PIPE_CONNECTED, HANDLE, HLOCAL, WAIT_FAILED, WAIT_OBJECT_0,
+};
 use windows::Win32::Security::Authorization::{
     ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1,
 };
@@ -37,12 +40,14 @@ use windows::Win32::Security::WinTrust::{
     WTD_STATEACTION_IGNORE, WTD_UI_NONE,
 };
 use windows::Win32::Security::{
-    GetTokenInformation, TokenElevation, TokenGroups, TokenIntegrityLevel, TokenUser,
-    TOKEN_ELEVATION, TOKEN_GROUPS, TOKEN_INFORMATION_CLASS, TOKEN_MANDATORY_LABEL, TOKEN_QUERY,
-    TOKEN_USER,
+    GetTokenInformation, RevertToSelf, TokenElevation, TokenGroups, TokenIntegrityLevel,
+    TokenSessionId, TokenUser, TOKEN_ELEVATION, TOKEN_GROUPS, TOKEN_INFORMATION_CLASS,
+    TOKEN_MANDATORY_LABEL, TOKEN_QUERY, TOKEN_USER,
 };
 use windows::Win32::Storage::FileSystem::{
-    GetFileVersionInfoSizeW, GetFileVersionInfoW, VerQueryValueW, PIPE_ACCESS_DUPLEX,
+    CreateFileW, GetFileVersionInfoSizeW, GetFileVersionInfoW, ReadFile, VerQueryValueW, WriteFile,
+    FILE_FLAG_OVERLAPPED, FILE_GENERIC_READ, FILE_GENERIC_WRITE, FILE_SHARE_READ, FILE_SHARE_WRITE,
+    OPEN_EXISTING, PIPE_ACCESS_DUPLEX, SECURITY_IMPERSONATION, SECURITY_SQOS_PRESENT,
     VS_FIXEDFILEINFO,
 };
 use windows::Win32::System::JobObjects::{
@@ -52,7 +57,8 @@ use windows::Win32::System::JobObjects::{
 };
 use windows::Win32::System::Pipes::{
     ConnectNamedPipe, CreateNamedPipeW, DisconnectNamedPipe, GetNamedPipeClientProcessId,
-    PIPE_READMODE_MESSAGE, PIPE_REJECT_REMOTE_CLIENTS, PIPE_TYPE_MESSAGE, PIPE_WAIT,
+    ImpersonateNamedPipeClient, PIPE_READMODE_MESSAGE, PIPE_REJECT_REMOTE_CLIENTS,
+    PIPE_TYPE_MESSAGE, PIPE_WAIT,
 };
 use windows::Win32::System::Registry::{RegGetValueW, HKEY_LOCAL_MACHINE, RRF_RT_REG_SZ};
 use windows::Win32::System::RemoteDesktop::ProcessIdToSessionId;
@@ -66,9 +72,11 @@ use windows::Win32::System::Services::{
     SERVICE_TABLE_ENTRYW, SERVICE_WIN32_OWN_PROCESS,
 };
 use windows::Win32::System::Threading::{
-    GetCurrentProcess, GetCurrentProcessId, GetProcessTimes, OpenProcess, OpenProcessToken,
+    CreateEventW, GetCurrentProcess, GetCurrentProcessId, GetCurrentThread, GetProcessTimes,
+    OpenProcess, OpenProcessToken, OpenThreadToken, SetEvent, WaitForMultipleObjects, INFINITE,
     PROCESS_QUERY_LIMITED_INFORMATION,
 };
+use windows::Win32::System::IO::{CancelIoEx, GetOverlappedResult, OVERLAPPED};
 
 const AMD_INSTALL_REGISTRY_KEY: &str = r"SOFTWARE\WOW6432Node\AMD\AMDProfiler";
 const AMD_INSTALL_REGISTRY_VALUE: &str = "InstallationPath";
@@ -81,7 +89,8 @@ const SE_GROUP_ENABLED: u32 = 0x0000_0004;
 
 static STOP_REQUESTED: AtomicBool = AtomicBool::new(false);
 static CONFIG: OnceLock<BrokerConfig> = OnceLock::new();
-static LISTENER: Mutex<Option<isize>> = Mutex::new(None);
+static STOP_EVENT: Mutex<Option<isize>> = Mutex::new(None);
+static STATUS_HANDLE: Mutex<Option<isize>> = Mutex::new(None);
 
 #[derive(Debug, Clone, Serialize)]
 struct ServiceContextEvidence {
@@ -162,6 +171,7 @@ unsafe extern "system" fn service_main(_argc: u32, _argv: *mut PWSTR) {
         return;
     };
 
+    set_status_handle(status_handle);
     let _ = set_service_status(status_handle, SERVICE_START_PENDING, 0, 1, 30_000);
     match service_entry(status_handle, &config) {
         Ok(()) => {
@@ -180,6 +190,7 @@ unsafe extern "system" fn service_main(_argc: u32, _argv: *mut PWSTR) {
             let _ = set_service_status(status_handle, SERVICE_STOPPED, 1, 0, 0);
         }
     }
+    clear_status_handle(status_handle);
 }
 
 unsafe extern "system" fn service_handler(
@@ -190,18 +201,63 @@ unsafe extern "system" fn service_handler(
 ) -> u32 {
     if matches!(control, SERVICE_CONTROL_STOP | SERVICE_CONTROL_SHUTDOWN) {
         STOP_REQUESTED.store(true, Ordering::SeqCst);
-        if let Some(raw) = LISTENER
+        if let Some(raw) = STATUS_HANDLE
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .take()
+            .as_ref()
+            .copied()
         {
-            let handle = HANDLE(raw as *mut _);
-            unsafe {
-                let _ = DisconnectNamedPipe(handle);
-            }
+            let handle = SERVICE_STATUS_HANDLE(raw as *mut std::ffi::c_void);
+            let _ = set_service_status(handle, SERVICE_STOP_PENDING, 0, 1, 30_000);
         }
+        signal_stop_event();
     }
     0
+}
+
+fn set_status_handle(status_handle: SERVICE_STATUS_HANDLE) {
+    let mut current = STATUS_HANDLE
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    *current = Some(status_handle.0 as isize);
+}
+
+fn clear_status_handle(status_handle: SERVICE_STATUS_HANDLE) {
+    let mut current = STATUS_HANDLE
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if current.is_some_and(|raw| raw == status_handle.0 as isize) {
+        *current = None;
+    }
+}
+
+fn install_stop_event(handle: HANDLE) {
+    let mut current = STOP_EVENT
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    *current = Some(handle.0 as isize);
+}
+
+fn clear_stop_event(handle: HANDLE) {
+    let mut current = STOP_EVENT
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if current.is_some_and(|raw| raw == handle.0 as isize) {
+        *current = None;
+    }
+}
+
+fn signal_stop_event() {
+    let raw = STOP_EVENT
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .as_ref()
+        .copied();
+    if let Some(raw) = raw {
+        unsafe {
+            let _ = SetEvent(HANDLE(raw as *mut _));
+        }
+    }
 }
 
 fn set_service_status(
@@ -278,10 +334,17 @@ fn service_entry(
         coordinator: SessionCoordinator::new(),
         output_root: PathBuf::from(&config.output_root),
     };
+    let stop_event = StopEvent::new()?;
+    install_stop_event(stop_event.raw());
+    if STOP_REQUESTED.load(Ordering::Acquire) {
+        signal_stop_event();
+    }
     let mut readiness = crate::BrokerReadinessState::new();
     let first_pipe = create_pipe(&state.config)?;
+    if STOP_REQUESTED.load(Ordering::Acquire) {
+        return Ok(());
+    }
     readiness.mark_first_listener_created();
-    set_listener_handle(first_pipe.raw);
     let readiness_result = (|| {
         set_listener_ready_hint(&state.output_root, &state.config)?;
         readiness.publish_ready().map_err(str::to_owned)?;
@@ -289,11 +352,8 @@ fn service_entry(
         readiness.report_running().map_err(str::to_owned)?;
         set_service_status(status_handle, SERVICE_RUNNING, 0, 0, 0)
     })();
-    if let Err(error) = readiness_result {
-        clear_listener_handle(first_pipe.raw);
-        return Err(error);
-    }
-    broker_loop(&state, first_pipe)
+    readiness_result?;
+    broker_loop(&state, first_pipe, stop_event.raw())
 }
 
 fn set_service_running_hint(root: &Path) -> Result<(), String> {
@@ -330,23 +390,11 @@ fn set_listener_ready_hint(root: &Path, config: &BrokerConfig) -> Result<(), Str
     .map_err(|error| format!("writing PIPE-LISTENER-READY.json failed: {error}"))
 }
 
-fn set_listener_handle(raw: HANDLE) {
-    let mut listener = LISTENER
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    *listener = Some(raw.0 as isize);
-}
-
-fn clear_listener_handle(raw: HANDLE) {
-    let mut listener = LISTENER
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    if listener.is_some_and(|handle| handle == raw.0 as isize) {
-        *listener = None;
-    }
-}
-
-fn broker_loop(state: &BrokerState, first_pipe: PipeHandle) -> Result<(), String> {
+fn broker_loop(
+    state: &BrokerState,
+    first_pipe: PipeHandle,
+    stop_event: HANDLE,
+) -> Result<(), String> {
     let mut pending_pipe = Some(first_pipe);
     while !STOP_REQUESTED.load(Ordering::Acquire) {
         let pipe = match pending_pipe.take() {
@@ -362,25 +410,13 @@ fn broker_loop(state: &BrokerState, first_pipe: PipeHandle) -> Result<(), String
                 return Err(error);
             }
         };
-        let raw = pipe.raw;
-        set_listener_handle(raw);
-        let connected = match unsafe { ConnectNamedPipe(raw, None) } {
-            Ok(()) => true,
-            Err(error) if error.code().0 as u32 == 535 => true,
-            Err(error) => {
-                let _ = error;
-                false
-            }
+        let Some(pipe) = accept_pipe(pipe, stop_event)? else {
+            break;
         };
-        clear_listener_handle(raw);
-        if !connected {
-            drop(pipe);
-            if STOP_REQUESTED.load(Ordering::Acquire) {
-                break;
-            }
-            continue;
+        if STOP_REQUESTED.load(Ordering::Acquire) {
+            break;
         }
-        let stream = pipe.into_file();
+        let stream = NamedPipeStream::new(pipe);
         let state = state.clone();
         thread::spawn(move || handle_connection(stream, state));
     }
@@ -388,9 +424,11 @@ fn broker_loop(state: &BrokerState, first_pipe: PipeHandle) -> Result<(), String
     Ok(())
 }
 
-fn handle_connection(mut stream: File, state: BrokerState) {
-    let raw = HANDLE(stream.as_raw_handle());
-    let identity = match capture_client_identity(raw) {
+fn handle_connection(mut stream: NamedPipeStream, state: BrokerState) {
+    // Named-pipe impersonation is only valid after a client message has been read.  Buffer the
+    // first bounded frame and hold it outside the dispatch path until authentication completes.
+    let first_frame = read_frame(&mut stream);
+    let identity = match capture_client_identity(stream.raw()) {
         Ok(identity) => identity,
         Err(error) => {
             let response = BrokerResponse::new("identity-error", ResponseStatus::AccessDenied)
@@ -416,6 +454,14 @@ fn handle_connection(mut stream: File, state: BrokerState) {
             "client_is_local": identity.client_is_local,
             "expected_user_sid": state.config.installing_user_sid,
             "pipe_reject_remote_clients": true,
+            "identity_source": "NAMED_PIPE_CLIENT_IMPERSONATION_TOKEN",
+            "client_pid_source": "GetNamedPipeClientProcessId",
+            "client_process_start_time_source":
+                "GetProcessTimes_under_impersonated_client_context",
+            "client_user_sid_source": "TokenUser",
+            "client_integrity_source": "TokenIntegrityLevel",
+            "client_session_id_source": "TokenSessionId",
+            "impersonation_reverted": true,
             "authorized": auth.is_ok()
         }),
     );
@@ -427,6 +473,28 @@ fn handle_connection(mut stream: File, state: BrokerState) {
         );
         return;
     }
+
+    match first_frame {
+        Ok(Some(payload)) => {
+            if !process_request_frame(&mut stream, &state, &identity, &payload) {
+                finish_authenticated_connection(&state, &identity, &owner);
+                return;
+            }
+        }
+        Ok(None) => {
+            finish_authenticated_connection(&state, &identity, &owner);
+            return;
+        }
+        Err(error) => {
+            write_client_request_evidence(&state, &identity, None, None);
+            let response = BrokerResponse::new("frame-error", ResponseStatus::InvalidRequest)
+                .with_message(error);
+            let _ = write_response(&mut stream, &response);
+            finish_authenticated_connection(&state, &identity, &owner);
+            return;
+        }
+    }
+
     loop {
         let payload = match read_frame(&mut stream) {
             Ok(Some(payload)) => payload,
@@ -438,23 +506,40 @@ fn handle_connection(mut stream: File, state: BrokerState) {
                 break;
             }
         };
-        let request_id = request_id_from_json(&payload);
-        let decoded = decode_request(&payload);
-        write_client_request_evidence(
-            &state,
-            &identity,
-            request_id.as_deref(),
-            decoded.as_ref().ok(),
-        );
-        let response = match decoded {
-            Ok(request) => dispatch_request(&request, &identity, &state),
-            Err(error) => response_for_protocol_error(request_id, &error),
-        };
-        if write_response(&mut stream, &response).is_err() {
+        if !process_request_frame(&mut stream, &state, &identity, &payload) {
             break;
         }
     }
-    if state.coordinator.disconnect(&owner) {
+    finish_authenticated_connection(&state, &identity, &owner);
+}
+
+fn process_request_frame(
+    stream: &mut NamedPipeStream,
+    state: &BrokerState,
+    identity: &ClientIdentity,
+    payload: &[u8],
+) -> bool {
+    let request_id = request_id_from_json(payload);
+    let decoded = decode_request(payload);
+    write_client_request_evidence(
+        state,
+        identity,
+        request_id.as_deref(),
+        decoded.as_ref().ok(),
+    );
+    let response = match decoded {
+        Ok(request) => dispatch_request(&request, identity, state),
+        Err(error) => response_for_protocol_error(request_id, &error),
+    };
+    write_response(stream, &response).is_ok()
+}
+
+fn finish_authenticated_connection(
+    state: &BrokerState,
+    identity: &ClientIdentity,
+    owner: &crate::SessionOwner,
+) {
+    if state.coordinator.disconnect(owner) {
         let _ = crate::write_json(
             &state
                 .output_root
@@ -1253,13 +1338,9 @@ struct PipeHandle {
     raw: HANDLE,
 }
 
-impl PipeHandle {
-    fn into_file(self) -> File {
-        let handle = self.raw;
-        std::mem::forget(self);
-        unsafe { File::from_raw_handle(handle.0) }
-    }
-}
+// The handle is transferred exactly once to the dedicated connection worker.  No handle value is
+// shared concurrently; ownership and closure remain in PipeHandle::drop on that worker.
+unsafe impl Send for PipeHandle {}
 
 impl Drop for PipeHandle {
     fn drop(&mut self) {
@@ -1268,6 +1349,232 @@ impl Drop for PipeHandle {
             let _ = CloseHandle(self.raw);
         }
     }
+}
+
+struct NamedPipeStream {
+    pipe: PipeHandle,
+}
+
+impl NamedPipeStream {
+    fn new(pipe: PipeHandle) -> Self {
+        Self { pipe }
+    }
+
+    fn raw(&self) -> HANDLE {
+        self.pipe.raw
+    }
+}
+
+impl Read for NamedPipeStream {
+    fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+        overlapped_read(self.pipe.raw, buffer)
+    }
+}
+
+impl Write for NamedPipeStream {
+    fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
+        overlapped_write(self.pipe.raw, buffer)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+struct OwnedHandle {
+    raw: HANDLE,
+}
+
+impl OwnedHandle {
+    fn new(raw: HANDLE, label: &str) -> Result<Self, String> {
+        if raw.is_invalid() {
+            return Err(format!("{label} returned an invalid handle"));
+        }
+        Ok(Self { raw })
+    }
+
+    fn raw(&self) -> HANDLE {
+        self.raw
+    }
+}
+
+impl Drop for OwnedHandle {
+    fn drop(&mut self) {
+        unsafe {
+            let _ = CloseHandle(self.raw);
+        }
+    }
+}
+
+struct StopEvent {
+    handle: OwnedHandle,
+}
+
+impl StopEvent {
+    fn new() -> Result<Self, String> {
+        let handle = unsafe { CreateEventW(None, true, false, PCWSTR::null()) }
+            .map_err(|error| format!("CreateEventW for broker stop failed: {error}"))?;
+        Ok(Self {
+            handle: OwnedHandle::new(handle, "CreateEventW")?,
+        })
+    }
+
+    fn raw(&self) -> HANDLE {
+        self.handle.raw()
+    }
+}
+
+impl Drop for StopEvent {
+    fn drop(&mut self) {
+        clear_stop_event(self.raw());
+    }
+}
+
+fn create_io_event() -> Result<OwnedHandle, String> {
+    let event = unsafe { CreateEventW(None, true, false, PCWSTR::null()) }
+        .map_err(|error| format!("CreateEventW for overlapped I/O failed: {error}"))?;
+    OwnedHandle::new(event, "CreateEventW")
+}
+
+fn accept_pipe(pipe: PipeHandle, stop_event: HANDLE) -> Result<Option<PipeHandle>, String> {
+    let connect_event = create_io_event()?;
+    let mut overlapped: OVERLAPPED = unsafe { std::mem::zeroed() };
+    overlapped.hEvent = connect_event.raw();
+    let connect_result =
+        unsafe { ConnectNamedPipe(pipe.raw, Some(std::ptr::addr_of_mut!(overlapped))) };
+    match connect_result {
+        Ok(()) => Ok(Some(pipe)),
+        Err(error) if error.code().0 as u32 == ERROR_PIPE_CONNECTED.0 => Ok(Some(pipe)),
+        Err(error) if error.code().0 as u32 == ERROR_IO_PENDING.0 => {
+            let handles = [connect_event.raw(), stop_event];
+            let wait_result = unsafe { WaitForMultipleObjects(&handles, false, INFINITE) };
+            match wait_result.0 {
+                value if value == WAIT_OBJECT_0.0 => {
+                    let mut transferred = 0_u32;
+                    match unsafe {
+                        GetOverlappedResult(
+                            pipe.raw,
+                            std::ptr::addr_of!(overlapped),
+                            &mut transferred,
+                            false,
+                        )
+                    } {
+                        Ok(()) => Ok(Some(pipe)),
+                        Err(error)
+                            if STOP_REQUESTED.load(Ordering::Acquire)
+                                || error.code().0 as u32 == ERROR_OPERATION_ABORTED.0 =>
+                        {
+                            Ok(None)
+                        }
+                        Err(error) => Err(format!(
+                            "GetOverlappedResult for named-pipe connect failed: {error}"
+                        )),
+                    }
+                }
+                value if value == WAIT_OBJECT_0.0 + 1 => {
+                    let _ = unsafe { CancelIoEx(pipe.raw, Some(std::ptr::addr_of!(overlapped))) };
+                    let mut transferred = 0_u32;
+                    let _ = unsafe {
+                        GetOverlappedResult(
+                            pipe.raw,
+                            std::ptr::addr_of!(overlapped),
+                            &mut transferred,
+                            true,
+                        )
+                    };
+                    Ok(None)
+                }
+                value if value == WAIT_FAILED.0 => {
+                    Err(format!("WaitForMultipleObjects failed: {}", unsafe {
+                        GetLastError().0
+                    }))
+                }
+                value => Err(format!("unexpected WaitForMultipleObjects result: {value}")),
+            }
+        }
+        Err(_error) if STOP_REQUESTED.load(Ordering::Acquire) => Ok(None),
+        Err(error) => Err(format!("ConnectNamedPipe failed: {error}")),
+    }
+}
+
+fn overlapped_read(pipe: HANDLE, buffer: &mut [u8]) -> io::Result<usize> {
+    if buffer.is_empty() {
+        return Ok(0);
+    }
+    let event = create_io_event().map_err(io_other)?;
+    let mut overlapped: OVERLAPPED = unsafe { std::mem::zeroed() };
+    overlapped.hEvent = event.raw();
+    let mut transferred = 0_u32;
+    let result = unsafe {
+        ReadFile(
+            pipe,
+            Some(buffer),
+            Some(std::ptr::addr_of_mut!(transferred)),
+            Some(std::ptr::addr_of_mut!(overlapped)),
+        )
+    };
+    match result {
+        Ok(()) => Ok(transferred as usize),
+        Err(error) if error.code().0 as u32 == ERROR_IO_PENDING.0 => {
+            match unsafe {
+                GetOverlappedResult(
+                    pipe,
+                    std::ptr::addr_of!(overlapped),
+                    std::ptr::addr_of_mut!(transferred),
+                    true,
+                )
+            } {
+                Ok(()) => Ok(transferred as usize),
+                Err(error) if error.code().0 as u32 == ERROR_MORE_DATA.0 => {
+                    Ok(transferred as usize)
+                }
+                Err(error) => Err(io_win32(error)),
+            }
+        }
+        Err(error) if error.code().0 as u32 == ERROR_MORE_DATA.0 => Ok(transferred as usize),
+        Err(error) if error.code().0 as u32 == ERROR_BROKEN_PIPE.0 => Ok(0),
+        Err(error) => Err(io_win32(error)),
+    }
+}
+
+fn overlapped_write(pipe: HANDLE, buffer: &[u8]) -> io::Result<usize> {
+    if buffer.is_empty() {
+        return Ok(0);
+    }
+    let event = create_io_event().map_err(io_other)?;
+    let mut overlapped: OVERLAPPED = unsafe { std::mem::zeroed() };
+    overlapped.hEvent = event.raw();
+    let mut transferred = 0_u32;
+    let result = unsafe {
+        WriteFile(
+            pipe,
+            Some(buffer),
+            Some(std::ptr::addr_of_mut!(transferred)),
+            Some(std::ptr::addr_of_mut!(overlapped)),
+        )
+    };
+    match result {
+        Ok(()) => Ok(transferred as usize),
+        Err(error) if error.code().0 as u32 == ERROR_IO_PENDING.0 => unsafe {
+            GetOverlappedResult(
+                pipe,
+                std::ptr::addr_of!(overlapped),
+                std::ptr::addr_of_mut!(transferred),
+                true,
+            )
+            .map(|_| transferred as usize)
+            .map_err(io_win32)
+        },
+        Err(error) => Err(io_win32(error)),
+    }
+}
+
+fn io_other(error: String) -> io::Error {
+    io::Error::other(error)
+}
+
+fn io_win32(error: windows::core::Error) -> io::Error {
+    io::Error::from_raw_os_error(error.code().0)
 }
 
 fn create_pipe(config: &BrokerConfig) -> Result<PipeHandle, String> {
@@ -1287,7 +1594,7 @@ fn create_pipe(config: &BrokerConfig) -> Result<PipeHandle, String> {
     let handle = unsafe {
         CreateNamedPipeW(
             PCWSTR::from_raw(name.as_ptr()),
-            PIPE_ACCESS_DUPLEX,
+            PIPE_ACCESS_DUPLEX | FILE_FLAG_OVERLAPPED,
             mode,
             PIPE_INSTANCE_COUNT,
             PIPE_BUFFER_BYTES,
@@ -1333,11 +1640,7 @@ fn write_response(writer: &mut impl Write, response: &BrokerResponse) -> Result<
 
 pub fn run_client(options: ClientOptions) -> Result<(), String> {
     let config = load_config()?;
-    let mut stream = OpenOptions::new()
-        .read(true)
-        .write(true)
-        .open(&config.pipe_name)
-        .map_err(|error| format!("opening qualification pipe failed: {error}"))?;
+    let mut stream = open_client_pipe(&config.pipe_name)?;
     let status_request = SemanticRequest::GetAmdProviderStatus {
         protocol_version: crate::PROTOCOL_VERSION,
         request_id: next_request_id("status"),
@@ -1396,6 +1699,26 @@ pub fn run_client(options: ClientOptions) -> Result<(), String> {
     }
 }
 
+fn open_client_pipe(pipe_name: &str) -> Result<File, String> {
+    let name = wide_null(pipe_name);
+    let desired_access = FILE_GENERIC_READ.0 | FILE_GENERIC_WRITE.0;
+    let share_mode = FILE_SHARE_READ | FILE_SHARE_WRITE;
+    let flags = SECURITY_SQOS_PRESENT | SECURITY_IMPERSONATION;
+    let handle = unsafe {
+        CreateFileW(
+            PCWSTR::from_raw(name.as_ptr()),
+            desired_access,
+            share_mode,
+            None,
+            OPEN_EXISTING,
+            flags,
+            None,
+        )
+    }
+    .map_err(|error| format!("opening qualification pipe failed: {error}"))?;
+    Ok(unsafe { File::from_raw_handle(handle.0) })
+}
+
 fn send_request(stream: &mut File, request: &SemanticRequest) -> Result<BrokerResponse, String> {
     let frame = encode_json_frame(&request.to_value()).map_err(|error| error.to_string())?;
     stream
@@ -1410,26 +1733,23 @@ fn send_request(stream: &mut File, request: &SemanticRequest) -> Result<BrokerRe
 fn collect_service_context(config: &BrokerConfig) -> Result<ServiceContextEvidence, String> {
     let current = unsafe { GetCurrentProcess() };
     let token = open_process_token(current)?;
-    let user_bytes = token_information(token, TokenUser)?;
+    let user_bytes = token_information(token.raw(), TokenUser)?;
     let user = unsafe { &*(user_bytes.as_ptr() as *const TOKEN_USER) };
     let account_sid = sid_to_string(user.User.Sid)?;
     let service_sid = config.service_sid.clone();
     let service_sid_present = service_sid
         .as_deref()
-        .is_some_and(|sid| token_contains_sid(token, TokenGroups, sid).unwrap_or(false));
+        .is_some_and(|sid| token_contains_sid(token.raw(), TokenGroups, sid).unwrap_or(false));
     let service_sid_type = query_service_sid_type().unwrap_or_else(|_| "UNKNOWN".to_owned());
-    let integrity_sid = token_information(token, TokenIntegrityLevel)
+    let integrity_sid = token_information(token.raw(), TokenIntegrityLevel)
         .ok()
         .and_then(|bytes| {
             let label = unsafe { &*(bytes.as_ptr() as *const TOKEN_MANDATORY_LABEL) };
             sid_to_string(label.Label.Sid).ok()
         });
-    let token_elevated = token_information(token, TokenElevation)
+    let token_elevated = token_information(token.raw(), TokenElevation)
         .ok()
         .map(|bytes| unsafe { (*(bytes.as_ptr() as *const TOKEN_ELEVATION)).TokenIsElevated != 0 });
-    unsafe {
-        let _ = CloseHandle(token);
-    }
     let session_id = process_session_id(unsafe { GetCurrentProcessId() });
     let process_architecture = if size_of::<usize>() == 8 {
         "x64"
@@ -1463,41 +1783,103 @@ fn capture_client_identity(pipe: HANDLE) -> Result<ClientIdentity, String> {
     let mut pid = 0_u32;
     unsafe { GetNamedPipeClientProcessId(pipe, &mut pid) }
         .map_err(|error| format!("GetNamedPipeClientProcessId failed: {error}"))?;
-    let process = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) }
-        .map_err(|error| format!("OpenProcess for client failed: {error}"))?;
-    let start = process_start_time(process)
-        .ok_or_else(|| "GetProcessTimes for client failed".to_owned())?;
-    let token = open_process_token(process)?;
-    let user_bytes = token_information(token, TokenUser)?;
+
+    // The broker is intentionally LocalService and must not inspect a standard-user process
+    // using its own primary token.  The authenticated pipe client supplies the security context
+    // for identity inspection, while the kernel-reported pipe PID remains the binding anchor.
+    let mut impersonation = ImpersonationGuard::new(pipe)?;
+    let token = open_thread_token()?;
+    let user_bytes = token_information(token.raw(), TokenUser)?;
     let user = unsafe { &*(user_bytes.as_ptr() as *const TOKEN_USER) };
     let client_user_sid = sid_to_string(user.User.Sid)?;
-    let integrity = token_information(token, TokenIntegrityLevel)
-        .ok()
-        .and_then(|bytes| {
-            let label = unsafe { &*(bytes.as_ptr() as *const TOKEN_MANDATORY_LABEL) };
-            sid_to_string(label.Label.Sid).ok()
-        });
-    unsafe {
-        let _ = CloseHandle(token);
-        let _ = CloseHandle(process);
+    let integrity_bytes = token_information(token.raw(), TokenIntegrityLevel)?;
+    let label = unsafe { &*(integrity_bytes.as_ptr() as *const TOKEN_MANDATORY_LABEL) };
+    let integrity = sid_to_string(label.Label.Sid)?;
+    let session_bytes = token_information(token.raw(), TokenSessionId)?;
+    if session_bytes.len() < size_of::<u32>() {
+        return Err("TokenSessionId returned an undersized buffer".to_owned());
     }
+    let client_session_id = Some(u32::from_ne_bytes(
+        session_bytes[..size_of::<u32>()]
+            .try_into()
+            .map_err(|_| "TokenSessionId conversion failed".to_owned())?,
+    ));
+
+    // OpenProcess/GetProcessTimes is deliberately performed while impersonating the client.  It
+    // preserves the exact PID + process-start-time binding without granting LocalService extra
+    // privileges such as SeDebugPrivilege.
+    let process = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) }
+        .map_err(|error| format!("OpenProcess for client under impersonation failed: {error}"))?;
+    let process = OwnedHandle::new(process, "OpenProcess for client")?;
+    let start = process_start_time(process.raw())
+        .ok_or_else(|| "GetProcessTimes for client under impersonation failed".to_owned())?;
+    impersonation.revert()?;
+
     // The pipe is created with PIPE_REJECT_REMOTE_CLIENTS. A client PID returned by
     // GetNamedPipeClientProcessId on this endpoint is therefore a local client.
     Ok(ClientIdentity {
         client_pid: pid,
         client_process_start_time: start,
         client_user_sid,
-        client_integrity_level: integrity,
-        client_session_id: process_session_id(pid),
+        client_integrity_level: Some(integrity),
+        client_session_id,
         client_is_local: true,
     })
 }
 
-fn open_process_token(process: HANDLE) -> Result<HANDLE, String> {
+struct ImpersonationGuard {
+    active: bool,
+}
+
+impl ImpersonationGuard {
+    fn new(pipe: HANDLE) -> Result<Self, String> {
+        unsafe { ImpersonateNamedPipeClient(pipe) }
+            .map_err(|error| format!("ImpersonateNamedPipeClient failed: {error}"))?;
+        Ok(Self { active: true })
+    }
+
+    fn revert(&mut self) -> Result<(), String> {
+        if !self.active {
+            return Ok(());
+        }
+        unsafe { RevertToSelf() }.map_err(|error| {
+            format!("RevertToSelf failed after client identity capture: {error}")
+        })?;
+        self.active = false;
+        Ok(())
+    }
+}
+
+impl Drop for ImpersonationGuard {
+    fn drop(&mut self) {
+        if self.active {
+            unsafe {
+                let _ = RevertToSelf();
+            }
+            self.active = false;
+        }
+    }
+}
+
+fn open_thread_token() -> Result<OwnedHandle, String> {
+    let mut token = HANDLE::default();
+    unsafe {
+        OpenThreadToken(
+            GetCurrentThread(),
+            TOKEN_QUERY,
+            false,
+            std::ptr::addr_of_mut!(token),
+        )
+    }
+    .map_err(|error| format!("OpenThreadToken for pipe client failed: {error}"))?;
+    OwnedHandle::new(token, "OpenThreadToken")
+}
+
+fn open_process_token(process: HANDLE) -> Result<OwnedHandle, String> {
     let mut token = HANDLE::default();
     unsafe { OpenProcessToken(process, TOKEN_QUERY, &mut token) }
         .map_err(|error| format!("OpenProcessToken failed: {error}"))?;
-    Ok(token)
+    OwnedHandle::new(token, "OpenProcessToken")
 }
 
 fn token_information(token: HANDLE, class: TOKEN_INFORMATION_CLASS) -> Result<Vec<u8>, String> {

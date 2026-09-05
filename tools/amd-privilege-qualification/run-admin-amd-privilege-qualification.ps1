@@ -9,7 +9,7 @@ $ServiceName = 'ResourceTimelineAmdPrivilegeQualification'
 $ServiceAccount = 'NT AUTHORITY\LocalService'
 $ServiceSidAccount = "NT SERVICE\$ServiceName"
 $ArtifactPath = Join-Path $PSScriptRoot 'target\release\amd-privilege-qualification.exe'
-$ExpectedArtifactSha256 = 'BD15EDE1CB886844CE6DC628926C4F54C98AB2BD6A22091A18301B2017B987AF'
+$ExpectedArtifactSha256 = '0FC205A9CCB186291905F3D7E0983DC7DCCDE47DAD7B5903F6E9F56BC935E017'
 $QualificationRoot = Join-Path $env:ProgramData 'ResourceTimeline\qualification\amd-privilege'
 $ConfigPath = Join-Path $QualificationRoot 'BROKER-CONFIG.json'
 . (Join-Path $PSScriptRoot 'sc-argument-contract.ps1')
@@ -254,8 +254,12 @@ try {
 }
 catch {
     if ($serviceCreated) {
-        & (Join-Path $env:SystemRoot 'System32\sc.exe') stop $ServiceName | Out-Null
-        & (Join-Path $env:SystemRoot 'System32\sc.exe') delete $ServiceName | Out-Null
+        try {
+            & (Join-Path $PSScriptRoot 'cleanup-admin-amd-privilege-qualification.ps1')
+        }
+        catch {
+            Write-Warning "Owned qualification cleanup failed closed after setup failure: $($_.Exception.Message)"
+        }
     }
     throw
 }
