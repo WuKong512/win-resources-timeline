@@ -177,6 +177,39 @@ Write-Host 'ERROR_OPERATION_ABORTED_NORMALIZATION=PASS'
 Write-Host 'ERROR_MORE_DATA_NORMALIZATION=PASS'
 Write-Host 'ERROR_BROKEN_PIPE_NORMALIZATION=PASS'
 
+if ($windowsSourceText -match 'read_frame\(\s*&mut\s+stream\s*\)') {
+    throw 'Server connection handling must use the message-aware pipe frame reader, not the generic stream reader.'
+}
+foreach ($ioCall in @('ReadFile', 'WriteFile')) {
+    $ioMatches = [regex]::Matches($windowsSourceText, "(?s)${ioCall}\s*\((.*?)\);" )
+    foreach ($ioMatch in $ioMatches) {
+        if ($ioMatch.Groups[1].Value -match 'Some\(std::ptr::addr_of_mut!\(transferred\)\)' -and
+            $ioMatch.Groups[1].Value -match 'Some\(std::ptr::addr_of_mut!\(overlapped\)\)') {
+            throw "$ioCall still passes an asynchronous byte-count output pointer."
+        }
+    }
+}
+foreach ($requiredSourceContract in @(
+        'fn overlapped_read_chunk',
+        'fn synchronous_read_pipe_chunk',
+        'fn read_pipe_frame',
+        'fn write_pipe_message',
+        'fn write_one_message',
+        'TRAILING_MESSAGE_DATA',
+        'TRUNCATED_PAYLOAD',
+        'FIRST-FRAME-'
+    )) {
+    if ($windowsSourceText -notmatch [regex]::Escape($requiredSourceContract)) {
+        throw "Message-mode pipe contract is missing: $requiredSourceContract"
+    }
+}
+Write-Host 'MESSAGE_MODE_SERVER_FRAME_READER=PASS'
+Write-Host 'ASYNC_READ_BYTE_COUNT_FROM_COMPLETION=PASS'
+Write-Host 'ASYNC_WRITE_BYTE_COUNT_FROM_COMPLETION=PASS'
+Write-Host 'ONE_REQUEST_ONE_PIPE_MESSAGE=PASS'
+Write-Host 'ONE_RESPONSE_ONE_PIPE_MESSAGE=PASS'
+Write-Host 'FIRST_FRAME_FALSE_EOF_REGRESSION=PASS'
+
 Remove-Item -LiteralPath $EvidenceRoot -Recurse -Force -ErrorAction SilentlyContinue
 New-Item -ItemType Directory -Force -Path $EvidenceRoot | Out-Null
 

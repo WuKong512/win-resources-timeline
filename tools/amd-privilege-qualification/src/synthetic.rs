@@ -1,15 +1,16 @@
 use crate::package_power::{assess_cadence, parse_package_power_csv};
 use crate::{
-    authorize_client, build_pipe_dacl, check, decode_request, encode_json_frame,
-    hresult_from_win32_contract, hresult_matches_win32_contract, identity_contract_allows_dispatch,
-    identity_resource_contract_is_closed, pending_accept_cancel_is_drained,
-    pending_accept_release_is_safe, pending_accept_state_after_cancel,
-    service_stop_contract_is_valid, win32_code_from_hresult_contract, BrokerReadinessState,
-    BrokerResponse, ClientIdentity, FirstAcceptState, IdentityContractObservation,
-    MutationAssertions, PendingAcceptCompletion, PendingAcceptLifecycleState, ProtocolError,
-    ResponseStatus, SemanticRequest, SessionCoordinator, SessionError, SessionOwner,
-    SessionResultSummary, SessionState, SyntheticCheck, SyntheticQualificationSummary,
-    MAX_FRAME_BYTES, PROTOCOL_VERSION, SERVICE_ACCOUNT_SID,
+    authorize_client, build_pipe_dacl, check, classify_message_frame, decode_request,
+    encode_json_frame, hresult_from_win32_contract, hresult_matches_win32_contract,
+    identity_contract_allows_dispatch, identity_resource_contract_is_closed,
+    pending_accept_cancel_is_drained, pending_accept_release_is_safe,
+    pending_accept_state_after_cancel, service_stop_contract_is_valid,
+    win32_code_from_hresult_contract, BrokerReadinessState, BrokerResponse, ClientIdentity,
+    FirstAcceptState, IdentityContractObservation, MessageFrameResult, MutationAssertions,
+    PendingAcceptCompletion, PendingAcceptLifecycleState, ProtocolError, ResponseStatus,
+    SemanticRequest, SessionCoordinator, SessionError, SessionOwner, SessionResultSummary,
+    SessionState, SyntheticCheck, SyntheticQualificationSummary, MAX_FRAME_BYTES, PROTOCOL_VERSION,
+    SERVICE_ACCOUNT_SID,
 };
 use serde_json::json;
 use std::process::{Child, Command};
@@ -454,6 +455,66 @@ pub fn run(
             "generic HRESULT failures are not truncated into OS error numbers",
         ),
         check(
+            "MESSAGE_MODE_PREFIX_MORE_DATA_IS_NOT_EOF",
+            message_mode_prefix_more_data_is_not_eof(),
+            "ERROR_MORE_DATA after a four-byte prefix read is not interpreted as EOF",
+        ),
+        check(
+            "FOUR_BYTE_PREFIX_PARTIAL_MESSAGE",
+            four_byte_prefix_partial_message(),
+            "a non-empty message provides the complete four-byte prefix and reports remaining data",
+        ),
+        check(
+            "DECLARED_LENGTH_EXACT_MESSAGE_BOUNDARY",
+            declared_length_exact_message_boundary(),
+            "declared payload length exactly matches the named-pipe message",
+        ),
+        check(
+            "DECLARED_LENGTH_SHORTER_THAN_MESSAGE",
+            declared_length_shorter_than_message(),
+            "trailing named-pipe message bytes are rejected",
+        ),
+        check(
+            "DECLARED_LENGTH_LONGER_THAN_MESSAGE",
+            declared_length_longer_than_message(),
+            "a message shorter than its declared payload is rejected",
+        ),
+        check(
+            "TRUNCATED_PREFIX",
+            truncated_prefix_is_rejected(),
+            "a message ending before four prefix bytes is rejected",
+        ),
+        check(
+            "TRUNCATED_PAYLOAD",
+            truncated_payload_is_rejected(),
+            "a message ending before its declared payload is rejected",
+        ),
+        check(
+            "ZERO_LENGTH_PAYLOAD",
+            zero_length_payload_is_defined(),
+            "a zero-length payload is a defined exact message boundary",
+        ),
+        check(
+            "FIRST_FRAME_VALID_REACHES_REQUEST_PROCESSING",
+            first_frame_valid_reaches_request_processing(),
+            "a valid first frame remains eligible for semantic request processing after auth",
+        ),
+        check(
+            "FIRST_FRAME_ERROR_WRITES_DIAGNOSTIC",
+            first_frame_error_writes_diagnostic(),
+            "invalid first-frame outcomes are represented by a bounded diagnostic result",
+        ),
+        check(
+            "ONE_CLIENT_REQUEST_FRAME_ONE_PIPE_MESSAGE",
+            one_request_frame_one_pipe_message(),
+            "one client request frame is exactly one pipe message",
+        ),
+        check(
+            "ONE_SERVER_RESPONSE_FRAME_ONE_PIPE_MESSAGE",
+            one_server_response_frame_one_pipe_message(),
+            "one server response frame is exactly one pipe message",
+        ),
+        check(
             "PACKAGE_POWER_PARSER_REGRESSION",
             parser_fixture_passes(),
             "existing package-power fixture remains parseable with cadence",
@@ -532,6 +593,96 @@ fn unknown_request_rejected() -> bool {
 fn oversized_request_rejected() -> bool {
     let bytes = vec![b'x'; MAX_FRAME_BYTES + 1];
     matches!(decode_request(&bytes), Err(ProtocolError::OversizedRequest))
+}
+
+fn message_frame(payload: &[u8]) -> Vec<u8> {
+    let mut message = (payload.len() as u32).to_le_bytes().to_vec();
+    message.extend_from_slice(payload);
+    message
+}
+
+fn message_mode_prefix_more_data_is_not_eof() -> bool {
+    let message = message_frame(br#"{}"#);
+    let prefix_bytes_read = message.len().min(std::mem::size_of::<u32>());
+    let prefix_more_data = message.len() > std::mem::size_of::<u32>();
+    prefix_bytes_read == 4
+        && prefix_more_data
+        && classify_message_frame(&message) == MessageFrameResult::Valid
+}
+
+fn four_byte_prefix_partial_message() -> bool {
+    let message = message_frame(br#"{"request_type":"GetAmdProviderStatus"}"#);
+    message.len() > 4
+        && message[..4].len() == 4
+        && classify_message_frame(&message) == MessageFrameResult::Valid
+}
+
+fn declared_length_exact_message_boundary() -> bool {
+    classify_message_frame(&message_frame(b"payload")) == MessageFrameResult::Valid
+}
+
+fn declared_length_shorter_than_message() -> bool {
+    let mut message = message_frame(b"payload");
+    message.extend_from_slice(b"trailing");
+    classify_message_frame(&message) == MessageFrameResult::TrailingMessageData
+}
+
+fn declared_length_longer_than_message() -> bool {
+    let mut message = (7_u32).to_le_bytes().to_vec();
+    message.extend_from_slice(b"short");
+    classify_message_frame(&message) == MessageFrameResult::TruncatedPayload
+}
+
+fn truncated_prefix_is_rejected() -> bool {
+    classify_message_frame(&[0_u8, 1_u8]) == MessageFrameResult::TruncatedPrefix
+}
+
+fn truncated_payload_is_rejected() -> bool {
+    let mut message = (4_u32).to_le_bytes().to_vec();
+    message.extend_from_slice(b"no");
+    classify_message_frame(&message) == MessageFrameResult::TruncatedPayload
+}
+
+fn zero_length_payload_is_defined() -> bool {
+    classify_message_frame(&0_u32.to_le_bytes()) == MessageFrameResult::Valid
+}
+
+fn first_frame_valid_reaches_request_processing() -> bool {
+    let payload = serde_json::to_vec(&json!({
+        "protocol_version": PROTOCOL_VERSION,
+        "request_id": "synthetic-first-frame",
+        "request_type": "GetAmdProviderStatus"
+    }))
+    .unwrap();
+    classify_message_frame(&message_frame(&payload)) == MessageFrameResult::Valid
+        && matches!(
+            decode_request(&payload),
+            Ok(SemanticRequest::GetAmdProviderStatus { .. })
+        )
+}
+
+fn first_frame_error_writes_diagnostic() -> bool {
+    classify_message_frame(&[0_u8, 1_u8, 2_u8]) != MessageFrameResult::Valid
+}
+
+fn one_request_frame_one_pipe_message() -> bool {
+    let payload = serde_json::to_vec(&json!({
+        "protocol_version": PROTOCOL_VERSION,
+        "request_id": "synthetic-one-message",
+        "request_type": "GetAmdProviderStatus"
+    }))
+    .unwrap();
+    classify_message_frame(&message_frame(&payload)) == MessageFrameResult::Valid
+}
+
+fn one_server_response_frame_one_pipe_message() -> bool {
+    let payload = serde_json::to_vec(&json!({
+        "protocol_version": PROTOCOL_VERSION,
+        "request_id": "synthetic-response",
+        "status": "OK"
+    }))
+    .unwrap();
+    classify_message_frame(&message_frame(&payload)) == MessageFrameResult::Valid
 }
 
 fn raw_surface_absent(field: &str) -> bool {

@@ -16,7 +16,7 @@ use serde::Serialize;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::fs::{self, File};
-use std::io::{self, Read, Write};
+use std::io::{self, Write};
 use std::mem::size_of;
 use std::os::windows::io::{AsRawHandle, FromRawHandle};
 use std::os::windows::process::CommandExt;
@@ -584,10 +584,198 @@ fn broker_loop(
     }
 }
 
+#[derive(Debug, Clone, Serialize)]
+struct PipeFrameDiagnostic {
+    schema: &'static str,
+    qualification_only: bool,
+    frame_prefix_read_attempted: bool,
+    prefix_bytes_read: usize,
+    prefix_more_data: bool,
+    declared_payload_length: Option<usize>,
+    payload_bytes_read: usize,
+    payload_more_data: bool,
+    message_boundary_complete: bool,
+    frame_result: &'static str,
+    request_dispatch_allowed: bool,
+}
+
+struct PipeFrameRead {
+    payload: Option<Vec<u8>>,
+    error: Option<String>,
+    diagnostic: PipeFrameDiagnostic,
+}
+
+fn initial_pipe_frame_diagnostic() -> PipeFrameDiagnostic {
+    PipeFrameDiagnostic {
+        schema: "amd-privilege-first-frame/v1",
+        qualification_only: QUALIFICATION_ONLY,
+        frame_prefix_read_attempted: true,
+        prefix_bytes_read: 0,
+        prefix_more_data: false,
+        declared_payload_length: None,
+        payload_bytes_read: 0,
+        payload_more_data: false,
+        message_boundary_complete: false,
+        frame_result: "IO_ERROR",
+        request_dispatch_allowed: false,
+    }
+}
+
+fn pipe_frame_error(diagnostic: PipeFrameDiagnostic, message: impl Into<String>) -> PipeFrameRead {
+    PipeFrameRead {
+        payload: None,
+        error: Some(message.into()),
+        diagnostic,
+    }
+}
+
+fn read_pipe_frame(stream: &mut NamedPipeStream) -> PipeFrameRead {
+    let mut diagnostic = initial_pipe_frame_diagnostic();
+    let mut prefix = [0_u8; 4];
+    let prefix_chunk = match overlapped_read_chunk(stream.raw(), &mut prefix) {
+        Ok(chunk) => chunk,
+        Err(error) => {
+            return pipe_frame_error(
+                diagnostic,
+                format!("pipe frame prefix read failed: {error}"),
+            )
+        }
+    };
+    diagnostic.prefix_bytes_read = prefix_chunk.bytes_read;
+    diagnostic.prefix_more_data = prefix_chunk.more_data;
+
+    if prefix_chunk.bytes_read == 0 {
+        diagnostic.frame_result = "EOF_BEFORE_PREFIX";
+        return PipeFrameRead {
+            payload: None,
+            error: None,
+            diagnostic,
+        };
+    }
+    if prefix_chunk.bytes_read != prefix.len() {
+        diagnostic.frame_result = "TRUNCATED_PREFIX";
+        return pipe_frame_error(
+            diagnostic,
+            format!(
+                "pipe frame prefix was truncated: read {} of {} bytes",
+                prefix_chunk.bytes_read,
+                prefix.len()
+            ),
+        );
+    }
+
+    let declared_length = u32::from_le_bytes(prefix) as usize;
+    diagnostic.declared_payload_length = Some(declared_length);
+    if declared_length > crate::MAX_FRAME_BYTES {
+        diagnostic.frame_result = "INVALID_LENGTH";
+        return pipe_frame_error(
+            diagnostic,
+            format!("pipe frame exceeds maximum request size: {declared_length} bytes"),
+        );
+    }
+
+    if declared_length == 0 {
+        if prefix_chunk.more_data {
+            diagnostic.frame_result = "TRAILING_MESSAGE_DATA";
+            return pipe_frame_error(
+                diagnostic,
+                "zero-length frame has trailing named-pipe message data",
+            );
+        }
+        diagnostic.frame_result = "VALID";
+        diagnostic.message_boundary_complete = true;
+        diagnostic.request_dispatch_allowed = true;
+        return PipeFrameRead {
+            payload: Some(Vec::new()),
+            error: None,
+            diagnostic,
+        };
+    }
+
+    if !prefix_chunk.more_data {
+        diagnostic.frame_result = "TRUNCATED_PAYLOAD";
+        return pipe_frame_error(
+            diagnostic,
+            "pipe frame prefix message ended before the declared payload",
+        );
+    }
+
+    let mut payload = vec![0_u8; declared_length];
+    let payload_chunk = match overlapped_read_chunk(stream.raw(), &mut payload) {
+        Ok(chunk) => chunk,
+        Err(error) => {
+            return pipe_frame_error(
+                diagnostic,
+                format!("pipe frame payload read failed: {error}"),
+            )
+        }
+    };
+    diagnostic.payload_bytes_read = payload_chunk.bytes_read;
+    diagnostic.payload_more_data = payload_chunk.more_data;
+    if payload_chunk.bytes_read != declared_length {
+        diagnostic.frame_result = "TRUNCATED_PAYLOAD";
+        return pipe_frame_error(
+            diagnostic,
+            format!(
+                "pipe frame payload was truncated: read {} of {} bytes",
+                payload_chunk.bytes_read, declared_length
+            ),
+        );
+    }
+    if payload_chunk.more_data {
+        diagnostic.frame_result = "TRAILING_MESSAGE_DATA";
+        return pipe_frame_error(
+            diagnostic,
+            "pipe frame message contains trailing data beyond its declared payload",
+        );
+    }
+
+    diagnostic.frame_result = "VALID";
+    diagnostic.message_boundary_complete = true;
+    diagnostic.request_dispatch_allowed = true;
+    PipeFrameRead {
+        payload: Some(payload),
+        error: None,
+        diagnostic,
+    }
+}
+
+fn write_first_frame_evidence(
+    state: &BrokerState,
+    identity: &ClientIdentity,
+    frame: &PipeFrameRead,
+    authorized: bool,
+) {
+    let mut diagnostic = frame.diagnostic.clone();
+    diagnostic.request_dispatch_allowed = authorized
+        && frame.error.is_none()
+        && frame.payload.is_some()
+        && diagnostic.frame_result == "VALID";
+    let _ = crate::write_json(
+        &state
+            .output_root
+            .join(format!("FIRST-FRAME-{}.json", identity.client_pid)),
+        &json!({
+            "schema": diagnostic.schema,
+            "qualification_only": diagnostic.qualification_only,
+            "client_pid": identity.client_pid,
+            "frame_prefix_read_attempted": diagnostic.frame_prefix_read_attempted,
+            "prefix_bytes_read": diagnostic.prefix_bytes_read,
+            "prefix_more_data": diagnostic.prefix_more_data,
+            "declared_payload_length": diagnostic.declared_payload_length,
+            "payload_bytes_read": diagnostic.payload_bytes_read,
+            "payload_more_data": diagnostic.payload_more_data,
+            "message_boundary_complete": diagnostic.message_boundary_complete,
+            "frame_result": diagnostic.frame_result,
+            "request_dispatch_allowed": diagnostic.request_dispatch_allowed
+        }),
+    );
+}
+
 fn handle_connection(mut stream: NamedPipeStream, state: BrokerState) {
     // Named-pipe impersonation is only valid after a client message has been read.  Buffer the
     // first bounded frame and hold it outside the dispatch path until authentication completes.
-    let first_frame = read_frame(&mut stream);
+    let first_frame = read_pipe_frame(&mut stream);
     let identity = match capture_client_identity(stream.raw()) {
         Ok(identity) => identity,
         Err(error) => {
@@ -625,6 +813,7 @@ fn handle_connection(mut stream: NamedPipeStream, state: BrokerState) {
             "authorized": auth.is_ok()
         }),
     );
+    write_first_frame_evidence(&state, &identity, &first_frame, auth.is_ok());
     if auth.is_err() {
         let _ = write_response(
             &mut stream,
@@ -635,17 +824,41 @@ fn handle_connection(mut stream: NamedPipeStream, state: BrokerState) {
     }
 
     match first_frame {
-        Ok(Some(payload)) => {
+        PipeFrameRead {
+            payload: Some(payload),
+            error: None,
+            ..
+        } => {
             if !process_request_frame(&mut stream, &state, &identity, &payload) {
                 finish_authenticated_connection(&state, &identity, &owner);
                 return;
             }
         }
-        Ok(None) => {
+        PipeFrameRead {
+            payload: None,
+            error: None,
+            ..
+        } => {
             finish_authenticated_connection(&state, &identity, &owner);
             return;
         }
-        Err(error) => {
+        PipeFrameRead {
+            payload: None,
+            error: Some(error),
+            ..
+        } => {
+            write_client_request_evidence(&state, &identity, None, None);
+            let response = BrokerResponse::new("frame-error", ResponseStatus::InvalidRequest)
+                .with_message(error);
+            let _ = write_response(&mut stream, &response);
+            finish_authenticated_connection(&state, &identity, &owner);
+            return;
+        }
+        PipeFrameRead {
+            payload: Some(_),
+            error: Some(error),
+            ..
+        } => {
             write_client_request_evidence(&state, &identity, None, None);
             let response = BrokerResponse::new("frame-error", ResponseStatus::InvalidRequest)
                 .with_message(error);
@@ -656,10 +869,28 @@ fn handle_connection(mut stream: NamedPipeStream, state: BrokerState) {
     }
 
     loop {
-        let payload = match read_frame(&mut stream) {
-            Ok(Some(payload)) => payload,
-            Ok(None) => break,
-            Err(error) => {
+        let frame = read_pipe_frame(&mut stream);
+        let payload = match frame {
+            PipeFrameRead {
+                payload: Some(payload),
+                error: None,
+                ..
+            } => payload,
+            PipeFrameRead {
+                payload: None,
+                error: None,
+                ..
+            } => break,
+            PipeFrameRead {
+                payload: None,
+                error: Some(error),
+                ..
+            }
+            | PipeFrameRead {
+                payload: Some(_),
+                error: Some(error),
+                ..
+            } => {
                 let response = BrokerResponse::new("frame-error", ResponseStatus::InvalidRequest)
                     .with_message(error);
                 let _ = write_response(&mut stream, &response);
@@ -1525,22 +1756,6 @@ impl NamedPipeStream {
     }
 }
 
-impl Read for NamedPipeStream {
-    fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
-        overlapped_read(self.pipe.raw, buffer)
-    }
-}
-
-impl Write for NamedPipeStream {
-    fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
-        overlapped_write(self.pipe.raw, buffer)
-    }
-
-    fn flush(&mut self) -> io::Result<()> {
-        Ok(())
-    }
-}
-
 struct OwnedHandle {
     raw: HANDLE,
 }
@@ -1888,9 +2103,17 @@ fn wait_for_pipe_accept(
     }
 }
 
-fn overlapped_read(pipe: HANDLE, buffer: &mut [u8]) -> io::Result<usize> {
+struct PipeReadChunk {
+    bytes_read: usize,
+    more_data: bool,
+}
+
+fn overlapped_read_chunk(pipe: HANDLE, buffer: &mut [u8]) -> io::Result<PipeReadChunk> {
     if buffer.is_empty() {
-        return Ok(0);
+        return Ok(PipeReadChunk {
+            bytes_read: 0,
+            more_data: false,
+        });
     }
     let event = create_io_event().map_err(io_other)?;
     let mut overlapped: OVERLAPPED = unsafe { std::mem::zeroed() };
@@ -1900,28 +2123,43 @@ fn overlapped_read(pipe: HANDLE, buffer: &mut [u8]) -> io::Result<usize> {
         ReadFile(
             pipe,
             Some(buffer),
-            Some(std::ptr::addr_of_mut!(transferred)),
+            None,
             Some(std::ptr::addr_of_mut!(overlapped)),
         )
     };
-    match result {
-        Ok(()) => Ok(transferred as usize),
-        Err(error) if error_is_win32(&error, ERROR_IO_PENDING) => {
-            match unsafe {
-                GetOverlappedResult(
-                    pipe,
-                    std::ptr::addr_of!(overlapped),
-                    std::ptr::addr_of_mut!(transferred),
-                    true,
-                )
-            } {
-                Ok(()) => Ok(transferred as usize),
-                Err(error) if error_is_win32(&error, ERROR_MORE_DATA) => Ok(transferred as usize),
-                Err(error) => Err(io_win32(error)),
-            }
+    let returned_more_data = match result {
+        Ok(()) => false,
+        Err(error) if error_is_win32(&error, ERROR_IO_PENDING) => false,
+        Err(error) if error_is_win32(&error, ERROR_MORE_DATA) => true,
+        Err(error) if error_is_win32(&error, ERROR_BROKEN_PIPE) => {
+            return Ok(PipeReadChunk {
+                bytes_read: 0,
+                more_data: false,
+            });
         }
-        Err(error) if error_is_win32(&error, ERROR_MORE_DATA) => Ok(transferred as usize),
-        Err(error) if error_is_win32(&error, ERROR_BROKEN_PIPE) => Ok(0),
+        Err(error) => return Err(io_win32(error)),
+    };
+
+    match unsafe {
+        GetOverlappedResult(
+            pipe,
+            std::ptr::addr_of!(overlapped),
+            std::ptr::addr_of_mut!(transferred),
+            true,
+        )
+    } {
+        Ok(()) => Ok(PipeReadChunk {
+            bytes_read: transferred as usize,
+            more_data: returned_more_data,
+        }),
+        Err(error) if error_is_win32(&error, ERROR_MORE_DATA) => Ok(PipeReadChunk {
+            bytes_read: transferred as usize,
+            more_data: true,
+        }),
+        Err(error) if error_is_win32(&error, ERROR_BROKEN_PIPE) => Ok(PipeReadChunk {
+            bytes_read: 0,
+            more_data: false,
+        }),
         Err(error) => Err(io_win32(error)),
     }
 }
@@ -1938,23 +2176,24 @@ fn overlapped_write(pipe: HANDLE, buffer: &[u8]) -> io::Result<usize> {
         WriteFile(
             pipe,
             Some(buffer),
-            Some(std::ptr::addr_of_mut!(transferred)),
+            None,
             Some(std::ptr::addr_of_mut!(overlapped)),
         )
     };
     match result {
-        Ok(()) => Ok(transferred as usize),
-        Err(error) if error_is_win32(&error, ERROR_IO_PENDING) => unsafe {
-            GetOverlappedResult(
-                pipe,
-                std::ptr::addr_of!(overlapped),
-                std::ptr::addr_of_mut!(transferred),
-                true,
-            )
-            .map(|_| transferred as usize)
-            .map_err(io_win32)
-        },
-        Err(error) => Err(io_win32(error)),
+        Ok(()) => {}
+        Err(error) if error_is_win32(&error, ERROR_IO_PENDING) => {}
+        Err(error) => return Err(io_win32(error)),
+    }
+    unsafe {
+        GetOverlappedResult(
+            pipe,
+            std::ptr::addr_of!(overlapped),
+            std::ptr::addr_of_mut!(transferred),
+            true,
+        )
+        .map(|_| transferred as usize)
+        .map_err(io_win32)
     }
 }
 
@@ -2004,31 +2243,119 @@ fn create_pipe(config: &BrokerConfig) -> Result<PipeHandle, String> {
     Ok(PipeHandle { raw: handle })
 }
 
-fn read_frame(reader: &mut impl Read) -> Result<Option<Vec<u8>>, String> {
+fn synchronous_read_pipe_chunk(pipe: HANDLE, buffer: &mut [u8]) -> io::Result<PipeReadChunk> {
+    if buffer.is_empty() {
+        return Ok(PipeReadChunk {
+            bytes_read: 0,
+            more_data: false,
+        });
+    }
+    let mut transferred = 0_u32;
+    let result = unsafe {
+        ReadFile(
+            pipe,
+            Some(buffer),
+            Some(std::ptr::addr_of_mut!(transferred)),
+            None,
+        )
+    };
+    match result {
+        Ok(()) => Ok(PipeReadChunk {
+            bytes_read: transferred as usize,
+            more_data: false,
+        }),
+        Err(error) if error_is_win32(&error, ERROR_MORE_DATA) => Ok(PipeReadChunk {
+            bytes_read: transferred as usize,
+            more_data: true,
+        }),
+        Err(error) if error_is_win32(&error, ERROR_BROKEN_PIPE) => Ok(PipeReadChunk {
+            bytes_read: 0,
+            more_data: false,
+        }),
+        Err(error) => Err(io_win32(error)),
+    }
+}
+
+fn read_client_pipe_frame(reader: &mut File) -> Result<Option<Vec<u8>>, String> {
     let mut prefix = [0_u8; 4];
-    match reader.read_exact(&mut prefix) {
-        Ok(()) => {}
-        Err(error) if error.kind() == io::ErrorKind::UnexpectedEof => return Ok(None),
-        Err(error) => return Err(format!("pipe frame prefix read failed: {error}")),
+    let prefix_chunk = synchronous_read_pipe_chunk(HANDLE(reader.as_raw_handle()), &mut prefix)
+        .map_err(|error| format!("pipe frame prefix read failed: {error}"))?;
+    if prefix_chunk.bytes_read == 0 {
+        return Ok(None);
+    }
+    if prefix_chunk.bytes_read != prefix.len() {
+        return Err(format!(
+            "pipe frame prefix was truncated: read {} of {} bytes",
+            prefix_chunk.bytes_read,
+            prefix.len()
+        ));
     }
     let length = u32::from_le_bytes(prefix) as usize;
     if length > crate::MAX_FRAME_BYTES {
         return Err("pipe frame exceeds maximum request size".to_owned());
     }
+    if length == 0 {
+        if prefix_chunk.more_data {
+            return Err("zero-length response has trailing named-pipe message data".to_owned());
+        }
+        return Ok(Some(Vec::new()));
+    }
+    if !prefix_chunk.more_data {
+        return Err("pipe frame prefix message ended before the declared payload".to_owned());
+    }
     let mut payload = vec![0_u8; length];
-    reader
-        .read_exact(&mut payload)
+    let payload_chunk = synchronous_read_pipe_chunk(HANDLE(reader.as_raw_handle()), &mut payload)
         .map_err(|error| format!("pipe frame payload read failed: {error}"))?;
+    if payload_chunk.bytes_read != length {
+        return Err(format!(
+            "pipe frame payload was truncated: read {} of {} bytes",
+            payload_chunk.bytes_read, length
+        ));
+    }
+    if payload_chunk.more_data {
+        return Err("pipe frame message contains trailing data".to_owned());
+    }
     Ok(Some(payload))
 }
 
-fn write_response(writer: &mut impl Write, response: &BrokerResponse) -> Result<(), String> {
+fn write_one_message(writer: &mut impl Write, frame: &[u8]) -> io::Result<()> {
+    if frame.len() > std::mem::size_of::<u32>() + crate::MAX_FRAME_BYTES {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "pipe message exceeds the bounded frame size",
+        ));
+    }
+    let written = writer.write(frame)?;
+    if written != frame.len() {
+        return Err(io::Error::new(
+            io::ErrorKind::WriteZero,
+            format!(
+                "single pipe-message write was short: wrote {written} of {} bytes",
+                frame.len()
+            ),
+        ));
+    }
+    writer.flush()
+}
+
+fn write_pipe_message(stream: &mut NamedPipeStream, frame: &[u8]) -> Result<(), String> {
+    if frame.len() > std::mem::size_of::<u32>() + crate::MAX_FRAME_BYTES {
+        return Err("pipe message exceeds the bounded frame size".to_owned());
+    }
+    let written = overlapped_write(stream.raw(), frame).map_err(|error| error.to_string())?;
+    if written != frame.len() {
+        return Err(format!(
+            "single pipe-message write was short: wrote {written} of {} bytes",
+            frame.len()
+        ));
+    }
+    Ok(())
+}
+
+fn write_response(writer: &mut NamedPipeStream, response: &BrokerResponse) -> Result<(), String> {
     let value = serde_json::to_value(response).map_err(|error| error.to_string())?;
     let frame = encode_json_frame(&value).map_err(|error| error.to_string())?;
-    writer
-        .write_all(&frame)
-        .map_err(|error| error.to_string())?;
-    writer.flush().map_err(|error| error.to_string())
+    write_pipe_message(writer, &frame)
 }
 
 pub fn run_client(options: ClientOptions) -> Result<(), String> {
@@ -2114,11 +2441,9 @@ fn open_client_pipe(pipe_name: &str) -> Result<File, String> {
 
 fn send_request(stream: &mut File, request: &SemanticRequest) -> Result<BrokerResponse, String> {
     let frame = encode_json_frame(&request.to_value()).map_err(|error| error.to_string())?;
-    stream
-        .write_all(&frame)
-        .map_err(|error| error.to_string())?;
-    stream.flush().map_err(|error| error.to_string())?;
-    let response = read_frame(stream)?.ok_or_else(|| "broker closed the pipe".to_owned())?;
+    write_one_message(stream, &frame).map_err(|error| error.to_string())?;
+    let response =
+        read_client_pipe_frame(stream)?.ok_or_else(|| "broker closed the pipe".to_owned())?;
     serde_json::from_slice(&response)
         .map_err(|error| format!("broker response is invalid: {error}"))
 }

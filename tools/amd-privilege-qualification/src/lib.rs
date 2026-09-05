@@ -324,6 +324,48 @@ impl fmt::Display for FrameError {
     }
 }
 
+/// The result of validating one complete message-mode named-pipe message against the
+/// qualification protocol's length-prefixed framing contract.
+///
+/// A message-mode pipe exposes the message boundary as an additional security and protocol
+/// invariant: one request or response frame must occupy exactly one pipe message.  The Windows
+/// broker performs this validation incrementally while reading; this pure classifier keeps the
+/// boundary rules executable in platform-independent synthetic tests as well.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MessageFrameResult {
+    Valid,
+    EofBeforePrefix,
+    TruncatedPrefix,
+    TruncatedPayload,
+    TrailingMessageData,
+    InvalidLength,
+}
+
+/// Classify a complete message-mode pipe message without decoding or logging its payload.
+pub fn classify_message_frame(message: &[u8]) -> MessageFrameResult {
+    if message.is_empty() {
+        return MessageFrameResult::EofBeforePrefix;
+    }
+    if message.len() < std::mem::size_of::<u32>() {
+        return MessageFrameResult::TruncatedPrefix;
+    }
+
+    let prefix = [message[0], message[1], message[2], message[3]];
+    let declared_length = u32::from_le_bytes(prefix) as usize;
+    if declared_length > MAX_FRAME_BYTES {
+        return MessageFrameResult::InvalidLength;
+    }
+
+    let payload_length = message.len() - std::mem::size_of::<u32>();
+    if payload_length < declared_length {
+        MessageFrameResult::TruncatedPayload
+    } else if payload_length > declared_length {
+        MessageFrameResult::TrailingMessageData
+    } else {
+        MessageFrameResult::Valid
+    }
+}
+
 /// Requests are semantic capabilities.  There is deliberately no executable, argv, shell,
 /// working-directory, environment, registry-path, or output-path field in this type.
 #[derive(Debug, Clone, PartialEq, Eq)]

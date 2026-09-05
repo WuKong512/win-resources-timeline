@@ -783,3 +783,101 @@ NEW_FROZEN_ARTIFACT_ARCHITECTURE = x64
 NEW_FROZEN_ARTIFACT_SHA256 = DD73C52BBC1E38103580351ED49D50F044C7F7A35463406791C5AE51876754AF
 NEXT_GATE = HUMAN_SETUP_ONLY
 ```
+
+## AMD-PRIVILEGE-I2 FIRST-FRAME FALSE EOF + OVERLAPPED PIPE I/O INCIDENT F
+
+The sixth manually authorized setup reached all previously repaired security
+and lifecycle boundaries for scope `989c7b843bfe47dabe3d228e9b57ddbb`. The
+first armed accept was reused by the real standard-user client, named-pipe
+impersonation captured and authorized the client identity, and the live
+running-Service stop path completed cleanly. The client then failed while
+reading the broker response to its initial provider-status request. No
+semantic request evidence or AMD runtime evidence was produced.
+
+```text
+SIXTH_MANUAL_I2_SCOPE = 989c7b843bfe47dabe3d228e9b57ddbb
+SIXTH_SETUP = PASS
+FIRST_ACCEPT_ARMED = PASS
+FIRST_ACCEPT_REUSED = REAL_PASS
+CLIENT_IDENTITY_CAPTURE = REAL_PASS
+CLIENT_AUTHORIZATION = REAL_PASS
+CLIENT_USER_SID = S-1-5-21-759388592-2654043993-2344833624-1001
+CLIENT_INTEGRITY = S-1-16-8192
+CLIENT_PID = 33672
+CLIENT_SESSION_ID = 1
+CLIENT_AUTH_COUNT = 1
+CLIENT_REQUEST_COUNT = 0
+FIRST_FRAME_INFERRED_RESULT = Ok(None)
+PRIMARY_CLIENT_FAILURE = FIRST_FRAME_FALSE_EOF
+SESSION_OWNER_COUNT = 0
+SESSION_RESULT_COUNT = 0
+AMD_CLI_LAUNCH_COUNT = 0
+PACKAGE_POWER_RESULT_COUNT = 0
+START_AMD_POWER_SESSION_SENT = false
+AMD_RUNTIME_EXECUTED = false
+REAL_AMD_RUNTIME_COUNT = 0
+I2_REAL_RUNTIME_GATE_CONSUMED = false
+LIVE_SERVICE_STOP = REAL_PASS
+SC_STOP_EXIT = 0
+SERVICE_AFTER_STOP = Stopped
+SERVICE_PID_AFTER_STOP = 0
+SERVICE_REGISTRATION_REMOVED = true
+FINAL_BROKER_PROCESS_COUNT = 0
+```
+
+The persisted state transition and the pre-repair Windows implementation
+confirm the exact failure: the server uses a message-mode pipe while asking
+for only the four-byte length prefix. A normal non-empty request therefore
+returns `ERROR_MORE_DATA`; the old overlapped read helper trusted its
+synchronous-only byte-count output parameter, observed zero, and converted
+that state into `Ok(0)`, which the generic framing layer interpreted as EOF.
+The client never sent `StartAmdPowerSession`, and this incident is not an
+AMD, driver, or LocalService privilege failure.
+
+The offline repair separates the Windows server's message-aware reader from
+the client response reader. It obtains asynchronous transfer counts only from
+`GetOverlappedResult`, uses a synchronous message-aware reader for client
+responses, treats `ERROR_MORE_DATA` as a partial message state, reads the
+declared payload, and requires the declared frame length to match the complete
+named-pipe message. Truncated prefixes/payloads, oversized frames, and
+trailing message data are rejected. First-frame evidence is written without
+raw payload bytes. Client requests and broker responses use a single bounded
+write so one logical frame is one pipe message.
+
+```text
+MESSAGE_MODE_PREFIX_MORE_DATA_IS_NOT_EOF = PASS
+DECLARED_LENGTH_MESSAGE_BOUNDARY = ENFORCED
+TRAILING_MESSAGE_DATA = REJECTED
+TRUNCATED_MESSAGE = REJECTED
+ASYNC_READ_BYTE_COUNT_SOURCE = GetOverlappedResult
+ASYNC_WRITE_BYTE_COUNT_SOURCE = GetOverlappedResult
+ONE_REQUEST_FRAME_ONE_PIPE_MESSAGE = PASS
+ONE_RESPONSE_FRAME_ONE_PIPE_MESSAGE = PASS
+FIRST_FRAME_DIAGNOSTIC = PREPARED
+FIRST_FRAME_FALSE_EOF_DEFECT = CLOSED
+OVERLAPPED_MESSAGE_READ_CONTRACT = CLOSED
+OVERLAPPED_RESPONSE_WRITE_CONTRACT = CLOSED
+FIRST_ACCEPT_REUSE_REAL = PASS
+CLIENT_IDENTITY_REAL = PASS
+CLIENT_AUTHORIZATION_REAL = PASS
+LIVE_SERVICE_STOP_REAL = PASS
+```
+
+The Incident F artifact remains historical and immutable. The active wrappers
+now require the new offline x64 release artifact:
+
+```text
+OLD_FROZEN_ARTIFACT_SHA256 = DD73C52BBC1E38103580351ED49D50F044C7F7A35463406791C5AE51876754AF
+OLD_ARTIFACT_STATUS = superseded
+NEW_FROZEN_ARTIFACT_ARCHITECTURE = x64
+NEW_FROZEN_ARTIFACT_SHA256 = 9EFE48C03F8181156C7AAC5D65981BD49CC446D500C7E34FCB88CB59AC751C00
+REAL_AMD_RUNTIME_COUNT_DURING_REPAIR = 0
+SERVICE_REGISTRATION_COUNT_DURING_REPAIR = 0
+REAL_IPC_CLIENT_COUNT_DURING_REPAIR = 0
+I2_REAL_RUNTIME_GATE_CONSUMED = false
+NEXT_GATE = HUMAN_SETUP_ONLY
+```
+
+Incident F's real identity, first-accept reuse, and live stop evidence remain
+valid; only the post-auth first-frame transport defect was repaired offline.
+No qualification wrapper was run during this repair.
