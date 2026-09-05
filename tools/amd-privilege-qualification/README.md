@@ -91,7 +91,7 @@ the binary requires rebuilding and recording a new hash before any future run:
 path = tools/amd-privilege-qualification/target/release/amd-privilege-qualification.exe
 architecture = x64
 build_mode = release / cargo --offline
-sha256 = 9EFE48C03F8181156C7AAC5D65981BD49CC446D500C7E34FCB88CB59AC751C00
+sha256 = 9FEB2BC942C74A6627BBC2716B450171C96A8E66617CE0624A3FC0FF69F3C464
 broker_authenticode = NotSigned; exact SHA-256 is required by both wrappers
 ```
 

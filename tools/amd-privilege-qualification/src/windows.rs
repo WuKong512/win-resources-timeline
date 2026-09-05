@@ -58,8 +58,8 @@ use windows::Win32::System::JobObjects::{
 };
 use windows::Win32::System::Pipes::{
     ConnectNamedPipe, CreateNamedPipeW, DisconnectNamedPipe, GetNamedPipeClientProcessId,
-    ImpersonateNamedPipeClient, PIPE_READMODE_MESSAGE, PIPE_REJECT_REMOTE_CLIENTS,
-    PIPE_TYPE_MESSAGE, PIPE_WAIT,
+    GetNamedPipeHandleStateW, ImpersonateNamedPipeClient, SetNamedPipeHandleState, NAMED_PIPE_MODE,
+    PIPE_NOWAIT, PIPE_READMODE_MESSAGE, PIPE_REJECT_REMOTE_CLIENTS, PIPE_TYPE_MESSAGE, PIPE_WAIT,
 };
 use windows::Win32::System::Registry::{RegGetValueW, HKEY_LOCAL_MACHINE, RRF_RT_REG_SZ};
 use windows::Win32::System::RemoteDesktop::ProcessIdToSessionId;
@@ -2436,7 +2436,46 @@ fn open_client_pipe(pipe_name: &str) -> Result<File, String> {
         )
     }
     .map_err(|error| format!("opening qualification pipe failed: {error}"))?;
-    Ok(unsafe { File::from_raw_handle(handle.0) })
+    // Convert to the RAII owner before configuring the handle.  If either the mode write or
+    // read-back verification fails, dropping this File closes exactly the CreateFileW handle
+    // and prevents a protocol request from being sent on an unverified pipe mode.
+    let stream = unsafe { File::from_raw_handle(handle.0) };
+    configure_client_pipe_mode(&stream)?;
+    Ok(stream)
+}
+
+fn configure_client_pipe_mode(stream: &File) -> Result<(), String> {
+    let handle = HANDLE(stream.as_raw_handle());
+    let requested_mode = PIPE_READMODE_MESSAGE | PIPE_WAIT;
+    unsafe {
+        SetNamedPipeHandleState(handle, Some(std::ptr::addr_of!(requested_mode)), None, None)
+    }
+    .map_err(|error| format!("setting client pipe message-read mode failed: {error}"))?;
+
+    let mut effective_mode = NAMED_PIPE_MODE(0);
+    let state_result = unsafe {
+        GetNamedPipeHandleStateW(
+            handle,
+            Some(std::ptr::addr_of_mut!(effective_mode)),
+            None,
+            None,
+            None,
+            None,
+        )
+    };
+    if !state_result.as_bool() {
+        let win32_error = unsafe { GetLastError().0 };
+        return Err(format!(
+            "verifying client pipe message-read mode failed with Win32 error {win32_error}"
+        ));
+    }
+    if !effective_mode.contains(PIPE_READMODE_MESSAGE) || effective_mode.contains(PIPE_NOWAIT) {
+        return Err(format!(
+            "client pipe mode verification failed: expected PIPE_READMODE_MESSAGE | PIPE_WAIT, actual=0x{:08X}",
+            effective_mode.0
+        ));
+    }
+    Ok(())
 }
 
 fn send_request(stream: &mut File, request: &SemanticRequest) -> Result<BrokerResponse, String> {

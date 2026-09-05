@@ -9,7 +9,7 @@ $ServiceName = 'ResourceTimelineAmdPrivilegeQualification'
 $ServiceAccount = 'NT AUTHORITY\LocalService'
 $ServiceSidAccount = "NT SERVICE\$ServiceName"
 $ArtifactPath = Join-Path $PSScriptRoot 'target\release\amd-privilege-qualification.exe'
-$ExpectedArtifactSha256 = '9EFE48C03F8181156C7AAC5D65981BD49CC446D500C7E34FCB88CB59AC751C00'
+$ExpectedArtifactSha256 = '9FEB2BC942C74A6627BBC2716B450171C96A8E66617CE0624A3FC0FF69F3C464'
 $QualificationRoot = Join-Path $env:ProgramData 'ResourceTimeline\qualification\amd-privilege'
 $ConfigPath = Join-Path $QualificationRoot 'BROKER-CONFIG.json'
 . (Join-Path $PSScriptRoot 'sc-argument-contract.ps1')

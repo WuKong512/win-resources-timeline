@@ -881,3 +881,76 @@ NEXT_GATE = HUMAN_SETUP_ONLY
 Incident F's real identity, first-accept reuse, and live stop evidence remain
 valid; only the post-auth first-frame transport defect was repaired offline.
 No qualification wrapper was run during this repair.
+
+## AMD-PRIVILEGE-I2 CLIENT RESPONSE MESSAGE READ-MODE INCIDENT G
+
+The seventh manually authorized setup used scope
+`3ccf5f4b74bc4d8d97bbf632a380750e` and reached every previously repaired
+server-side boundary. The first armed accept was reused, the real Medium
+standard-user identity was authenticated, the first frame was read as a valid
+message, and `GetAmdProviderStatus` was dispatched. The client then rejected
+the non-empty provider-status response because its `CreateFileW` client handle
+was still in the Win32 default byte-read mode. The client response reader had
+been correctly made message-boundary-aware, so it required
+`PIPE_READMODE_MESSAGE` and reported the mode mismatch as a truncated response.
+
+```text
+INCIDENT_G_SCOPE = 3ccf5f4b74bc4d8d97bbf632a380750e
+SEVENTH_SETUP = PASS
+FIRST_ACCEPT_REUSED = REAL_PASS
+FIRST_FRAME_RESULT = VALID
+FIRST_FRAME_PREFIX_BYTES = 4
+FIRST_FRAME_PREFIX_MORE_DATA = true
+FIRST_FRAME_DECLARED_PAYLOAD_LENGTH = 103
+FIRST_FRAME_PAYLOAD_BYTES = 103
+FIRST_FRAME_PAYLOAD_MORE_DATA = false
+FIRST_FRAME_MESSAGE_BOUNDARY_COMPLETE = true
+CLIENT_AUTHORIZATION = REAL_PASS
+GET_AMD_PROVIDER_STATUS_REQUEST = REAL_PASS
+LOCAL_SERVICE_AMD_CLI_DISCOVERY = REAL_PASS
+CLI_IDENTITY_VALID = true
+PRIMARY_CLIENT_FAILURE = CLIENT_RESPONSE_PIPE_HANDLE_BYTE_READ_MODE
+CLIENT_DEFAULT_READ_MODE_BEFORE_REPAIR = PIPE_READMODE_BYTE
+START_AMD_POWER_SESSION_SENT = false
+SESSION_OWNER_COUNT = 0
+SESSION_RESULT_COUNT = 0
+AMD_CLI_LAUNCH_COUNT = 0
+PACKAGE_POWER_RESULT_COUNT = 0
+REAL_AMD_RUNTIME_COUNT = 0
+I2_REAL_RUNTIME_GATE_CONSUMED = false
+LIVE_SERVICE_STOP = REAL_PASS
+SERVICE_REGISTRATION_FINAL = absent
+BROKER_PROCESS_FINAL = 0
+```
+
+The offline client repair keeps the synchronous, blocking pipe open with
+explicit `SECURITY_SQOS_PRESENT | SECURITY_IMPERSONATION`, converts the raw
+`CreateFileW` result to its `File` RAII owner, then calls
+`SetNamedPipeHandleState` with `PIPE_READMODE_MESSAGE | PIPE_WAIT`. It reads
+back the exact handle state with `GetNamedPipeHandleStateW`, requires message
+read mode and absence of `PIPE_NOWAIT`, and fails closed before the first
+semantic request if configuration or verification fails. The server's
+overlapped read/write completion-count, HRESULT normalization, first-accept
+lifetime, named-pipe impersonation, PID/start-time binding, and live stop
+contracts are unchanged.
+
+The Incident G artifact remains historical and immutable. The active wrappers
+now require the following offline x64 release artifact:
+
+```text
+OLD_FROZEN_ARTIFACT_SHA256 = 9EFE48C03F8181156C7AAC5D65981BD49CC446D500C7E34FCB88CB59AC751C00
+OLD_ARTIFACT_STATUS = superseded
+NEW_FROZEN_ARTIFACT_ARCHITECTURE = x64
+NEW_FROZEN_ARTIFACT_SHA256 = 9FEB2BC942C74A6627BBC2716B450171C96A8E66617CE0624A3FC0FF69F3C464
+INCIDENT_G_SERVER_FRAMING = CLOSED_REAL
+INCIDENT_G_CLIENT_READ_MODE_DEFECT = CLOSED_OFFLINE
+CLIENT_PIPE_MESSAGE_READ_MODE = ENFORCED
+REAL_AMD_RUNTIME_COUNT_DURING_REPAIR = 0
+SERVICE_REGISTRATION_COUNT_DURING_REPAIR = 0
+REAL_IPC_CLIENT_COUNT_DURING_REPAIR = 0
+I2_REAL_RUNTIME_GATE_CONSUMED = false
+NEXT_GATE = HUMAN_SETUP_ONLY
+```
+
+No qualification wrapper was run during this repair. The real AMD runtime
+gate remains unconsumed.

@@ -366,6 +366,35 @@ pub fn classify_message_frame(message: &[u8]) -> MessageFrameResult {
     }
 }
 
+/// The client opens the pipe synchronously, then explicitly switches the exact handle to
+/// message-read mode and verifies the effective state before sending any semantic request.
+/// Keeping this contract platform-independent makes the security ordering testable without
+/// opening a real named pipe or registering a Service.
+pub const fn client_pipe_mode_contract_is_valid(
+    effective_message_read_mode: bool,
+    effective_wait_mode: bool,
+    mode_verified: bool,
+    configured_before_first_request: bool,
+    security_sqos_present: bool,
+    synchronous_io: bool,
+) -> bool {
+    effective_message_read_mode
+        && effective_wait_mode
+        && mode_verified
+        && configured_before_first_request
+        && security_sqos_present
+        && synchronous_io
+}
+
+/// A client mode configuration failure is fail-closed: the RAII handle is closed and no
+/// semantic request is allowed to be sent.
+pub const fn client_pipe_mode_failure_is_fail_closed(
+    handle_closed: bool,
+    request_sent: bool,
+) -> bool {
+    handle_closed && !request_sent
+}
+
 /// Requests are semantic capabilities.  There is deliberately no executable, argv, shell,
 /// working-directory, environment, registry-path, or output-path field in this type.
 #[derive(Debug, Clone, PartialEq, Eq)]

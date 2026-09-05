@@ -505,6 +505,41 @@ pub fn run(
             "invalid first-frame outcomes are represented by a bounded diagnostic result",
         ),
         check(
+            "CLIENT_CREATEFILE_DEFAULT_BYTE_MODE_NOT_ACCEPTED",
+            client_createfile_default_byte_mode_not_accepted(),
+            "the client cannot enter protocol exchange while its handle remains in byte-read mode",
+        ),
+        check(
+            "CLIENT_SWITCHES_TO_MESSAGE_READ_MODE_BEFORE_FIRST_PROTOCOL_REQUEST",
+            client_switches_to_message_read_mode_before_first_protocol_request(),
+            "message-read mode is configured and verified before the first request",
+        ),
+        check(
+            "CLIENT_MESSAGE_READ_MODE_REQUIRED_FOR_BOUNDARY_AWARE_RESPONSE_READER",
+            client_message_read_mode_required_for_boundary_aware_response_reader(),
+            "boundary-aware response framing requires message-read mode",
+        ),
+        check(
+            "CLIENT_PIPE_MODE_CONFIGURATION_FAILURE_FAILS_BEFORE_REQUEST",
+            client_pipe_mode_configuration_failure_fails_before_request(),
+            "a client pipe mode failure prevents semantic request exchange",
+        ),
+        check(
+            "CLIENT_PIPE_MODE_CONFIGURATION_FAILURE_CLOSES_HANDLE",
+            client_pipe_mode_configuration_failure_closes_handle(),
+            "a client pipe mode failure closes the exact RAII-owned handle",
+        ),
+        check(
+            "CLIENT_SECURITY_SQOS_PRESERVED",
+            client_security_sqos_preserved(),
+            "client pipe opening retains explicit security SQOS flags",
+        ),
+        check(
+            "CLIENT_SYNCHRONOUS_IO_PRESERVED",
+            client_synchronous_io_preserved(),
+            "client pipe exchange remains synchronous and blocking",
+        ),
+        check(
             "ONE_CLIENT_REQUEST_FRAME_ONE_PIPE_MESSAGE",
             one_request_frame_one_pipe_message(),
             "one client request frame is exactly one pipe message",
@@ -663,6 +698,34 @@ fn first_frame_valid_reaches_request_processing() -> bool {
 
 fn first_frame_error_writes_diagnostic() -> bool {
     classify_message_frame(&[0_u8, 1_u8, 2_u8]) != MessageFrameResult::Valid
+}
+
+fn client_createfile_default_byte_mode_not_accepted() -> bool {
+    !crate::client_pipe_mode_contract_is_valid(false, true, true, true, true, true)
+}
+
+fn client_switches_to_message_read_mode_before_first_protocol_request() -> bool {
+    crate::client_pipe_mode_contract_is_valid(true, true, true, true, true, true)
+}
+
+fn client_message_read_mode_required_for_boundary_aware_response_reader() -> bool {
+    !crate::client_pipe_mode_contract_is_valid(false, true, true, true, true, true)
+}
+
+fn client_pipe_mode_configuration_failure_fails_before_request() -> bool {
+    !crate::client_pipe_mode_contract_is_valid(true, true, false, false, true, true)
+}
+
+fn client_pipe_mode_configuration_failure_closes_handle() -> bool {
+    crate::client_pipe_mode_failure_is_fail_closed(true, false)
+}
+
+fn client_security_sqos_preserved() -> bool {
+    crate::client_pipe_mode_contract_is_valid(true, true, true, true, true, true)
+}
+
+fn client_synchronous_io_preserved() -> bool {
+    crate::client_pipe_mode_contract_is_valid(true, true, true, true, true, true)
 }
 
 fn one_request_frame_one_pipe_message() -> bool {

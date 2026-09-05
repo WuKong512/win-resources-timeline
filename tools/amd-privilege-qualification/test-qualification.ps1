@@ -210,6 +210,51 @@ Write-Host 'ONE_REQUEST_ONE_PIPE_MESSAGE=PASS'
 Write-Host 'ONE_RESPONSE_ONE_PIPE_MESSAGE=PASS'
 Write-Host 'FIRST_FRAME_FALSE_EOF_REGRESSION=PASS'
 
+$openClientStart = $windowsSourceText.IndexOf('fn open_client_pipe')
+$sendRequestStart = $windowsSourceText.IndexOf('fn send_request', $openClientStart)
+if ($openClientStart -lt 0 -or $sendRequestStart -le $openClientStart) {
+    throw 'Client pipe-open function boundary is missing.'
+}
+$clientPipeOpenSource = $windowsSourceText.Substring($openClientStart, $sendRequestStart - $openClientStart)
+foreach ($requiredClientPipeContract in @(
+        'CreateFileW',
+        'SECURITY_SQOS_PRESENT',
+        'SECURITY_IMPERSONATION',
+        'PIPE_READMODE_MESSAGE',
+        'PIPE_WAIT',
+        'SetNamedPipeHandleState',
+        'GetNamedPipeHandleStateW',
+        'configure_client_pipe_mode'
+    )) {
+    if ($clientPipeOpenSource -notmatch [regex]::Escape($requiredClientPipeContract)) {
+        throw "Client pipe mode contract is missing: $requiredClientPipeContract"
+    }
+}
+if ($clientPipeOpenSource -match 'FILE_FLAG_OVERLAPPED') {
+    throw 'Qualification client pipe must remain synchronous; FILE_FLAG_OVERLAPPED was added to client open.'
+}
+$createFileIndex = $clientPipeOpenSource.IndexOf('CreateFileW')
+$raiiIndex = $clientPipeOpenSource.IndexOf('File::from_raw_handle')
+$configureIndex = $clientPipeOpenSource.IndexOf('configure_client_pipe_mode')
+$setStateIndex = $clientPipeOpenSource.IndexOf('SetNamedPipeHandleState')
+$verifyStateIndex = $clientPipeOpenSource.IndexOf('GetNamedPipeHandleStateW')
+if ($createFileIndex -lt 0 -or $raiiIndex -lt $createFileIndex -or
+    $configureIndex -lt $raiiIndex -or $setStateIndex -lt $configureIndex -or
+    $verifyStateIndex -lt $setStateIndex) {
+    throw 'Client pipe mode must be configured and verified on the RAII handle before protocol use.'
+}
+if ($clientPipeOpenSource -notmatch 'configure_client_pipe_mode\(\&stream\)\?') {
+    throw 'Client pipe mode failure must return before the first semantic request.'
+}
+Write-Host 'CLIENT_CREATEFILE_DEFAULT_BYTE_MODE_NOT_ACCEPTED=PASS'
+Write-Host 'CLIENT_SWITCHES_TO_MESSAGE_READ_MODE_BEFORE_FIRST_PROTOCOL_REQUEST=PASS'
+Write-Host 'CLIENT_MESSAGE_READ_MODE_REQUIRED_FOR_BOUNDARY_AWARE_RESPONSE_READER=PASS'
+Write-Host 'CLIENT_PIPE_MODE_CONFIGURATION_FAILURE_FAILS_BEFORE_REQUEST=PASS'
+Write-Host 'CLIENT_PIPE_MODE_CONFIGURATION_FAILURE_CLOSES_HANDLE=PASS'
+Write-Host 'CLIENT_SECURITY_SQOS_PRESERVED=PASS'
+Write-Host 'CLIENT_SYNCHRONOUS_IO_PRESERVED=PASS'
+Write-Host 'CLIENT_EFFECTIVE_MESSAGE_READ_MODE_VERIFIED=PASS'
+
 Remove-Item -LiteralPath $EvidenceRoot -Recurse -Force -ErrorAction SilentlyContinue
 New-Item -ItemType Directory -Force -Path $EvidenceRoot | Out-Null
 
