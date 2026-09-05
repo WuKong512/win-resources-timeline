@@ -204,12 +204,29 @@ AMD_CLI_BOUNDED_SESSION = completed
 SPIKE_RESULT = PASS_WITH_FOLLOW_UPS
 PRODUCTION_ADMISSION = NOT_COMPLETE
 AMD_SERVICE_CONTEXT = completed / PASS
-AMD_PRIVILEGE_DEPLOYMENT = planned
+AMD_PRIVILEGE_DEPLOYMENT = prepared / awaiting authorized LocalService + IPC runtime qualification
 AMD_LONG_LIVED_SESSION = planned
 AMD_TEMPERATURE_FREQUENCY = planned
 AMD_PRODUCTION_PROVIDER = planned
 NEXT_TASK = AMD-PRIVILEGE-I2
 EXECUTION_PLAN_SINGLE_CURRENT_STATE = PASS
+```
+
+The authoritative next-task handoff is:
+
+```text
+AMD_SERVICE_CONTEXT_I1 = completed / PASS
+SERVICE_SESSION0_AMD_CLI_QUALIFIED = true
+AMD_PRIVILEGE_ARCHITECTURE = WINDOWS_SERVICE_BROKER
+SERVICE_BROKER_FEASIBILITY = PASS
+SERVICE_BROKER_CANDIDATE = EVIDENCE_SUPPORTED_PENDING_PRIVILEGE_AND_IPC
+SERVICE_ACCOUNT_FIRST_QUALIFICATION_CANDIDATE = NT AUTHORITY\LOCAL SERVICE
+SERVICE_ACCOUNT_FIRST_QUALIFICATION_SID = S-1-5-19
+SERVICE_SID_REQUIRED = true
+IPC_CANDIDATE = WINDOWS_NAMED_PIPE
+MINIMUM_REQUIRED_WINDOWS_PRIVILEGES = UNPROVEN
+NEXT_TASK = AMD-PRIVILEGE-I2
+PRODUCTION_ADMISSION = NOT_COMPLETE
 ```
 
 ## CPU-SENSOR-AMD-ROOT-CAUSE-FINAL-CLOSURE 当前状态
@@ -369,7 +386,7 @@ AMD_UPROF_LIVE_QUALIFICATION_SPIKE = PASS_WITH_FOLLOW_UPS
 SPIKE_RESULT = PASS_WITH_FOLLOW_UPS
 PRODUCTION_ADMISSION = NOT_COMPLETE
 AMD_SERVICE_CONTEXT = completed / PASS
-AMD_PRIVILEGE_DEPLOYMENT = planned
+AMD_PRIVILEGE_DEPLOYMENT = prepared / awaiting authorized LocalService + IPC runtime qualification
 AMD_LONG_LIVED_SESSION = planned
 AMD_TEMPERATURE_FREQUENCY = planned
 AMD_PRODUCTION_PROVIDER = planned
@@ -395,4 +412,25 @@ context 和 CXL executable-directory root cause 结果不会因 parser repair �
 本 spike 的 PR scope 是：关闭 AMD uProf technical feasibility 和 bounded
 live qualification；production privilege deployment、long-duration lifecycle、
 additional metrics、storage/integration 和 final provider admission 有意保留
-为独立 follow-up tasks。当前不开始 `AMD-PRIVILEGE-I2` implementation。
+为独立 follow-up tasks。上面的 spike-era “当前不开始
+`AMD-PRIVILEGE-I2` implementation” 是 `HISTORICAL / SUPERSEDED`，不再是
+当前 execution gate。
+
+## AMD-PRIVILEGE-I2 CURRENT STATE
+
+`AMD-PRIVILEGE-I2` is the current task and is prepared but remains pre-runtime
+until the single authorized LocalService + IPC qualification completes. It must
+not be marked completed by synthetic tests alone.
+
+```text
+AMD_PRIVILEGE_I2 = prepared / awaiting authorized LocalService + IPC runtime qualification
+SERVICE_ACCOUNT_CANDIDATE = LocalService
+SERVICE_SID_QUALIFICATION = prepared
+NAMED_PIPE_SECURITY_QUALIFICATION = synthetic PASS / real cross-integrity runtime pending
+SEMANTIC_IPC = synthetic PASS
+SESSION_OWNERSHIP = synthetic PASS
+CANCELLATION = synthetic PASS
+REAL_AMD_RUNTIME_DURING_PREPARATION = 0
+NEXT_GATE = AUTHORIZED_LOCAL_SERVICE_IPC_RUNTIME
+PRODUCTION_ADMISSION = NOT_COMPLETE
+```

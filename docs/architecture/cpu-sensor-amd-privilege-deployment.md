@@ -6,7 +6,38 @@ application. It is an architecture, threat-model, and qualification plan. It
 does not install a service, register a scheduled task, request elevation, or
 run AMD profiling.
 
-## DECISION AND STATUS
+## AMD CURRENT STATE RECONCILIATION (AUTHORITATIVE)
+
+The following block is the current state after the authoritative
+`AMD-SERVICE-CONTEXT-I1` result in PR #21. Older investigation snapshots below
+remain part of the record, but any conflicting value in a section explicitly
+marked `HISTORICAL / SUPERSEDED` is not a current gate.
+
+```text
+BASELINE = dd399f681f74bb23530e0fbee3713d54d0ea866d
+AMD_SERVICE_CONTEXT_I1 = completed / PASS
+SERVICE_SESSION0_AMD_CLI_QUALIFIED = true
+AMD_PRIVILEGE_ARCHITECTURE = WINDOWS_SERVICE_BROKER
+SERVICE_BROKER_FEASIBILITY = PASS
+SERVICE_BROKER_CANDIDATE = EVIDENCE_SUPPORTED_PENDING_PRIVILEGE_AND_IPC
+MINIMUM_REQUIRED_WINDOWS_PRIVILEGES = UNPROVEN
+SERVICE_ACCOUNT_FIRST_QUALIFICATION_CANDIDATE = NT AUTHORITY\\LOCAL SERVICE
+SERVICE_ACCOUNT_FIRST_QUALIFICATION_SID = S-1-5-19
+SERVICE_SID_REQUIRED = true
+IPC_CANDIDATE = WINDOWS_NAMED_PIPE
+AMD_PRIVILEGE_I2 = prepared / awaiting authorized LocalService + IPC runtime qualification
+NEXT_GATE = AUTHORIZED_LOCAL_SERVICE_IPC_RUNTIME
+NEXT_TASK = AMD-PRIVILEGE-I2
+PRODUCTION_ADMISSION = NOT_COMPLETE
+```
+
+`AMD-SERVICE-CONTEXT-I1` consumed the immutable LocalSystem/Session 0 evidence
+at `C:\\ProgramData\\ResourceTimeline\\qualification\\amd-service-context\\20260904T080323173Z`.
+This task must not modify that evidence and must not repeat its AMD runtime.
+`AMD-PRIVILEGE-I2` is a qualification-only least-privilege and secure-IPC
+preparation task; it does not select the production account or admit a provider.
+
+## HISTORICAL / SUPERSEDED INITIAL DECISION AND STATUS
 
 ```text
 REPOSITORY = WuKong512/win-resources-timeline
@@ -133,7 +164,12 @@ INTERACTIVE_UAC_PER_SAMPLE = FORBIDDEN
 INTERACTIVE_UAC_PER_COLLECTION_SESSION = UNACCEPTABLE_FOR_ALL_DAY_MODE
 ```
 
-## CANDIDATE ARCHITECTURES
+## CANDIDATE ARCHITECTURES (HISTORICAL / SUPERSEDED ANALYSIS)
+
+> HISTORICAL / SUPERSEDED: the candidate comparison below preserves why the
+> Service Broker was initially deferred, why Session 0 was unknown, why the
+> Scheduled Task was not selected, and the original threat model. The current
+> state is the reconciliation block above and the I2 preparation record below.
 
 ### A. Windows Service Broker
 
@@ -392,7 +428,7 @@ health status, generation handling, cancellation, and retry/backoff. A future
 AMD adapter should translate broker outcomes into that vocabulary and leave
 healthy providers running.
 
-## SERVICE SESSION 0 GATE
+## SERVICE SESSION 0 GATE (HISTORICAL / SUPERSEDED BY AMD-SERVICE-CONTEXT-I1)
 
 The vendor control that succeeded ran in an elevated interactive user session.
 It did not qualify:
@@ -486,7 +522,7 @@ AMD CLI behavior under Session 0 and the selected least-privilege account. The
 task's key unknown is not installation; it is secure runtime control and live
 result/cancellation behavior.
 
-## ARCHITECTURE DECISION
+## ARCHITECTURE DECISION (HISTORICAL / SUPERSEDED)
 
 ```text
 AMD_PRIVILEGE_ARCHITECTURE = DEFER_INSUFFICIENT_EVIDENCE
@@ -509,7 +545,7 @@ This deferral is a product/security decision, not permission to prototype a
 service or task silently. The CLI provider remains provisional and not
 production-admitted.
 
-## NEXT RUNTIME QUALIFICATION
+## NEXT RUNTIME QUALIFICATION (HISTORICAL / SUPERSEDED)
 
 Choose exactly one future qualification family after the product selects a
 candidate deployment model:
@@ -564,7 +600,7 @@ responsiveness, restart/sleep/reboot behavior, version/update policy, legal
 and licensing review, and an additive package-power storage/DTO contract.
 Temperature and frequency remain deferred and are not part of this decision.
 
-## SERVICE-CONTEXT QUALIFICATION PREPARATION
+## SERVICE-CONTEXT QUALIFICATION PREPARATION (HISTORICAL / SUPERSEDED BY COMPLETED I1)
 
 The leading service-broker candidate now has a separate qualification-only
 SCM harness in
@@ -596,12 +632,46 @@ registering a service or launching an AMD executable. The exact future
 Administrator command is documented in
 [`cpu-sensor-amd-service-context-qualification.md`](../measurements/cpu-sensor-amd-service-context-qualification.md).
 
-## NOT DONE
+## HISTORICAL / SUPERSEDED PREPARATION STATUS
 
 - No production Windows Service was implemented or registered.
 - No Scheduled Task was registered.
-- No IPC endpoint, ACL, installer, elevation flow, or service account was
-  created.
+- No production installer, elevation flow, or service account was created.
 - No AMD executable, profiling command, sampling session, driver, registry,
   PATH, or system state was changed.
 - No production AMD provider was registered.
+
+## AMD-PRIVILEGE-I2 CURRENT STATE
+
+`AMD-PRIVILEGE-I2` prepares an independent qualification-only broker and
+synthetic security harness. It is not a production broker and has no
+collector, database, UI, installer, autostart, or production persistence
+dependency.
+
+```text
+AMD_PRIVILEGE_I2 = prepared / awaiting authorized LocalService + IPC runtime qualification
+SERVICE_ACCOUNT_FIRST_QUALIFICATION_CANDIDATE = NT AUTHORITY\\LOCAL SERVICE
+SERVICE_ACCOUNT_FIRST_QUALIFICATION_SID = S-1-5-19
+SERVICE_SID_REQUIRED = true
+SERVICE_SID_TYPE_REQUIRED = UNRESTRICTED
+IPC = WINDOWS_NAMED_PIPE
+PIPE_ACL_POLICY = INSTALLING_USER_SID + SERVICE_SID + SYSTEM; NO_BROAD_USER_ACCESS
+NAMED_PIPE_SECURITY_QUALIFICATION = synthetic PASS / real cross-integrity runtime pending
+SEMANTIC_IPC_ONLY = true
+SEMANTIC_IPC = synthetic PASS
+ACTIVE_SESSIONS = 1
+SESSION_OWNERSHIP = synthetic PASS
+BUSY_ARBITRATION = synthetic PASS
+OWNER_CANCELLATION = synthetic PASS
+CANCELLATION = synthetic PASS
+CLIENT_DISCONNECT_POLICY = CANCEL_OWNED_SESSION
+NO_ORPHAN_SYNTHETIC_CHILD = PASS
+REAL_AMD_RUNTIME_DURING_PREPARATION = 0
+SERVICE_REGISTRATION_DURING_PREPARATION = 0
+NEXT_GATE = AUTHORIZED_LOCAL_SERVICE_IPC_RUNTIME
+NEXT_TASK = AMD-PRIVILEGE-I2 / authorized runtime gate
+```
+
+The first candidate is a qualification hypothesis only. Even a future
+LocalService runtime PASS may narrow the observed path to LocalService or
+less; it cannot by itself prove the absolute minimum Windows privilege.
