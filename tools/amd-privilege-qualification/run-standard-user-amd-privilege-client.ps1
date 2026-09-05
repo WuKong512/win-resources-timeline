@@ -8,15 +8,15 @@ $ErrorActionPreference = 'Stop'
 $ArtifactPath = Join-Path $PSScriptRoot 'target\release\amd-privilege-qualification.exe'
 $ExpectedArtifactSha256 = 'F76313FF123689C66A15112D43B1F87C33FE8DAD241AD6B98F0511247C3797A0'
 $ConfigPath = Join-Path $env:ProgramData 'ResourceTimeline\qualification\amd-privilege\BROKER-CONFIG.json'
+. (Join-Path $PSScriptRoot 'token-integrity-contract.ps1')
 
 if (-not [Environment]::Is64BitProcess) {
     throw 'The standard-user client must run from x64 PowerShell.'
 }
 $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
-$integritySids = @($identity.Groups | ForEach-Object { $_.Value } | Where-Object { $_ -match '^S-1-16-' })
-$integrityLevel = @($integritySids | ForEach-Object { [int64]($_ -replace '^S-1-16-', '') } | Measure-Object -Maximum).Maximum
-if ($null -eq $integrityLevel -or $integrityLevel -ne 8192) {
-    throw 'The client must be a normal non-elevated medium-integrity process.'
+$integrity = Get-CurrentProcessIntegrityLevel
+if (-not (Test-QualificationClientIntegrity -IntegrityRid $integrity.integrity_rid)) {
+    throw "The client must run at Medium integrity (RID 8192); actual integrity RID = $($integrity.integrity_rid)."
 }
 if (-not (Test-Path -LiteralPath $ConfigPath -PathType Leaf)) {
     throw "Broker config is missing: $ConfigPath"

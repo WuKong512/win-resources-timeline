@@ -11,9 +11,11 @@ $TargetRoot = Join-Path $ToolRoot 'target\qualification-synthetic'
 $EvidenceRoot = Join-Path $TargetRoot 'evidence'
 $Binary = Join-Path $ToolRoot 'target\debug\amd-privilege-qualification.exe'
 $ScArgumentContract = Join-Path $ToolRoot 'sc-argument-contract.ps1'
+$TokenIntegrityContract = Join-Path $ToolRoot 'token-integrity-contract.ps1'
 
 foreach ($wrapper in @(
         $ScArgumentContract,
+        $TokenIntegrityContract,
         (Join-Path $ToolRoot 'run-admin-amd-privilege-qualification.ps1'),
         (Join-Path $ToolRoot 'run-standard-user-amd-privilege-client.ps1'),
         (Join-Path $ToolRoot 'cleanup-admin-amd-privilege-qualification.ps1')
@@ -25,6 +27,35 @@ foreach ($wrapper in @(
         throw "PowerShell syntax errors in wrapper: $wrapper"
     }
 }
+
+$clientWrapper = Join-Path $ToolRoot 'run-standard-user-amd-privilege-client.ps1'
+$integritySource = (Get-Content -LiteralPath $clientWrapper -Raw) +
+    (Get-Content -LiteralPath $TokenIntegrityContract -Raw)
+if ($integritySource -match 'WindowsIdentity\.Groups') {
+    throw 'Client integrity detection must not use WindowsIdentity.Groups.'
+}
+. $TokenIntegrityContract
+foreach ($case in @(
+        @{ rid = 4096; name = 'Low'; accepted = $false },
+        @{ rid = 8192; name = 'Medium'; accepted = $true },
+        @{ rid = 8448; name = 'MediumPlus'; accepted = $false },
+        @{ rid = 12288; name = 'High'; accepted = $false },
+        @{ rid = 16384; name = 'System'; accepted = $false },
+        @{ rid = $null; name = 'Unknown'; accepted = $false },
+        @{ rid = 'malformed'; name = 'Unknown'; accepted = $false }
+    )) {
+    $name = Get-IntegrityLevelNameFromRid -IntegrityRid $case.rid
+    $accepted = Test-QualificationClientIntegrity -IntegrityRid $case.rid
+    if ($name -cne $case.name -or [bool]$accepted -ne [bool]$case.accepted) {
+        throw "Integrity classification mismatch for RID '$($case.rid)'. name=$name accepted=$accepted"
+    }
+}
+Write-Host 'CLIENT_INTEGRITY_DETECTION_DOES_NOT_USE_WINDOWSIDENTITY_GROUPS=PASS'
+Write-Host 'MEDIUM_INTEGRITY_ACCEPTED=PASS'
+Write-Host 'HIGH_INTEGRITY_REJECTED=PASS'
+Write-Host 'SYSTEM_INTEGRITY_REJECTED=PASS'
+Write-Host 'LOW_INTEGRITY_REJECTED=PASS'
+Write-Host 'UNKNOWN_INTEGRITY_REJECTED=PASS'
 
 . $ScArgumentContract
 $testBinPath = '"F:\Qualification Root\amd-privilege-qualification.exe" --broker'

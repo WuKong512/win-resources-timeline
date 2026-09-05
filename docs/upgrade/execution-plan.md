@@ -465,3 +465,39 @@ The wrapper-only repair uses a pure argument builder that passes each
 broker artifact, service name, account, Service SID policy, or IPC protocol.
 The repair must be validated synthetically before any human setup retry; the
 retry remains human-authorized and must not be treated as an AMD runtime retry.
+
+## AMD-PRIVILEGE-I2 PRE-IPC CLIENT INTEGRITY INCIDENT
+
+The second manually authorized setup passed and published broker readiness for
+scope `84d40eec83314230a510d49704a35953`; its cleanup also passed. The first
+standard-user client attempt stopped in the local client preflight before config
+read, artifact launch, named-pipe connection, semantic IPC, or AMD CLI launch.
+The human shell was independently observed as x64, non-administrator, and
+`S-1-16-8192` Medium integrity. The wrapper incorrectly inspected
+`WindowsIdentity.Groups`, which did not expose the token Mandatory Integrity
+Label, so it treated the valid Medium token as null and blocked the client.
+
+```text
+SECOND_MANUAL_I2_SETUP = PASS
+SECOND_MANUAL_I2_SETUP_SCOPE = 84d40eec83314230a510d49704a35953
+BROKER_READY = PASS
+FIRST_STANDARD_USER_CLIENT_ATTEMPT = BLOCKED_PRE_IPC_CLIENT_HARNESS
+ROOT_CAUSE = WINDOWSIDENTITY_GROUPS_DOES_NOT_EXPOSE_TOKEN_MANDATORY_INTEGRITY_LABEL
+CLIENT_USER_SID_OBSERVED = S-1-5-21-759388592-2654043993-2344833624-1001
+WHOAMI_INTEGRITY_SID_OBSERVED = S-1-16-8192
+WINDOWSIDENTITY_GROUPS_INTEGRITY_SID = absent
+STANDARD_USER_REAL_IPC_CLIENT_COUNT = 0
+AMD_RUNTIME_EXECUTED = false
+REAL_AMD_RUNTIME_COUNT = 0
+SECOND_SETUP_CLEANUP = PASS
+I2_REAL_RUNTIME_GATE = NOT_YET_CONSUMED
+```
+
+The client wrapper now reads `TokenIntegrityLevel` directly through a bounded
+`OpenProcessToken`/`GetTokenInformation` helper, derives the SID sub-authority
+RID, and accepts only RID `8192`. The helper closes the token handle and frees
+its unmanaged buffer on success and failure paths. Synthetic tests cover Low,
+Medium, MediumPlus, High, System, null, and malformed values; no setup, client,
+pipe connection, Service registration, or AMD runtime is performed by those
+tests. The two historical setup scopes remain separate and are not reclassified
+as AMD failures.
