@@ -431,7 +431,7 @@ SEMANTIC_IPC = synthetic PASS
 SESSION_OWNERSHIP = synthetic PASS
 CANCELLATION = synthetic PASS
 REAL_AMD_RUNTIME_DURING_PREPARATION = 0
-NEXT_GATE = AUTHORIZED_LOCAL_SERVICE_IPC_RUNTIME
+NEXT_GATE = HUMAN_SETUP_ONLY
 PRODUCTION_ADMISSION = NOT_COMPLETE
 ```
 
@@ -657,3 +657,78 @@ NEW_FROZEN_ARTIFACT_ARCHITECTURE = x64
 NEW_FROZEN_ARTIFACT_SHA256 = 0FC205A9CCB186291905F3D7E0983DC7DCCDE47DAD7B5903F6E9F56BC935E017
 I2_REAL_RUNTIME_GATE = NOT_YET_CONSUMED
 ```
+
+## AMD-PRIVILEGE-I2 HRESULT NORMALIZATION + ARMED ACCEPT READINESS INCIDENT E
+
+The fifth manually authorized setup used the historical release artifact for
+scope `249d882e8fe149169a68740005f61f65`. Service context, Service SID, pipe
+creation, and the listener-ready file were recorded, but the broker stopped
+before a client connected. The persisted service error was
+`ConnectNamedPipe failed: 0x800703E5`. This is
+`HRESULT_FROM_WIN32(ERROR_IO_PENDING)`, Win32 error `997` (`0x3E5`), which is
+the expected pending result for an overlapped accept. The old implementation
+compared the HRESULT integer directly with the raw Win32 constant and
+misclassified the normal pending state as fatal. Readiness was also published
+before the first accept had been classified and armed.
+
+```text
+FIFTH_MANUAL_I2_SCOPE = 249d882e8fe149169a68740005f61f65
+FIFTH_SETUP = FAILED_AFTER_PREMATURE_READY
+SERVICE_CONTEXT = PASS
+SERVICE_SID = PASS
+PIPE_CREATE = PASS
+PIPE_LISTENER_READY_FILE = present
+BROKER_READY_FILE = present
+SERVICE_HARNESS_ERROR = ConnectNamedPipe / HRESULT 0x800703E5
+NORMALIZED_WIN32_ERROR = ERROR_IO_PENDING / 997 / 0x3E5
+PRIMARY_RUNTIME_FAILURE = NORMAL_ERROR_IO_PENDING_MISCLASSIFIED_AS_FATAL
+ROOT_CAUSE = HRESULT_TO_RAW_WIN32_ERROR_DOMAIN_MISMATCH
+FIRST_ACCEPT_ARMED_BEFORE_READY = false
+CLIENT_AUTH_COUNT = 0
+CLIENT_REQUEST_COUNT = 0
+SESSION_OWNER_COUNT = 0
+AMD_CLI_LAUNCH_COUNT = 0
+AMD_RUNTIME_EXECUTED = false
+REAL_AMD_RUNTIME_COUNT = 0
+I2_REAL_RUNTIME_GATE_CONSUMED = false
+AUTO_CLEANUP = PASS
+SC_STOP_EXIT_CODE = 1062
+SERVICE_STATE_AFTER_STOP_WAIT = Stopped
+SERVICE_PID_AFTER_STOP_WAIT = 0
+SERVICE_REGISTRATION_REMOVED = true
+EXACT_BROKER_PROCESS_COUNT_AFTER_CLEANUP = 0
+CLEANUP_1062_REAL_REACCEPTANCE = PASS
+LIVE_SERVICE_STOP_REAL_REACCEPTANCE = NOT_YET_COMPLETE
+```
+
+The repair centralizes comparison of `windows::core::Error` values against
+`HRESULT::from_win32(WIN32_ERROR)`, recovers a Win32 code only for the checked
+`HRESULT_FROM_WIN32` form, and preserves arbitrary HRESULTs as HRESULT-based
+I/O failures. The first accept now owns stable `Box<OVERLAPPED>` storage and
+must be in one of `CONNECTED`, `PIPE_CONNECTED`, or `IO_PENDING` state before
+`PIPE-LISTENER-READY.json`, `BROKER-READY.json`, or `SERVICE_RUNNING` is
+published. The exact armed accept is passed into the first broker wait; it is
+not dropped as a probe. Future service-error evidence includes the localized
+message plus numeric HRESULT and Win32 fields.
+
+```text
+INCIDENT_E_ERROR_NORMALIZATION_DEFECT = CLOSED
+FIRST_ACCEPT_READINESS_DEFECT = CLOSED
+CLIENT_IDENTITY_CAPTURE_DEFECT = CLOSED_OFFLINE_PENDING_REAL_REACCEPTANCE
+SERVICE_STOP_DEFECT = CLOSED_OFFLINE_PENDING_LIVE_REAL_REACCEPTANCE
+CLEANUP_1062_PATH = REAL_PASS
+OLD_FROZEN_ARTIFACT_SHA256 = 0FC205A9CCB186291905F3D7E0983DC7DCCDE47DAD7B5903F6E9F56BC935E017
+OLD_ARTIFACT_STATUS = superseded
+NEW_FROZEN_ARTIFACT_ARCHITECTURE = x64
+NEW_FROZEN_ARTIFACT_SHA256 = A656B0E95AA2BAEB0E09FE729AA502C23BF09C6F894766680D49026720B790CD
+REAL_AMD_RUNTIME_COUNT_DURING_REPAIR = 0
+SERVICE_REGISTRATION_COUNT_DURING_REPAIR = 0
+REAL_IPC_CLIENT_COUNT_DURING_REPAIR = 0
+I2_REAL_RUNTIME_GATE_CONSUMED = false
+NEXT_GATE = HUMAN_SETUP_ONLY
+```
+
+The historical Incident E scope and its error evidence remain immutable and
+are not reclassified as an AMD runtime failure. The cleanup `1062` path has
+real-machine reaccreditation, but the live running-Service stop-event path
+still requires a future successfully running broker.

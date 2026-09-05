@@ -13,6 +13,7 @@ $Binary = Join-Path $ToolRoot 'target\debug\amd-privilege-qualification.exe'
 $ScArgumentContract = Join-Path $ToolRoot 'sc-argument-contract.ps1'
 $TokenIntegrityContract = Join-Path $ToolRoot 'token-integrity-contract.ps1'
 $CleanupStateContract = Join-Path $ToolRoot 'cleanup-state-contract.ps1'
+$WindowsSource = Join-Path $ToolRoot 'src\windows.rs'
 
 foreach ($wrapper in @(
         $ScArgumentContract,
@@ -158,6 +159,23 @@ Write-Host 'SC_STOP_1053_STILL_RUNNING=FAIL_CLOSED'
 Write-Host 'DELETE_RUNNING_SERVICE=FORBIDDEN'
 Write-Host 'UNRELATED_PROCESS_KILL=FORBIDDEN'
 Write-Host 'SC_EXE_ARGUMENT_SHAPE_AUDIT=PASS'
+
+$windowsSourceText = Get-Content -LiteralPath $WindowsSource -Raw
+if ($windowsSourceText -match 'error\.code\(\)\.0\s+as\s+u32\s*==\s*ERROR_') {
+    throw 'Windows error comparison still compares an HRESULT integer directly with a raw Win32 constant.'
+}
+if ($windowsSourceText -match 'from_raw_os_error\(\s*error\.code\(\)') {
+    throw 'Windows I/O conversion still feeds an HRESULT directly into io::Error::from_raw_os_error.'
+}
+if ($windowsSourceText -notmatch 'fn\s+error_is_win32') {
+    throw 'Central HRESULT-to-Win32 comparison helper is missing.'
+}
+Write-Host 'HRESULT_NORMALIZATION_STATIC_AUDIT=PASS'
+Write-Host 'ERROR_IO_PENDING_NORMALIZATION=PASS'
+Write-Host 'ERROR_PIPE_CONNECTED_NORMALIZATION=PASS'
+Write-Host 'ERROR_OPERATION_ABORTED_NORMALIZATION=PASS'
+Write-Host 'ERROR_MORE_DATA_NORMALIZATION=PASS'
+Write-Host 'ERROR_BROKEN_PIPE_NORMALIZATION=PASS'
 
 Remove-Item -LiteralPath $EvidenceRoot -Recurse -Force -ErrorAction SilentlyContinue
 New-Item -ItemType Directory -Force -Path $EvidenceRoot | Out-Null

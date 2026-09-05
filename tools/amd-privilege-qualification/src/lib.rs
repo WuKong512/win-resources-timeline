@@ -38,9 +38,22 @@ pub const MAX_INTERVAL_MS: u32 = 10_000;
 pub const CLI_TIMEOUT_SAFETY_MS: u64 = 90_000;
 pub const CLIENT_DISCONNECT_POLICY: &str = "CANCEL_OWNED_SESSION";
 
+/// The only ConnectNamedPipe outcomes that establish a valid first accept contract.
+///
+/// `IoPending` is not an error for an overlapped accept: it means the operation is
+/// armed and its OVERLAPPED storage must remain alive until completion or cancellation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FirstAcceptState {
+    Connected,
+    PipeConnected,
+    IoPending,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct BrokerReadinessState {
     listener_created: bool,
+    first_accept_armed: bool,
+    first_accept_state: Option<FirstAcceptState>,
     ready_published: bool,
     service_running: bool,
 }
@@ -49,6 +62,8 @@ impl BrokerReadinessState {
     pub const fn new() -> Self {
         Self {
             listener_created: false,
+            first_accept_armed: false,
+            first_accept_state: None,
             ready_published: false,
             service_running: false,
         }
@@ -58,17 +73,29 @@ impl BrokerReadinessState {
         self.listener_created = true;
     }
 
-    pub fn publish_ready(&mut self) -> Result<(), &'static str> {
+    pub fn mark_first_accept_armed(&mut self, state: FirstAcceptState) -> Result<(), &'static str> {
         if !self.listener_created {
-            return Err("cannot publish broker ready before a live listener exists");
+            return Err("cannot arm the first accept before a live listener exists");
+        }
+        if self.first_accept_armed {
+            return Err("the first accept was already armed");
+        }
+        self.first_accept_armed = true;
+        self.first_accept_state = Some(state);
+        Ok(())
+    }
+
+    pub fn publish_ready(&mut self) -> Result<(), &'static str> {
+        if !self.first_accept_armed {
+            return Err("cannot publish broker ready before the first accept is armed");
         }
         self.ready_published = true;
         Ok(())
     }
 
     pub fn report_running(&mut self) -> Result<(), &'static str> {
-        if !self.listener_created {
-            return Err("cannot report service running before a live listener exists");
+        if !self.first_accept_armed {
+            return Err("cannot report service running before the first accept is armed");
         }
         if !self.ready_published {
             return Err("cannot report service running before broker ready");
@@ -79,6 +106,14 @@ impl BrokerReadinessState {
 
     pub const fn listener_created(&self) -> bool {
         self.listener_created
+    }
+
+    pub const fn first_accept_armed(&self) -> bool {
+        self.first_accept_armed
+    }
+
+    pub const fn first_accept_state(&self) -> Option<FirstAcceptState> {
+        self.first_accept_state
     }
 
     pub const fn ready_published(&self) -> bool {
@@ -93,6 +128,33 @@ impl BrokerReadinessState {
 impl Default for BrokerReadinessState {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+/// A narrowly checked HRESULT_FROM_WIN32 decoder used by the Windows implementation and
+/// platform-independent synthetic tests.  Only the canonical failure form is decoded; arbitrary
+/// HRESULTs are deliberately not truncated into an invented Win32 error.
+pub const fn win32_code_from_hresult_contract(hresult: u32) -> Option<u32> {
+    let win32_error = hresult & 0x0000_FFFF;
+    if hresult & 0xFFFF_0000 == 0x8007_0000 && win32_error != 0 {
+        Some(win32_error)
+    } else {
+        None
+    }
+}
+
+pub const fn hresult_from_win32_contract(win32_error: u32) -> Option<u32> {
+    if win32_error == 0 || win32_error > 0x0000_FFFF {
+        None
+    } else {
+        Some(0x8007_0000 | win32_error)
+    }
+}
+
+pub const fn hresult_matches_win32_contract(hresult: u32, win32_error: u32) -> bool {
+    match hresult_from_win32_contract(win32_error) {
+        Some(expected) => hresult == expected,
+        None => false,
     }
 }
 
@@ -1227,9 +1289,19 @@ mod tests {
         assert!(!readiness.service_running());
 
         readiness.mark_first_listener_created();
+        assert!(readiness.publish_ready().is_err());
+        assert!(readiness.report_running().is_err());
+        assert!(readiness
+            .mark_first_accept_armed(FirstAcceptState::IoPending)
+            .is_ok());
         assert!(readiness.publish_ready().is_ok());
         assert!(readiness.report_running().is_ok());
         assert!(readiness.listener_created());
+        assert!(readiness.first_accept_armed());
+        assert_eq!(
+            readiness.first_accept_state(),
+            Some(FirstAcceptState::IoPending)
+        );
         assert!(readiness.ready_published());
         assert!(readiness.service_running());
     }

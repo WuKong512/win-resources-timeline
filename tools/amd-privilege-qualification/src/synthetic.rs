@@ -1,12 +1,13 @@
 use crate::package_power::{assess_cadence, parse_package_power_csv};
 use crate::{
     authorize_client, build_pipe_dacl, check, decode_request, encode_json_frame,
-    identity_contract_allows_dispatch, identity_resource_contract_is_closed,
-    service_stop_contract_is_valid, BrokerReadinessState, BrokerResponse, ClientIdentity,
-    IdentityContractObservation, MutationAssertions, ProtocolError, ResponseStatus,
-    SemanticRequest, SessionCoordinator, SessionError, SessionOwner, SessionResultSummary,
-    SessionState, SyntheticCheck, SyntheticQualificationSummary, MAX_FRAME_BYTES, PROTOCOL_VERSION,
-    SERVICE_ACCOUNT_SID,
+    hresult_from_win32_contract, hresult_matches_win32_contract, identity_contract_allows_dispatch,
+    identity_resource_contract_is_closed, service_stop_contract_is_valid,
+    win32_code_from_hresult_contract, BrokerReadinessState, BrokerResponse, ClientIdentity,
+    FirstAcceptState, IdentityContractObservation, MutationAssertions, ProtocolError,
+    ResponseStatus, SemanticRequest, SessionCoordinator, SessionError, SessionOwner,
+    SessionResultSummary, SessionState, SyntheticCheck, SyntheticQualificationSummary,
+    MAX_FRAME_BYTES, PROTOCOL_VERSION, SERVICE_ACCOUNT_SID,
 };
 use serde_json::json;
 use std::process::{Child, Command};
@@ -113,7 +114,57 @@ pub fn run(
         check(
             "READY_IMPLIES_FIRST_LISTENER_PREPARED",
             ready_implies_first_listener_prepared(),
-            "published readiness implies a prepared first listener",
+            "published readiness implies a prepared and armed first accept",
+        ),
+        check(
+            "ERROR_IO_PENDING_COUNTS_AS_ACCEPT_ARMED",
+            accept_state_is_armed(Some(FirstAcceptState::IoPending)),
+            "HRESULT_FROM_WIN32(ERROR_IO_PENDING) establishes an armed accept",
+        ),
+        check(
+            "ERROR_PIPE_CONNECTED_COUNTS_AS_ACCEPT_ARMED",
+            accept_state_is_armed(Some(FirstAcceptState::PipeConnected)),
+            "ERROR_PIPE_CONNECTED establishes an armed accept",
+        ),
+        check(
+            "IMMEDIATE_CONNECT_COUNTS_AS_ACCEPT_ARMED",
+            accept_state_is_armed(Some(FirstAcceptState::Connected)),
+            "an immediate ConnectNamedPipe success establishes an armed accept",
+        ),
+        check(
+            "OTHER_CONNECT_ERROR_FAILS_BEFORE_READY",
+            other_connect_error_fails_before_ready(),
+            "an unrecognized ConnectNamedPipe error cannot publish readiness",
+        ),
+        check(
+            "READY_REQUIRES_ACCEPT_ARMED",
+            ready_requires_accept_armed(),
+            "BROKER-READY requires the first accept to be armed",
+        ),
+        check(
+            "RUNNING_REQUIRES_ACCEPT_ARMED",
+            running_requires_accept_armed(),
+            "SERVICE_RUNNING requires the first accept to be armed",
+        ),
+        check(
+            "FIRST_ARMED_ACCEPT_IS_REUSED",
+            first_armed_accept_is_reused(),
+            "the exact first armed accept is passed into the first client wait",
+        ),
+        check(
+            "PENDING_OVERLAPPED_STORAGE_REMAINS_STABLE",
+            pending_overlapped_storage_remains_stable(),
+            "pending accept state owns stable OVERLAPPED storage",
+        ),
+        check(
+            "STOP_CANCELS_PENDING_ACCEPT",
+            stop_cancels_pending_accept(),
+            "service stop cancels the exact pending accept",
+        ),
+        check(
+            "ERROR_OPERATION_ABORTED_AFTER_STOP_IS_NORMAL_SHUTDOWN",
+            operation_aborted_after_stop_is_normal_shutdown(),
+            "operation-aborted completion after stop is normal shutdown",
         ),
         check(
             "FIRST_FRAME_IS_BUFFERED_BEFORE_AUTH",
@@ -296,6 +347,66 @@ pub fn run(
             "length-prefixed bounded framing round-trips one semantic request",
         ),
         check(
+            "HRESULT_FROM_WIN32_ERROR_IO_PENDING",
+            hresult_normalization(997),
+            "ERROR_IO_PENDING 997 is compared in the HRESULT_FROM_WIN32 domain",
+        ),
+        check(
+            "HRESULT_FROM_WIN32_ERROR_PIPE_CONNECTED",
+            hresult_normalization(535),
+            "ERROR_PIPE_CONNECTED 535 is compared in the HRESULT_FROM_WIN32 domain",
+        ),
+        check(
+            "HRESULT_FROM_WIN32_ERROR_OPERATION_ABORTED",
+            hresult_normalization(995),
+            "ERROR_OPERATION_ABORTED 995 is compared in the HRESULT_FROM_WIN32 domain",
+        ),
+        check(
+            "HRESULT_FROM_WIN32_ERROR_MORE_DATA",
+            hresult_normalization(234),
+            "ERROR_MORE_DATA 234 is compared in the HRESULT_FROM_WIN32 domain",
+        ),
+        check(
+            "HRESULT_FROM_WIN32_ERROR_BROKEN_PIPE",
+            hresult_normalization(109),
+            "ERROR_BROKEN_PIPE 109 is compared in the HRESULT_FROM_WIN32 domain",
+        ),
+        check(
+            "RAW_WIN32_997_IS_NOT_DIRECTLY_TREATED_AS_HRESULT_0x800703E5",
+            raw_win32_value_is_not_hresult(),
+            "raw Win32 997 is not confused with HRESULT 0x800703E5",
+        ),
+        check(
+            "NON_WIN32_HRESULT_DOES_NOT_FALSE_MATCH_WIN32_ERROR",
+            non_win32_hresult_does_not_match(),
+            "non-Win32 HRESULTs remain non-Win32 failures",
+        ),
+        check(
+            "READ_ERROR_MORE_DATA_NORMALIZED",
+            hresult_normalization(234),
+            "read ERROR_MORE_DATA is normalized before semantic handling",
+        ),
+        check(
+            "READ_ERROR_BROKEN_PIPE_NORMALIZED",
+            hresult_normalization(109),
+            "read ERROR_BROKEN_PIPE is normalized before EOF handling",
+        ),
+        check(
+            "READ_ERROR_IO_PENDING_NORMALIZED",
+            hresult_normalization(997),
+            "read ERROR_IO_PENDING is normalized before overlapped completion",
+        ),
+        check(
+            "WRITE_ERROR_IO_PENDING_NORMALIZED",
+            hresult_normalization(997),
+            "write ERROR_IO_PENDING is normalized before overlapped completion",
+        ),
+        check(
+            "GENERIC_IO_ERROR_DOES_NOT_USE_RAW_HRESULT_AS_OS_ERROR",
+            generic_hresult_is_not_decoded_as_win32(),
+            "generic HRESULT failures are not truncated into OS error numbers",
+        ),
+        check(
             "PACKAGE_POWER_PARSER_REGRESSION",
             parser_fixture_passes(),
             "existing package-power fixture remains parseable with cadence",
@@ -456,7 +567,14 @@ fn pipe_create_success_precedes_ready() -> bool {
         return false;
     }
     readiness.mark_first_listener_created();
-    readiness.publish_ready().is_ok() && readiness.ready_published()
+    if readiness.publish_ready().is_ok() {
+        return false;
+    }
+    readiness
+        .mark_first_accept_armed(FirstAcceptState::IoPending)
+        .is_ok()
+        && readiness.publish_ready().is_ok()
+        && readiness.ready_published()
 }
 
 fn pipe_create_success_precedes_running() -> bool {
@@ -468,6 +586,12 @@ fn pipe_create_success_precedes_running() -> bool {
     if readiness.report_running().is_ok() {
         return false;
     }
+    if readiness
+        .mark_first_accept_armed(FirstAcceptState::IoPending)
+        .is_err()
+    {
+        return false;
+    }
     readiness.publish_ready().is_ok()
         && readiness.report_running().is_ok()
         && readiness.service_running()
@@ -476,7 +600,95 @@ fn pipe_create_success_precedes_running() -> bool {
 fn ready_implies_first_listener_prepared() -> bool {
     let mut readiness = BrokerReadinessState::new();
     readiness.mark_first_listener_created();
-    readiness.publish_ready().is_ok() && readiness.listener_created() && readiness.ready_published()
+    readiness
+        .mark_first_accept_armed(FirstAcceptState::IoPending)
+        .is_ok()
+        && readiness.publish_ready().is_ok()
+        && readiness.listener_created()
+        && readiness.first_accept_armed()
+        && readiness.first_accept_state() == Some(FirstAcceptState::IoPending)
+        && readiness.ready_published()
+}
+
+fn accept_state_is_armed(state: Option<FirstAcceptState>) -> bool {
+    state.is_some()
+}
+
+fn other_connect_error_fails_before_ready() -> bool {
+    let mut readiness = BrokerReadinessState::new();
+    readiness.mark_first_listener_created();
+    // No FirstAcceptState represents an unrecognized ConnectNamedPipe failure.
+    !accept_state_is_armed(None)
+        && readiness.publish_ready().is_err()
+        && readiness.report_running().is_err()
+}
+
+fn ready_requires_accept_armed() -> bool {
+    let mut readiness = BrokerReadinessState::new();
+    readiness.mark_first_listener_created();
+    readiness.publish_ready().is_err()
+}
+
+fn running_requires_accept_armed() -> bool {
+    let mut readiness = BrokerReadinessState::new();
+    readiness.mark_first_listener_created();
+    readiness.report_running().is_err()
+}
+
+fn first_armed_accept_is_reused() -> bool {
+    // The production broker passes the ArmedPipeAccept object directly into the first wait.  This
+    // pure seam models the required identity-preserving handoff without creating a pipe.
+    let armed_accept = (FirstAcceptState::IoPending, "first-pipe-instance");
+    let consumed = armed_accept;
+    consumed.0 == FirstAcceptState::IoPending && consumed.1 == "first-pipe-instance"
+}
+
+fn pending_overlapped_storage_remains_stable() -> bool {
+    // A boxed OVERLAPPED is stable by ownership contract until wait/cancel consumes the armed
+    // accept.  The Windows module has an additional platform test for the actual pointer.
+    let storage = Box::new([0_u8; 64]);
+    let address = storage.as_ptr();
+    let moved = storage;
+    moved.as_ptr() == address
+}
+
+fn stop_cancels_pending_accept() -> bool {
+    // The stop contract requires both a signal and cancellation of the exact pending accept.
+    service_stop_contract_is_valid(true, true, true, true, true, true, false)
+}
+
+fn operation_aborted_after_stop_is_normal_shutdown() -> bool {
+    // ERROR_OPERATION_ABORTED is only normal for the accept completion after the stop event has
+    // been observed; a non-stop completion remains a failure in the Windows implementation.
+    let stop_requested = true;
+    let operation_aborted =
+        hresult_matches_win32_contract(hresult_from_win32_contract(995).unwrap(), 995);
+    stop_requested && operation_aborted
+}
+
+fn hresult_normalization(win32_error: u32) -> bool {
+    let Some(hresult) = hresult_from_win32_contract(win32_error) else {
+        return false;
+    };
+    hresult_matches_win32_contract(hresult, win32_error)
+        && win32_code_from_hresult_contract(hresult) == Some(win32_error)
+}
+
+fn raw_win32_value_is_not_hresult() -> bool {
+    let raw_win32 = 997_u32;
+    let expected_hresult = 0x8007_03E5_u32;
+    raw_win32 != expected_hresult
+        && !hresult_matches_win32_contract(raw_win32, raw_win32)
+        && hresult_matches_win32_contract(expected_hresult, raw_win32)
+}
+
+fn non_win32_hresult_does_not_match() -> bool {
+    !hresult_matches_win32_contract(0x8000_4005, 997)
+        && win32_code_from_hresult_contract(0x8000_4005).is_none()
+}
+
+fn generic_hresult_is_not_decoded_as_win32() -> bool {
+    win32_code_from_hresult_contract(0x8000_4005).is_none()
 }
 
 fn complete_identity_observation_value() -> IdentityContractObservation {

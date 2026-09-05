@@ -6,7 +6,7 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
 $ArtifactPath = Join-Path $PSScriptRoot 'target\release\amd-privilege-qualification.exe'
-$ExpectedArtifactSha256 = '0FC205A9CCB186291905F3D7E0983DC7DCCDE47DAD7B5903F6E9F56BC935E017'
+$ExpectedArtifactSha256 = 'A656B0E95AA2BAEB0E09FE729AA502C23BF09C6F894766680D49026720B790CD'
 $ConfigPath = Join-Path $env:ProgramData 'ResourceTimeline\qualification\amd-privilege\BROKER-CONFIG.json'
 . (Join-Path $PSScriptRoot 'token-integrity-contract.ps1')
 

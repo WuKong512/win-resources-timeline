@@ -13,7 +13,7 @@ use crate::{
     QUALIFICATION_ONLY, SERVICE_ACCOUNT_SID, SERVICE_NAME, SERVICE_SID_ACCOUNT,
 };
 use serde::Serialize;
-use serde_json::json;
+use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::fs::{self, File};
 use std::io::{self, Read, Write};
@@ -26,10 +26,11 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant};
-use windows::core::{PCWSTR, PWSTR};
+use windows::core::{HRESULT, PCWSTR, PWSTR};
 use windows::Win32::Foundation::{
     CloseHandle, GetLastError, ERROR_BROKEN_PIPE, ERROR_IO_PENDING, ERROR_MORE_DATA,
     ERROR_OPERATION_ABORTED, ERROR_PIPE_CONNECTED, HANDLE, HLOCAL, WAIT_FAILED, WAIT_OBJECT_0,
+    WIN32_ERROR,
 };
 use windows::Win32::Security::Authorization::{
     ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1,
@@ -91,6 +92,75 @@ static STOP_REQUESTED: AtomicBool = AtomicBool::new(false);
 static CONFIG: OnceLock<BrokerConfig> = OnceLock::new();
 static STOP_EVENT: Mutex<Option<isize>> = Mutex::new(None);
 static STATUS_HANDLE: Mutex<Option<isize>> = Mutex::new(None);
+static SERVICE_ERROR_DETAILS: Mutex<Option<Value>> = Mutex::new(None);
+
+fn remember_service_error_details(details: Value) {
+    let mut current = SERVICE_ERROR_DETAILS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    *current = Some(details);
+}
+
+fn take_service_error_details() -> Option<Value> {
+    SERVICE_ERROR_DETAILS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .take()
+}
+
+fn windows_error_details(context: &str, error: &windows::core::Error) -> Value {
+    let hresult = error.code().0 as u32;
+    let win32_error = crate::win32_code_from_hresult_contract(hresult);
+    json!({
+        "error_message": format!("{context}: {error}"),
+        "hresult_hex": format!("0x{hresult:08X}"),
+        "win32_error_code": win32_error,
+        "win32_error_hex": win32_error.map(|value| format!("0x{value:08X}")),
+    })
+}
+
+fn win32_error_details(context: &str, win32_error: u32) -> Value {
+    let hresult = crate::hresult_from_win32_contract(win32_error);
+    json!({
+        "error_message": format!("{context} failed with Win32 error {win32_error}"),
+        "hresult_hex": hresult.map(|value| format!("0x{value:08X}")),
+        "win32_error_code": win32_error,
+        "win32_error_hex": format!("0x{win32_error:08X}"),
+    })
+}
+
+fn service_error_evidence(error: String) -> Value {
+    let mut evidence = json!({
+        "schema": "amd-privilege-service-error/v1",
+        "qualification_only": QUALIFICATION_ONLY,
+        "service_name": SERVICE_NAME,
+        "error": error,
+    });
+    if let Some(details) = take_service_error_details() {
+        if let (Some(target), Some(source)) = (evidence.as_object_mut(), details.as_object()) {
+            for (key, value) in source {
+                target.insert(key.clone(), value.clone());
+            }
+        }
+    }
+    evidence
+}
+
+fn record_windows_service_error(context: &str, error: &windows::core::Error) {
+    remember_service_error_details(windows_error_details(context, error));
+}
+
+fn record_win32_service_error(context: &str, win32_error: u32) {
+    remember_service_error_details(win32_error_details(context, win32_error));
+}
+
+fn error_is_win32(error: &windows::core::Error, win32: WIN32_ERROR) -> bool {
+    error.code() == HRESULT::from_win32(win32.0)
+}
+
+fn win32_code_from_hresult(error: HRESULT) -> Option<u32> {
+    crate::win32_code_from_hresult_contract(error.0 as u32)
+}
 
 #[derive(Debug, Clone, Serialize)]
 struct ServiceContextEvidence {
@@ -161,12 +231,7 @@ unsafe extern "system" fn service_main(_argc: u32, _argv: *mut PWSTR) {
     let Ok(status_handle) = handler else {
         let _ = crate::write_json(
             &root.join("SERVICE-HARNESS-ERROR.json"),
-            &json!({
-                "schema": "amd-privilege-service-error/v1",
-                "qualification_only": QUALIFICATION_ONLY,
-                "service_name": SERVICE_NAME,
-                "error": "RegisterServiceCtrlHandlerExW failed"
-            }),
+            &service_error_evidence("RegisterServiceCtrlHandlerExW failed".to_owned()),
         );
         return;
     };
@@ -180,12 +245,7 @@ unsafe extern "system" fn service_main(_argc: u32, _argv: *mut PWSTR) {
         Err(error) => {
             let _ = crate::write_json(
                 &root.join("SERVICE-HARNESS-ERROR.json"),
-                &json!({
-                    "schema": "amd-privilege-service-error/v1",
-                    "qualification_only": QUALIFICATION_ONLY,
-                    "service_name": SERVICE_NAME,
-                    "error": error
-                }),
+                &service_error_evidence(error),
             );
             let _ = set_service_status(status_handle, SERVICE_STOPPED, 1, 0, 0);
         }
@@ -341,22 +401,33 @@ fn service_entry(
     }
     let mut readiness = crate::BrokerReadinessState::new();
     let first_pipe = create_pipe(&state.config)?;
+    let first_accept = arm_pipe_accept(first_pipe)?;
     if STOP_REQUESTED.load(Ordering::Acquire) {
         return Ok(());
     }
     readiness.mark_first_listener_created();
+    readiness
+        .mark_first_accept_armed(first_accept.readiness_state())
+        .map_err(str::to_owned)?;
     let readiness_result = (|| {
-        set_listener_ready_hint(&state.output_root, &state.config)?;
+        set_listener_ready_hint(
+            &state.output_root,
+            &state.config,
+            first_accept.readiness_state(),
+        )?;
         readiness.publish_ready().map_err(str::to_owned)?;
-        set_service_running_hint(&state.output_root)?;
+        set_service_running_hint(&state.output_root, first_accept.readiness_state())?;
         readiness.report_running().map_err(str::to_owned)?;
         set_service_status(status_handle, SERVICE_RUNNING, 0, 0, 0)
     })();
     readiness_result?;
-    broker_loop(&state, first_pipe, stop_event.raw())
+    broker_loop(&state, first_accept, stop_event.raw())
 }
 
-fn set_service_running_hint(root: &Path) -> Result<(), String> {
+fn set_service_running_hint(
+    root: &Path,
+    first_accept_state: crate::FirstAcceptState,
+) -> Result<(), String> {
     crate::write_json(
         &root.join("BROKER-READY.json"),
         &json!({
@@ -368,6 +439,9 @@ fn set_service_running_hint(root: &Path) -> Result<(), String> {
             "pipe_reject_remote_clients": true,
             "listener_created": true,
             "live_listener_handle": true,
+            "first_accept_armed": true,
+            "accept_mode": "FILE_FLAG_OVERLAPPED",
+            "first_accept_state": first_accept_state_name(first_accept_state),
             "client_disconnect_policy": CLIENT_DISCONNECT_POLICY,
             "active_sessions": 1
         }),
@@ -375,7 +449,11 @@ fn set_service_running_hint(root: &Path) -> Result<(), String> {
     .map_err(|error| format!("writing BROKER-READY.json failed: {error}"))
 }
 
-fn set_listener_ready_hint(root: &Path, config: &BrokerConfig) -> Result<(), String> {
+fn set_listener_ready_hint(
+    root: &Path,
+    config: &BrokerConfig,
+    first_accept_state: crate::FirstAcceptState,
+) -> Result<(), String> {
     crate::write_json(
         &root.join("PIPE-LISTENER-READY.json"),
         &json!({
@@ -383,6 +461,9 @@ fn set_listener_ready_hint(root: &Path, config: &BrokerConfig) -> Result<(), Str
             "qualification_only": QUALIFICATION_ONLY,
             "pipe_name": config.pipe_name,
             "listener_created": true,
+            "first_accept_armed": true,
+            "accept_mode": "FILE_FLAG_OVERLAPPED",
+            "first_accept_state": first_accept_state_name(first_accept_state),
             "pipe_reject_remote_clients": true,
             "semantic_protocol_only": true
         }),
@@ -392,17 +473,18 @@ fn set_listener_ready_hint(root: &Path, config: &BrokerConfig) -> Result<(), Str
 
 fn broker_loop(
     state: &BrokerState,
-    first_pipe: PipeHandle,
+    first_accept: ArmedPipeAccept,
     stop_event: HANDLE,
 ) -> Result<(), String> {
-    let mut pending_pipe = Some(first_pipe);
+    let mut pending_accept = Some(first_accept);
+    let mut first_accept_pending = true;
     while !STOP_REQUESTED.load(Ordering::Acquire) {
-        let pipe = match pending_pipe.take() {
-            Some(pipe) => Ok(pipe),
-            None => create_pipe(&state.config),
+        let accept = match pending_accept.take() {
+            Some(accept) => Ok(accept),
+            None => create_pipe(&state.config).and_then(arm_pipe_accept),
         };
-        let pipe = match pipe {
-            Ok(pipe) => pipe,
+        let accept = match accept {
+            Ok(accept) => accept,
             Err(error) => {
                 if STOP_REQUESTED.load(Ordering::Acquire) {
                     break;
@@ -410,11 +492,23 @@ fn broker_loop(
                 return Err(error);
             }
         };
-        let Some(pipe) = accept_pipe(pipe, stop_event)? else {
+        let Some(pipe) = wait_for_pipe_accept(accept, stop_event)? else {
             break;
         };
         if STOP_REQUESTED.load(Ordering::Acquire) {
             break;
+        }
+        if first_accept_pending {
+            first_accept_pending = false;
+            let _ = crate::write_json(
+                &state.output_root.join("FIRST-ACCEPT-REUSED.json"),
+                &json!({
+                    "schema": "amd-privilege-first-accept-reused/v1",
+                    "qualification_only": QUALIFICATION_ONLY,
+                    "first_accept_reused_for_first_client": true,
+                    "accept_mode": "FILE_FLAG_OVERLAPPED"
+                }),
+            );
         }
         let stream = NamedPipeStream::new(pipe);
         let state = state.clone();
@@ -1436,64 +1530,133 @@ fn create_io_event() -> Result<OwnedHandle, String> {
     OwnedHandle::new(event, "CreateEventW")
 }
 
-fn accept_pipe(pipe: PipeHandle, stop_event: HANDLE) -> Result<Option<PipeHandle>, String> {
+struct ArmedPipeAccept {
+    pipe: PipeHandle,
+    connect_event: OwnedHandle,
+    // This Box is intentional: Windows may dereference the OVERLAPPED after ConnectNamedPipe
+    // returns ERROR_IO_PENDING.  Its address remains stable until wait/cancel consumes this value.
+    overlapped: Box<OVERLAPPED>,
+    state: crate::FirstAcceptState,
+}
+
+impl ArmedPipeAccept {
+    fn readiness_state(&self) -> crate::FirstAcceptState {
+        self.state
+    }
+
+    fn overlapped_ptr(&self) -> *const OVERLAPPED {
+        self.overlapped.as_ref() as *const OVERLAPPED
+    }
+
+    fn into_pipe(self) -> PipeHandle {
+        self.pipe
+    }
+}
+
+fn first_accept_state_name(state: crate::FirstAcceptState) -> &'static str {
+    match state {
+        crate::FirstAcceptState::Connected => "CONNECTED",
+        crate::FirstAcceptState::PipeConnected => "PIPE_CONNECTED",
+        crate::FirstAcceptState::IoPending => "IO_PENDING",
+    }
+}
+
+fn arm_pipe_accept(pipe: PipeHandle) -> Result<ArmedPipeAccept, String> {
     let connect_event = create_io_event()?;
-    let mut overlapped: OVERLAPPED = unsafe { std::mem::zeroed() };
+    let mut overlapped = Box::new(unsafe { std::mem::zeroed::<OVERLAPPED>() });
     overlapped.hEvent = connect_event.raw();
     let connect_result =
-        unsafe { ConnectNamedPipe(pipe.raw, Some(std::ptr::addr_of_mut!(overlapped))) };
-    match connect_result {
-        Ok(()) => Ok(Some(pipe)),
-        Err(error) if error.code().0 as u32 == ERROR_PIPE_CONNECTED.0 => Ok(Some(pipe)),
-        Err(error) if error.code().0 as u32 == ERROR_IO_PENDING.0 => {
-            let handles = [connect_event.raw(), stop_event];
-            let wait_result = unsafe { WaitForMultipleObjects(&handles, false, INFINITE) };
-            match wait_result.0 {
-                value if value == WAIT_OBJECT_0.0 => {
-                    let mut transferred = 0_u32;
-                    match unsafe {
-                        GetOverlappedResult(
-                            pipe.raw,
-                            std::ptr::addr_of!(overlapped),
-                            &mut transferred,
-                            false,
-                        )
-                    } {
-                        Ok(()) => Ok(Some(pipe)),
-                        Err(error)
-                            if STOP_REQUESTED.load(Ordering::Acquire)
-                                || error.code().0 as u32 == ERROR_OPERATION_ABORTED.0 =>
-                        {
-                            Ok(None)
-                        }
-                        Err(error) => Err(format!(
-                            "GetOverlappedResult for named-pipe connect failed: {error}"
-                        )),
-                    }
-                }
-                value if value == WAIT_OBJECT_0.0 + 1 => {
-                    let _ = unsafe { CancelIoEx(pipe.raw, Some(std::ptr::addr_of!(overlapped))) };
-                    let mut transferred = 0_u32;
-                    let _ = unsafe {
-                        GetOverlappedResult(
-                            pipe.raw,
-                            std::ptr::addr_of!(overlapped),
-                            &mut transferred,
-                            true,
-                        )
-                    };
+        unsafe { ConnectNamedPipe(pipe.raw, Some(std::ptr::addr_of_mut!(*overlapped))) };
+    let state = match connect_result {
+        Ok(()) => crate::FirstAcceptState::Connected,
+        Err(error) if error_is_win32(&error, ERROR_PIPE_CONNECTED) => {
+            crate::FirstAcceptState::PipeConnected
+        }
+        Err(error) if error_is_win32(&error, ERROR_IO_PENDING) => {
+            crate::FirstAcceptState::IoPending
+        }
+        Err(error) => {
+            record_windows_service_error("ConnectNamedPipe", &error);
+            return Err(format!("ConnectNamedPipe failed: {error}"));
+        }
+    };
+    Ok(ArmedPipeAccept {
+        pipe,
+        connect_event,
+        overlapped,
+        state,
+    })
+}
+
+fn wait_for_pipe_accept(
+    accept: ArmedPipeAccept,
+    stop_event: HANDLE,
+) -> Result<Option<PipeHandle>, String> {
+    if !matches!(accept.state, crate::FirstAcceptState::IoPending) {
+        return Ok((!STOP_REQUESTED.load(Ordering::Acquire)).then(|| accept.into_pipe()));
+    }
+
+    let handles = [accept.connect_event.raw(), stop_event];
+    let wait_result = unsafe { WaitForMultipleObjects(&handles, false, INFINITE) };
+    match wait_result.0 {
+        value if value == WAIT_OBJECT_0.0 => {
+            let mut transferred = 0_u32;
+            match unsafe {
+                GetOverlappedResult(
+                    accept.pipe.raw,
+                    accept.overlapped_ptr(),
+                    &mut transferred,
+                    false,
+                )
+            } {
+                Ok(()) => Ok((!STOP_REQUESTED.load(Ordering::Acquire)).then(|| accept.into_pipe())),
+                Err(error)
+                    if STOP_REQUESTED.load(Ordering::Acquire)
+                        && error_is_win32(&error, ERROR_OPERATION_ABORTED) =>
+                {
                     Ok(None)
                 }
-                value if value == WAIT_FAILED.0 => {
-                    Err(format!("WaitForMultipleObjects failed: {}", unsafe {
-                        GetLastError().0
-                    }))
+                Err(error) => {
+                    record_windows_service_error(
+                        "GetOverlappedResult for named-pipe connect",
+                        &error,
+                    );
+                    Err(format!(
+                        "GetOverlappedResult for named-pipe connect failed: {error}"
+                    ))
                 }
-                value => Err(format!("unexpected WaitForMultipleObjects result: {value}")),
             }
         }
-        Err(_error) if STOP_REQUESTED.load(Ordering::Acquire) => Ok(None),
-        Err(error) => Err(format!("ConnectNamedPipe failed: {error}")),
+        value if value == WAIT_OBJECT_0.0 + 1 => {
+            let _ = unsafe { CancelIoEx(accept.pipe.raw, Some(accept.overlapped_ptr())) };
+            let mut transferred = 0_u32;
+            match unsafe {
+                GetOverlappedResult(
+                    accept.pipe.raw,
+                    accept.overlapped_ptr(),
+                    &mut transferred,
+                    true,
+                )
+            } {
+                Ok(()) => Ok(None),
+                Err(error) if error_is_win32(&error, ERROR_OPERATION_ABORTED) => Ok(None),
+                Err(error) => {
+                    record_windows_service_error(
+                        "GetOverlappedResult after named-pipe accept cancellation",
+                        &error,
+                    );
+                    Err(format!(
+                        "GetOverlappedResult after named-pipe accept cancellation failed: {error}"
+                    ))
+                }
+            }
+        }
+        value if value == WAIT_FAILED.0 => {
+            let win32_error = unsafe { GetLastError().0 };
+            record_win32_service_error("WaitForMultipleObjects", win32_error);
+            Err(format!("WaitForMultipleObjects failed: {win32_error}"))
+        }
+        value => Err(format!("unexpected WaitForMultipleObjects result: {value}")),
     }
 }
 
@@ -1515,7 +1678,7 @@ fn overlapped_read(pipe: HANDLE, buffer: &mut [u8]) -> io::Result<usize> {
     };
     match result {
         Ok(()) => Ok(transferred as usize),
-        Err(error) if error.code().0 as u32 == ERROR_IO_PENDING.0 => {
+        Err(error) if error_is_win32(&error, ERROR_IO_PENDING) => {
             match unsafe {
                 GetOverlappedResult(
                     pipe,
@@ -1525,14 +1688,12 @@ fn overlapped_read(pipe: HANDLE, buffer: &mut [u8]) -> io::Result<usize> {
                 )
             } {
                 Ok(()) => Ok(transferred as usize),
-                Err(error) if error.code().0 as u32 == ERROR_MORE_DATA.0 => {
-                    Ok(transferred as usize)
-                }
+                Err(error) if error_is_win32(&error, ERROR_MORE_DATA) => Ok(transferred as usize),
                 Err(error) => Err(io_win32(error)),
             }
         }
-        Err(error) if error.code().0 as u32 == ERROR_MORE_DATA.0 => Ok(transferred as usize),
-        Err(error) if error.code().0 as u32 == ERROR_BROKEN_PIPE.0 => Ok(0),
+        Err(error) if error_is_win32(&error, ERROR_MORE_DATA) => Ok(transferred as usize),
+        Err(error) if error_is_win32(&error, ERROR_BROKEN_PIPE) => Ok(0),
         Err(error) => Err(io_win32(error)),
     }
 }
@@ -1555,7 +1716,7 @@ fn overlapped_write(pipe: HANDLE, buffer: &[u8]) -> io::Result<usize> {
     };
     match result {
         Ok(()) => Ok(transferred as usize),
-        Err(error) if error.code().0 as u32 == ERROR_IO_PENDING.0 => unsafe {
+        Err(error) if error_is_win32(&error, ERROR_IO_PENDING) => unsafe {
             GetOverlappedResult(
                 pipe,
                 std::ptr::addr_of!(overlapped),
@@ -1574,7 +1735,11 @@ fn io_other(error: String) -> io::Error {
 }
 
 fn io_win32(error: windows::core::Error) -> io::Error {
-    io::Error::from_raw_os_error(error.code().0)
+    if let Some(win32_error) = win32_code_from_hresult(error.code()) {
+        io::Error::from_raw_os_error(win32_error as i32)
+    } else {
+        io::Error::other(format!("Windows HRESULT {}: {error}", error.code()))
+    }
 }
 
 fn create_pipe(config: &BrokerConfig) -> Result<PipeHandle, String> {
@@ -1604,9 +1769,9 @@ fn create_pipe(config: &BrokerConfig) -> Result<PipeHandle, String> {
         )
     };
     if handle.is_invalid() {
-        return Err(format!("CreateNamedPipeW failed: {}", unsafe {
-            GetLastError().0
-        }));
+        let win32_error = unsafe { GetLastError().0 };
+        record_win32_service_error("CreateNamedPipeW", win32_error);
+        return Err(format!("CreateNamedPipeW failed: {win32_error}"));
     }
     Ok(PipeHandle { raw: handle })
 }
@@ -2067,5 +2232,42 @@ mod tests {
         assert_eq!(SERVICE_NAME, "ResourceTimelineAmdPrivilegeQualification");
         assert!(crate::pipe_name_for_scope("0123456789abcdef0123456789abcdef").is_ok());
         assert!(crate::pipe_name_for_scope("bad").is_err());
+    }
+
+    #[test]
+    fn hresult_from_win32_states_are_compared_in_the_same_domain() {
+        for (win32, expected_hresult) in [
+            (ERROR_IO_PENDING, 0x8007_03E5_u32),
+            (ERROR_PIPE_CONNECTED, 0x8007_0217_u32),
+            (ERROR_OPERATION_ABORTED, 0x8007_03E3_u32),
+            (ERROR_MORE_DATA, 0x8007_00EA_u32),
+            (ERROR_BROKEN_PIPE, 0x8007_006D_u32),
+        ] {
+            let error = windows::core::Error::from_hresult(HRESULT(expected_hresult as i32));
+            assert!(error_is_win32(&error, win32));
+            assert_eq!(win32_code_from_hresult(error.code()), Some(win32.0));
+        }
+    }
+
+    #[test]
+    fn raw_win32_value_is_not_directly_treated_as_hresult() {
+        let error = windows::core::Error::from_hresult(HRESULT(997));
+        assert!(!error_is_win32(&error, ERROR_IO_PENDING));
+        assert_eq!(win32_code_from_hresult(error.code()), None);
+    }
+
+    #[test]
+    fn non_win32_hresult_is_not_decoded_as_a_win32_error() {
+        let error = windows::core::Error::from_hresult(HRESULT(0x8000_4005_u32 as i32));
+        assert_eq!(win32_code_from_hresult(error.code()), None);
+        assert_eq!(io_win32(error).raw_os_error(), None);
+    }
+
+    #[test]
+    fn pending_accept_overlapped_storage_has_stable_address() {
+        let overlapped = Box::new(unsafe { std::mem::zeroed::<OVERLAPPED>() });
+        let address = overlapped.as_ref() as *const OVERLAPPED;
+        let moved = overlapped;
+        assert_eq!(address, moved.as_ref() as *const OVERLAPPED);
     }
 }
