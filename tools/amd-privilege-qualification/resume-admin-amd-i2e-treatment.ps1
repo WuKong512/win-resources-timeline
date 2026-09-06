@@ -124,14 +124,13 @@ function Get-I2eControlRecoveryEvidence {
     param([Parameter(Mandatory = $true)]$Pointer)
     $experimentRoot = Join-Path $QualificationRoot $ExpectedExperimentId
     $controlRoot = Join-Path $QualificationRoot $ExpectedControlScope
-    $discoveryRoot = Join-Path $controlRoot 'counter-discovery'
-    $tokenGate = Read-I2eResumeEvidence -Path (Join-Path $controlRoot 'SERVICE-PROFILE-TOKEN-GATE.json')
-    $context = Read-I2eResumeEvidence -Path (Join-Path $controlRoot 'SERVICE-PROFILE-SERVICE-CONTEXT.json')
-    $summary = Read-I2eResumeEvidence -Path (Join-Path $controlRoot 'SERVICE-PROFILE-COUNTER-SUMMARY.json')
-    $discovery = Read-I2eResumeEvidence -Path (Join-Path $discoveryRoot 'AMD-COUNTER-DISCOVERY-RESULT.json')
-    $launch = Read-I2eResumeEvidence -Path (Join-Path $discoveryRoot 'AMD-COUNTER-DISCOVERY-LAUNCH.json')
-    $harnessPath = Join-Path $controlRoot 'SERVICE-PROFILE-SERVICE-HARNESS-ERROR.json'
-    $harness = if (Test-Path -LiteralPath $harnessPath -PathType Leaf) { Read-I2eJson -Path $harnessPath } else { $null }
+    $paths = Assert-I2eControlRecoveryEvidenceFiles -ControlRoot $controlRoot
+    $tokenGate = Read-I2eResumeEvidence -Path $paths.token_gate
+    $context = Read-I2eResumeEvidence -Path $paths.context
+    $summary = Read-I2eResumeEvidence -Path $paths.summary
+    $discovery = Read-I2eResumeEvidence -Path $paths.discovery_result
+    $launch = Read-I2eResumeEvidence -Path $paths.discovery_launch
+    $harness = if (Test-Path -LiteralPath $paths.harness_error -PathType Leaf) { Read-I2eJson -Path $paths.harness_error } else { $null }
     $recovery = Assert-I2eControlRecoveryEvidence `
         -Pointer $Pointer `
         -ControlTokenGate $tokenGate `
@@ -176,8 +175,8 @@ function Write-I2eControlRecovery {
             (Join-Path $ControlEvidence.control_root 'SERVICE-PROFILE-TOKEN-GATE.json'),
             (Join-Path $ControlEvidence.control_root 'SERVICE-PROFILE-SERVICE-CONTEXT.json'),
             (Join-Path $ControlEvidence.control_root 'SERVICE-PROFILE-COUNTER-SUMMARY.json'),
-            (Join-Path $ControlEvidence.control_root 'counter-discovery\AMD-COUNTER-DISCOVERY-RESULT.json'),
-            (Join-Path $ControlEvidence.control_root 'counter-discovery\AMD-COUNTER-DISCOVERY-LAUNCH.json')
+            (Join-Path $ControlEvidence.control_root 'AMD-COUNTER-DISCOVERY-RESULT.json'),
+            (Join-Path $ControlEvidence.control_root 'AMD-COUNTER-DISCOVERY-LAUNCH.json')
         )
         control_real_executed = $true
         control_result = 'POWER_UNAVAILABLE'

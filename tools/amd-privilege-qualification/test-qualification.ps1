@@ -516,6 +516,8 @@ Write-Host 'I2E_CURRENT_POINTER_FINALIZATION=PASS'
 
 foreach ($requiredResumeContract in @(
         'Assert-I2eControlRecoveryEvidence',
+        'Get-I2eControlRecoveryEvidencePaths',
+        'Assert-I2eControlRecoveryEvidenceFiles',
         'Assert-I2eTreatmentTokenGate',
         'POWERSHELL_AUTOMATIC_VARIABLE_PID_COLLISION_AFTER_REAL_CONTROL',
         'control_real_executed',
@@ -548,6 +550,18 @@ foreach ($requiredTreatmentResumeContract in @(
 }
 if ($i2eResumeSource -match 'Invoke-I2ePhase\s+-Phase\s+CONTROL') {
     throw 'I2E treatment-only resume contains a CONTROL execution path.'
+}
+if ($i2eResumeSource -match [regex]::Escape("Join-Path \`$controlRoot 'counter-discovery'")) {
+    throw 'I2E control recovery must not derive discovery evidence from a nested counter-discovery directory.'
+}
+foreach ($requiredDirectRootPath in @(
+        'Assert-I2eControlRecoveryEvidenceFiles -ControlRoot $controlRoot',
+        'AMD-COUNTER-DISCOVERY-RESULT.json',
+        'AMD-COUNTER-DISCOVERY-LAUNCH.json'
+    )) {
+    if ($i2eResumeSource -notmatch [regex]::Escape($requiredDirectRootPath)) {
+        throw "I2E control recovery direct-root path contract is missing: $requiredDirectRootPath"
+    }
 }
 Write-Host 'I2E_TREATMENT_ONLY_RESUME_STATIC_CONTRACT=PASS'
 
@@ -641,6 +655,43 @@ if (-not $recoveredState.pass -or
     -not $recoveredState.control_recovery_required) {
     throw 'I2E authoritative control recovery fixture was not accepted.'
 }
+$directLayoutRoot = Join-Path $EvidenceRoot 'I2E-CONTROL-REAL-LAYOUT-FIXTURE'
+New-Item -ItemType Directory -Force -Path $directLayoutRoot | Out-Null
+$directLayoutPaths = Get-I2eControlRecoveryEvidencePaths -ControlRoot $directLayoutRoot
+foreach ($pathKey in @('token_gate', 'context', 'summary', 'discovery_result', 'discovery_launch')) {
+    Set-Content -LiteralPath $directLayoutPaths[$pathKey] -Value '{}' -Encoding UTF8
+}
+$validatedDirectLayout = Assert-I2eControlRecoveryEvidenceFiles -ControlRoot $directLayoutRoot
+if ($validatedDirectLayout.discovery_result -cne (Join-Path $directLayoutRoot 'AMD-COUNTER-DISCOVERY-RESULT.json') -or
+    $validatedDirectLayout.discovery_launch -cne (Join-Path $directLayoutRoot 'AMD-COUNTER-DISCOVERY-LAUNCH.json') -or
+    $validatedDirectLayout.discovery_result -match '(?i)[\\/]counter-discovery[\\/]' -or
+    $validatedDirectLayout.discovery_launch -match '(?i)[\\/]counter-discovery[\\/]') {
+    throw 'I2E control recovery path validation did not use the direct phase root.'
+}
+$nestedOnlyLayoutRoot = Join-Path $EvidenceRoot 'I2E-CONTROL-NESTED-ONLY-FIXTURE'
+$nestedOnlyDiscoveryRoot = Join-Path $nestedOnlyLayoutRoot 'counter-discovery'
+New-Item -ItemType Directory -Force -Path $nestedOnlyDiscoveryRoot | Out-Null
+foreach ($name in @(
+        'SERVICE-PROFILE-TOKEN-GATE.json',
+        'SERVICE-PROFILE-SERVICE-CONTEXT.json',
+        'SERVICE-PROFILE-COUNTER-SUMMARY.json'
+    )) {
+    Set-Content -LiteralPath (Join-Path $nestedOnlyLayoutRoot $name) -Value '{}' -Encoding UTF8
+}
+foreach ($name in @('AMD-COUNTER-DISCOVERY-RESULT.json', 'AMD-COUNTER-DISCOVERY-LAUNCH.json')) {
+    Set-Content -LiteralPath (Join-Path $nestedOnlyDiscoveryRoot $name) -Value '{}' -Encoding UTF8
+}
+$nestedOnlyRejected = $false
+try {
+    $null = Assert-I2eControlRecoveryEvidenceFiles -ControlRoot $nestedOnlyLayoutRoot
+} catch {
+    $nestedOnlyRejected = $true
+}
+if (-not $nestedOnlyRejected) {
+    throw 'I2E control recovery accepted obsolete nested-only discovery evidence.'
+}
+Write-Host 'I2E_CONTROL_RECOVERY_PATH_VALIDATION=PASS'
+Write-Host 'I2E_CONTROL_RECOVERY_NESTED_ONLY_FAIL_CLOSED=PASS'
 $recoveryMismatchRejected = $false
 try {
     $null = Assert-I2eControlRecoveryEvidence `

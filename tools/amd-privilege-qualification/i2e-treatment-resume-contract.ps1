@@ -42,6 +42,33 @@ function Test-I2eResumeFixedArguments {
     return $values.Count -eq 2 -and $values[0] -ceq 'timechart' -and $values[1] -ceq '--list'
 }
 
+function Get-I2eControlRecoveryEvidencePaths {
+    [CmdletBinding()]
+    param([Parameter(Mandatory = $true)][string]$ControlRoot)
+
+    [ordered]@{
+        token_gate = Join-Path $ControlRoot 'SERVICE-PROFILE-TOKEN-GATE.json'
+        context = Join-Path $ControlRoot 'SERVICE-PROFILE-SERVICE-CONTEXT.json'
+        summary = Join-Path $ControlRoot 'SERVICE-PROFILE-COUNTER-SUMMARY.json'
+        discovery_result = Join-Path $ControlRoot 'AMD-COUNTER-DISCOVERY-RESULT.json'
+        discovery_launch = Join-Path $ControlRoot 'AMD-COUNTER-DISCOVERY-LAUNCH.json'
+        harness_error = Join-Path $ControlRoot 'SERVICE-PROFILE-SERVICE-HARNESS-ERROR.json'
+    }
+}
+
+function Assert-I2eControlRecoveryEvidenceFiles {
+    [CmdletBinding()]
+    param([Parameter(Mandatory = $true)][string]$ControlRoot)
+
+    $paths = Get-I2eControlRecoveryEvidencePaths -ControlRoot $ControlRoot
+    foreach ($name in @('token_gate', 'context', 'summary', 'discovery_result', 'discovery_launch')) {
+        if (-not (Test-Path -LiteralPath $paths[$name] -PathType Leaf)) {
+            throw ('Required direct-root I2E control evidence is absent: {0}' -f $paths[$name])
+        }
+    }
+    $paths
+}
+
 function Assert-I2eControlRecoveryEvidence {
     [CmdletBinding()]
     param(

@@ -357,6 +357,22 @@ Set-Location 'F:\File\codex\codex-worktrees\ac74\resource-timeline'
 & '.\tools\amd-privilege-qualification\resume-admin-amd-i2e-treatment.ps1' -ExecuteAuthorizedTreatmentOnly
 ```
 
+### Treatment-resume evidence layout closure
+
+The treatment-only resume reads the immutable CONTROL discovery evidence from
+the actual phase root. It does not create or search a nested
+`counter-discovery` directory:
+
+```text
+CONTROL_ROOT\AMD-COUNTER-DISCOVERY-RESULT.json
+CONTROL_ROOT\AMD-COUNTER-DISCOVERY-LAUNCH.json
+```
+
+`TREATMENT_RESUME_CONTROL_DISCOVERY_PATH_DRIFT = CLOSED`. The resume fails
+closed when either direct-root discovery file is absent, and synthetic tests
+reject a nested-only layout. Historical CONTROL evidence is not moved or
+rewritten; the next gate remains the treatment-only human invocation above.
+
 ## I2D read-only minimum-capability forensics
 
 > HISTORICAL / SUPERSEDED NEXT-GATE SNAPSHOT: I2D read-only evidence

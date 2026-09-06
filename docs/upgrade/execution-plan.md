@@ -1354,6 +1354,34 @@ Set-Location 'F:\File\codex\codex-worktrees\ac74\resource-timeline'
 & '.\tools\amd-privilege-qualification\resume-admin-amd-i2e-treatment.ps1' -ExecuteAuthorizedTreatmentOnly
 ```
 
+## AMD-PRIVILEGE-I2E TREATMENT-RESUME EVIDENCE PATH CLOSURE
+
+The treatment-only resume previously derived a nested `counter-discovery`
+directory when validating the immutable CONTROL phase. The real CONTROL run
+stores its discovery evidence directly in the phase root, so the resume now
+uses deterministic direct-root paths and fails closed if either direct
+discovery file is absent. No historical evidence is moved, copied, rewritten,
+or regenerated.
+
+```text
+ROOT_CAUSE = TREATMENT_RESUME_CONTROL_DISCOVERY_PATH_DRIFT
+CONTROL_REAL_EVIDENCE_ROOT = C:\ProgramData\ResourceTimeline\qualification\amd-system-profile\07a511e169274def93da79f269792b71
+CONTROL_DISCOVERY_RESULT_PATH = CONTROL_ROOT\AMD-COUNTER-DISCOVERY-RESULT.json
+CONTROL_DISCOVERY_LAUNCH_PATH = CONTROL_ROOT\AMD-COUNTER-DISCOVERY-LAUNCH.json
+CONTROL_RECOVERY_PATH_VALIDATION = PASS
+AUTHORITATIVE_SOURCE_PATHS = PASS
+CONTROL_RERUN = FORBIDDEN
+TREATMENT_ONLY_RESUME = PREPARED
+REAL_SERVICE_RUNTIME_DURING_REPAIR = 0
+REAL_LSA_MUTATION_DURING_REPAIR = 0
+REAL_AMD_RUNTIME_DURING_REPAIR = 0
+NEXT_GATE = HUMAN_I2E_TREATMENT_ONLY_RESUME
+```
+
+The repository regression covers the known direct-root layout and rejects a
+nested-only `counter-discovery` fixture. The treatment-only command remains
+the sole next human gate.
+
 ## HISTORICAL / SUPERSEDED — AMD-PRIVILEGE-I2D MINIMUM CAPABILITY ROOT-CAUSE FORENSICS
 
 I2D consumes the two immutable, human-authorized non-sampling counter-
