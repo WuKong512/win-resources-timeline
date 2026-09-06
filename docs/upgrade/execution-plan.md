@@ -1218,6 +1218,27 @@ REAL_CONTROL_EVIDENCE = PRESERVED
 TREATMENT = PENDING_HUMAN_AUTHORIZATION
 ```
 
+## PR22 I2E partial rollback retry closure
+
+Cleanup retries now treat the split policy/effective rollback state as
+authoritative. An already verified policy removal is re-read in both LSA
+directions and is never removed a second time merely because service/token
+teardown remains incomplete. The AMD CLI ownership check is also pinned to the
+experiment's immutable preflight identity rather than a machine-specific path.
+
+```text
+PR22_PARTIAL_ROLLBACK_RETRY = CLOSED_OFFLINE
+POLICY_ROLLBACK_RETRY_SEMANTICS = policy_rollback_verified controls LSA re-removal
+FULL_ROLLBACK_COMPATIBILITY_FIELD = rollback_verified == full_rollback_verified
+ALREADY_REMOVED_RIGHT_RETRY = READ_ONLY_REVERIFY / NO_DUPLICATE_REMOVE
+PARTIAL_ROLLBACK_LSA_REMOVE_CALLS = 0
+POLICY_STATE_DRIFT = FAIL_CLOSED
+AMD_CLI_OWNERSHIP_PATH = PINNED_PREFLIGHT_DERIVED
+HARD_CODED_AMD_CLI_PATH = REMOVED_FROM_ACTIVE_I2E_OWNERSHIP
+PRODUCTION_ACCOUNT = UNRESOLVED
+NEXT_GATE = HUMAN_I2E_TREATMENT_ONLY_RESUME_REVIEW
+```
+
 ## HISTORICAL / SUPERSEDED — AMD-PRIVILEGE-I2C SYSTEM PRE-RUN CLOSURE
 
 The SYSTEM comparison remains a dedicated, non-IPC, non-sampling qualification

@@ -38,9 +38,28 @@ function Get-I2eResumeOwnedBrokerProcesses {
     })
 }
 
+function Get-I2eResumePinnedAmdCliPath {
+    $preflightPath = Join-Path (Join-Path $QualificationRoot $ExpectedExperimentId) 'AMD-CLI-PREFLIGHT.json'
+    if (-not (Test-Path -LiteralPath $preflightPath -PathType Leaf)) {
+        throw ('Pinned AMD CLI preflight is absent; refusing ownership inference: {0}' -f $preflightPath)
+    }
+    $preflight = Read-I2eJson -Path $preflightPath
+    if (-not (Test-I2eResumeBoolean -Actual (Get-I2eResumeProperty -Object $preflight -Name 'preflight_pass') -Expected $true)) {
+        throw ('Pinned AMD CLI preflight is not passing: {0}' -f $preflightPath)
+    }
+    $path = [string](Get-I2eResumeProperty -Object $preflight -Name 'path' -Default '')
+    if ([string]::IsNullOrWhiteSpace($path)) {
+        throw ('Pinned AMD CLI preflight has no path: {0}' -f $preflightPath)
+    }
+    try { return [IO.Path]::GetFullPath($path) }
+    catch { throw ('Pinned AMD CLI preflight path is invalid: {0}' -f $path) }
+}
+
 function Get-I2eResumeAmdProcesses {
+    param([Parameter(Mandatory = $true)][string]$ExpectedAmdCliPath)
+    $expectedPath = [IO.Path]::GetFullPath($ExpectedAmdCliPath)
     @(Get-Process -Name 'AMDuProfCLI' -ErrorAction SilentlyContinue | Where-Object {
-        try { $_.Path -and $_.Path -ieq 'D:\apps\AMDuProf\bin\AMDuProfCLI.exe' } catch { $false }
+        try { $_.Path -and ([IO.Path]::GetFullPath($_.Path) -ieq $expectedPath) } catch { $false }
     })
 }
 
@@ -206,10 +225,11 @@ function Assert-I2eTreatmentResumeSecurityGate {
 }
 
 function Assert-I2eTreatmentResumeNoOwnedProcesses {
+    $expectedAmdCliPath = Get-I2eResumePinnedAmdCliPath
     if (@(Get-I2eResumeOwnedBrokerProcesses).Count -ne 0) {
         throw 'Treatment resume found an owned qualification broker process.'
     }
-    if (@(Get-I2eResumeAmdProcesses).Count -ne 0) {
+    if (@(Get-I2eResumeAmdProcesses -ExpectedAmdCliPath $expectedAmdCliPath).Count -ne 0) {
         throw 'Treatment resume found an owned AMD CLI process.'
     }
 }
@@ -297,7 +317,7 @@ function Invoke-I2eTreatmentRollback {
         $stopError = if ($null -eq $stopError) { $_.Exception.Message } else { '{0}; service-state-read: {1}' -f $stopError, $_.Exception.Message }
     }
     $ownedBrokerCount = @(Get-I2eResumeOwnedBrokerProcesses).Count
-    $amdCliCount = @(Get-I2eResumeAmdProcesses).Count
+    $amdCliCount = @(Get-I2eResumeAmdProcesses -ExpectedAmdCliPath (Get-I2eResumePinnedAmdCliPath)).Count
 
     $direct = $null
     $assigned = $null

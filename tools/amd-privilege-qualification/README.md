@@ -427,6 +427,30 @@ conjunction sets `full_rollback_verified` and the compatibility
 `rollback_verified` field. Failed stop or policy verification retains the
 CURRENT pointer and cannot finalize the experiment.
 
+### PR #22 partial rollback retry closure
+
+Cleanup retry semantics use `policy_rollback_verified` to decide whether an
+LSA removal is still required. When that policy state is already verified,
+cleanup performs fresh read-only direct-right and assignment readback,
+records `policy_remove_skipped_reason = ALREADY_VERIFIED_REMOVED`, and issues
+no duplicate `LsaRemoveAccountRights` call. Unexpected policy-state drift
+fails closed. The full rollback compatibility field remains
+`rollback_verified == full_rollback_verified`.
+
+Active I2E AMD CLI process ownership is derived from the pinned
+`AMD-CLI-PREFLIGHT.json` identity for the experiment. A missing or failed
+preflight fails closed; no machine-specific fallback path is used.
+
+```text
+PR22_PARTIAL_ROLLBACK_RETRY = CLOSED_OFFLINE
+POLICY_ROLLBACK_RETRY_SEMANTICS = policy_rollback_verified controls LSA re-removal
+FULL_ROLLBACK_COMPATIBILITY_FIELD = rollback_verified == full_rollback_verified
+ALREADY_REMOVED_RIGHT_RETRY = READ_ONLY_REVERIFY / NO_DUPLICATE_REMOVE
+POLICY_STATE_DRIFT = FAIL_CLOSED
+AMD_CLI_OWNERSHIP_PATH = PINNED_PREFLIGHT_DERIVED
+HARD_CODED_AMD_CLI_PATH = REMOVED_FROM_ACTIVE_I2E_OWNERSHIP
+```
+
 ## I2D read-only minimum-capability forensics
 
 > HISTORICAL / SUPERSEDED NEXT-GATE SNAPSHOT: I2D read-only evidence

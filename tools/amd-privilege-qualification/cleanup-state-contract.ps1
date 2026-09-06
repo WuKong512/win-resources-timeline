@@ -83,12 +83,49 @@ function Test-I2ePairedGateConsumed {
     return $state -in @('CONTROL_EXECUTED', 'RIGHT_MUTATED', 'TREATMENT_EXECUTED')
 }
 
+function Get-I2ePolicyRollbackState {
+    [CmdletBinding()]
+    param([Parameter(Mandatory = $true)][object]$Pointer)
+
+    $policyProperty = @($Pointer.PSObject.Properties | Where-Object Name -eq 'policy_rollback_verified' | Select-Object -First 1)
+    if ($policyProperty.Count -eq 1) {
+        return [pscustomobject]@{
+            field_present = $true
+            verified = [bool]$policyProperty[0].Value
+            source = 'policy_rollback_verified'
+        }
+    }
+
+    # Historical pointers predate the split rollback state.  Their legacy
+    # rollback_verified value is the only available conservative signal.
+    [pscustomobject]@{
+        field_present = $false
+        verified = Get-I2eCleanupPointerBoolean -Pointer $Pointer -Name 'rollback_verified'
+        source = 'legacy_rollback_verified_fallback'
+    }
+}
+
 function Test-I2eExactRightRollbackRequired {
     [CmdletBinding()]
     param([Parameter(Mandatory = $true)][object]$Pointer)
 
-    return (Get-I2eCleanupPointerBoolean -Pointer $Pointer -Name 'right_added_by_experiment') -and
-        -not (Get-I2eCleanupPointerBoolean -Pointer $Pointer -Name 'rollback_verified')
+    if (-not (Get-I2eCleanupPointerBoolean -Pointer $Pointer -Name 'right_added_by_experiment')) {
+        return $false
+    }
+    return -not (Get-I2ePolicyRollbackState -Pointer $Pointer).verified
+}
+
+function Test-I2ePolicyRollbackStateDrift {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][object]$Pointer,
+        [Parameter(Mandatory = $true)][bool]$ReadbackAvailable,
+        [Parameter(Mandatory = $true)][bool]$RightPresent,
+        [Parameter(Mandatory = $true)][bool]$AssignmentPresent
+    )
+
+    $state = Get-I2ePolicyRollbackState -Pointer $Pointer
+    return $state.verified -and $ReadbackAvailable -and ($RightPresent -or $AssignmentPresent)
 }
 
 function Get-I2eRollbackVerification {

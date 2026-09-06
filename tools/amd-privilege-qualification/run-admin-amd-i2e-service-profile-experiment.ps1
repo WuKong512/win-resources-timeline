@@ -94,8 +94,10 @@ function Get-I2eOwnedBrokerProcesses {
 }
 
 function Get-I2eOwnedAmdProcesses {
+    param([Parameter(Mandatory = $true)][string]$ExpectedAmdCliPath)
+    $expectedPath = [IO.Path]::GetFullPath($ExpectedAmdCliPath)
     @(Get-Process -Name 'AMDuProfCLI' -ErrorAction SilentlyContinue | Where-Object {
-        try { $_.Path -and $_.Path -ieq 'D:\apps\AMDuProf\bin\AMDuProfCLI.exe' } catch { $false }
+        try { $_.Path -and ([IO.Path]::GetFullPath($_.Path) -ieq $expectedPath) } catch { $false }
     })
 }
 
@@ -472,7 +474,7 @@ finally {
         $serviceStopVerified = -not $serviceAfterStop.present -or
             ($serviceStateAfterStop -ceq 'Stopped' -and $servicePidAfterStop -eq 0)
         $ownedBrokerCountAfterStop = @(Get-I2eOwnedBrokerProcesses).Count
-        $amdCliCountAfterStop = @(Get-I2eOwnedAmdProcesses).Count
+        $amdCliCountAfterStop = @(Get-I2eOwnedAmdProcesses -ExpectedAmdCliPath ([string]$amdCliPreflight.path)).Count
 
         $directVerification = $null
         $assignmentVerification = $null

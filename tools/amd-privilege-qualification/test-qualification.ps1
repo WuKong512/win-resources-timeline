@@ -622,6 +622,21 @@ Write-Host 'I2E_AMD_CLI_SIGNATURE_FAIL_CLOSED=PASS'
 Write-Host 'I2E_AMD_CLI_SIGNER_DRIFT_FAIL_CLOSED=PASS'
 Write-Host 'I2E_AMD_IDENTITY_GATE_BEFORE_LSA_MUTATION=PASS'
 
+foreach ($ownershipSource in @($i2eCleanupSource, $i2eResumeSource, $i2eSetupSource)) {
+    if ($ownershipSource -match 'D:\\apps\\AMDuProf\\bin\\AMDuProfCLI\.exe') {
+        throw 'I2E AMD CLI ownership still contains a machine-specific hard-coded path.'
+    }
+}
+if ($i2eCleanupSource -notmatch 'AMD-CLI-PREFLIGHT\.json' -or
+    $i2eResumeSource -notmatch 'AMD-CLI-PREFLIGHT\.json' -or
+    $i2eSetupSource -notmatch 'amdCliPreflight\.path') {
+    throw 'I2E AMD CLI ownership does not derive its path from pinned preflight identity.'
+}
+if ($i2eCleanupSource -notmatch 'right_added_by_experiment\s*=\s*\$rightAddedByExperiment') {
+    throw 'I2E rollback evidence does not preserve the original right-added state on retry.'
+}
+Write-Host 'I2E_AMD_CLI_OWNERSHIP_PINNED_PREFLIGHT=PASS'
+
 $i2eRollbackSuccess = Get-I2eRollbackVerification `
     -PolicyRollbackVerified $true -ServicePresent $true -ServiceState 'Stopped' -ServiceProcessId 0 `
     -OwnedBrokerProcessCount 0 -AmdCliProcessCount 0
@@ -659,6 +674,40 @@ Write-Host 'I2E_FULL_ROLLBACK_REQUIRES_PROCESS_ABSENCE=PASS'
 Write-Host 'I2E_FULL_ROLLBACK_REQUIRES_LSA_VERIFICATION=PASS'
 Write-Host 'I2E_STOP_FAILURE_DOES_NOT_CLAIM_FULL_ROLLBACK=PASS'
 Write-Host 'I2E_POLICY_FAILURE_DOES_NOT_CLAIM_FULL_ROLLBACK=PASS'
+
+$i2ePartialRollbackPointer = [pscustomobject]@{
+    right_added_by_experiment = $true
+    policy_rollback_verified = $true
+    effective_token_teardown_verified = $false
+    full_rollback_verified = $false
+    rollback_verified = $false
+}
+$i2ePartialRollbackState = Get-I2ePolicyRollbackState -Pointer $i2ePartialRollbackPointer
+$i2ePartialRollbackRequired = Test-I2eExactRightRollbackRequired -Pointer $i2ePartialRollbackPointer
+$i2ePartialReadbackRequired = $i2ePartialRollbackPointer.right_added_by_experiment -and $i2ePartialRollbackState.verified
+$i2ePartialRemoveCalls = if ($i2ePartialRollbackRequired) { 1 } else { 0 }
+if ($i2ePartialRollbackRequired -or -not $i2ePartialReadbackRequired -or $i2ePartialRemoveCalls -ne 0) {
+    throw 'I2E partial policy rollback retry would duplicate LSA removal.'
+}
+$i2eDriftPointer = [pscustomobject]@{
+    right_added_by_experiment = $true
+    policy_rollback_verified = $true
+    rollback_verified = $false
+}
+if (-not (Test-I2ePolicyRollbackStateDrift -Pointer $i2eDriftPointer `
+        -ReadbackAvailable $true -RightPresent $true -AssignmentPresent $false)) {
+    throw 'I2E policy rollback state drift fixture was not detected.'
+}
+$i2eLegacyPointer = [pscustomobject]@{
+    right_added_by_experiment = $true
+    rollback_verified = $false
+}
+if (-not (Test-I2eExactRightRollbackRequired -Pointer $i2eLegacyPointer)) {
+    throw 'I2E legacy pointer did not conservatively require policy rollback.'
+}
+Write-Host 'I2E_PARTIAL_POLICY_ROLLBACK_RETRY_IDEMPOTENT=PASS'
+Write-Host 'I2E_POLICY_STATE_DRIFT_FAIL_CLOSED=PASS'
+Write-Host 'I2E_LEGACY_ROLLBACK_FALLBACK=PASS'
 
 . $I2eResumeContract
 $recoveryExperimentId = '3935ac9082954bcfb2b1f94c54cf95d7'

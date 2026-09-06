@@ -114,9 +114,30 @@ function Get-I2eOwnedBrokerProcesses {
     })
 }
 
+function Get-I2ePinnedAmdCliPath {
+    param([Parameter(Mandatory = $true)][string]$ExperimentRoot)
+
+    $preflightPath = Join-Path $ExperimentRoot 'AMD-CLI-PREFLIGHT.json'
+    if (-not (Test-Path -LiteralPath $preflightPath -PathType Leaf)) {
+        throw ('Pinned AMD CLI preflight is absent; refusing ownership inference: {0}' -f $preflightPath)
+    }
+    $preflight = Read-I2eCleanupJson -Path $preflightPath
+    if (-not (Get-I2eCleanupPointerBoolean -Pointer $preflight -Name 'preflight_pass')) {
+        throw ('Pinned AMD CLI preflight is not passing: {0}' -f $preflightPath)
+    }
+    $path = [string](Get-I2eCleanupPointerField -Pointer $preflight -Name 'path' -Default '')
+    if ([string]::IsNullOrWhiteSpace($path)) {
+        throw ('Pinned AMD CLI preflight has no path: {0}' -f $preflightPath)
+    }
+    try { return [IO.Path]::GetFullPath($path) }
+    catch { throw ('Pinned AMD CLI preflight path is invalid: {0}' -f $path) }
+}
+
 function Get-I2eOwnedAmdProcesses {
+    param([Parameter(Mandatory = $true)][string]$ExpectedAmdCliPath)
+    $expected = [IO.Path]::GetFullPath($ExpectedAmdCliPath)
     @(Get-Process -Name 'AMDuProfCLI' -ErrorAction SilentlyContinue | Where-Object {
-        try { $_.Path -and $_.Path -ieq 'D:\apps\AMDuProf\bin\AMDuProfCLI.exe' } catch { $false }
+        try { $_.Path -and ([IO.Path]::GetFullPath($_.Path) -ieq $expected) } catch { $false }
     })
 }
 
@@ -140,18 +161,20 @@ $serviceCreateSucceeded = Get-I2eCleanupPointerBoolean -Pointer $pointer -Name '
 $controlExecuted = Get-I2eCleanupPointerBoolean -Pointer $pointer -Name 'control_executed'
 $treatmentExecuted = Get-I2eCleanupPointerBoolean -Pointer $pointer -Name 'treatment_executed'
 $rightAddedByExperiment = Get-I2eCleanupPointerBoolean -Pointer $pointer -Name 'right_added_by_experiment'
-$rollbackAlreadyVerified = Get-I2eCleanupPointerBoolean -Pointer $pointer -Name 'rollback_verified'
 $rightMutationState = [string](Get-I2eCleanupPointerField -Pointer $pointer -Name 'right_mutation_state' -Default 'NOT_STARTED')
 if ($rightMutationState -eq 'STARTING' -and -not $rightAddedByExperiment) {
     throw 'I2E pointer records an unresolved right mutation attempt; refusing cleanup without authoritative mutation evidence.'
 }
-$rightNeedsRollback = Test-I2eExactRightRollbackRequired -Pointer $pointer
-if ($rightNeedsRollback -and $serviceSid -notmatch '^S-1-5-80-') {
-    throw 'I2E pointer requires exact-right rollback but has no valid Service SID identity.'
-}
 $experimentRoot = Join-Path $QualificationRoot $experimentId
 if (-not (Test-Path -LiteralPath $experimentRoot -PathType Container)) {
     throw ('I2E experiment evidence root is absent; refusing pointer finalization: {0}' -f $experimentRoot)
+}
+$pinnedAmdCliPath = Get-I2ePinnedAmdCliPath -ExperimentRoot $experimentRoot
+$policyRollbackState = Get-I2ePolicyRollbackState -Pointer $pointer
+$policyRollbackStateSource = [string]$policyRollbackState.source
+$rightNeedsRollback = Test-I2eExactRightRollbackRequired -Pointer $pointer
+if ($rightAddedByExperiment -and $serviceSid -notmatch '^S-1-5-80-') {
+    throw 'I2E pointer records an added right but has no valid Service SID identity.'
 }
 $attempt = '{0}-{1}' -f [DateTime]::UtcNow.ToString('yyyyMMddTHHmmssfffZ'), [Guid]::NewGuid().ToString('N')
 $evidencePath = Join-Path $experimentRoot ('I2E-CLEANUP-RESULT-{0}.json' -f $attempt)
@@ -168,6 +191,10 @@ $servicePidAfterStop = -1L
 $ownedBrokerCountAfterStop = 0
 $amdCliCountAfterStop = 0
 $policyRemoveAttempted = $false
+$policyReadbackReverified = $false
+$policyRemoveSkippedReason = $null
+$policyStateDrift = $false
+$lsaRemoveAccountRightsCalls = 0
 $direct = $null
 $assigned = $null
 $serviceRemoved = $false
@@ -183,15 +210,30 @@ try {
     $serviceStateAfterStop = [string]$stopResult.state
     $servicePidAfterStop = [int64]$stopResult.process_id
     $ownedBrokerCountAfterStop = @(Get-I2eOwnedBrokerProcesses).Count
-    $amdCliCountAfterStop = @(Get-I2eOwnedAmdProcesses).Count
-    if ($rightNeedsRollback) {
-        $policyRemoveAttempted = $true
-        Remove-I2eExactServiceProfileRight -ServiceSid $serviceSid
+    $amdCliCountAfterStop = @(Get-I2eOwnedAmdProcesses -ExpectedAmdCliPath $pinnedAmdCliPath).Count
+    if ($rightAddedByExperiment) {
+        if ($rightNeedsRollback) {
+            $policyRemoveAttempted = $true
+            $lsaRemoveAccountRightsCalls = 1
+            Remove-I2eExactServiceProfileRight -ServiceSid $serviceSid
+        }
+        else {
+            $policyRemoveSkippedReason = 'ALREADY_VERIFIED_REMOVED'
+        }
         $direct = Get-I2eDirectAccountRightsSnapshot -Label 'cleanup-after-rollback' -Sid $serviceSid
         $assigned = Get-I2eUserRightAssignmentSnapshot -Right $I2eRequiredRight
-        if ($direct.status -ne 'READ' -or $assigned.status -ne 'READ' -or
-            @($direct.direct_rights) -contains $I2eRequiredRight -or
-            @($assigned.assigned_principals) -contains $serviceSid) {
+        $policyReadbackReverified = $true
+        $policyReadbackAvailable = $direct.status -eq 'READ' -and $assigned.status -eq 'READ'
+        $directRightPresent = $policyReadbackAvailable -and @($direct.direct_rights) -contains $I2eRequiredRight
+        $assignmentPresent = $policyReadbackAvailable -and @($assigned.assigned_principals) -contains $serviceSid
+        if (-not $policyReadbackAvailable -or $directRightPresent -or $assignmentPresent) {
+            if (Test-I2ePolicyRollbackStateDrift -Pointer $pointer `
+                    -ReadbackAvailable $policyReadbackAvailable `
+                    -RightPresent $directRightPresent `
+                    -AssignmentPresent $assignmentPresent) {
+                $policyStateDrift = $true
+                throw 'POLICY_ROLLBACK_STATE_DRIFT: pointer claimed the exact right was removed, but fresh dual LSA readback disagreed.'
+            }
             throw 'I2E cleanup could not verify removal of the exact experiment right.'
         }
         $rightRollback = $true
@@ -201,6 +243,20 @@ try {
         $rightRollback = $true
         $policyRollbackVerified = $true
     }
+
+    # Persist policy rollback immediately.  A later service/process teardown or
+    # deletion failure must not make a retry issue a duplicate LSA removal.
+    $pointer.policy_rollback_verified = $policyRollbackVerified
+    $pointer.effective_token_teardown_verified = $false
+    $pointer.full_rollback_verified = $false
+    $pointer.rollback_verified = $false
+    $pointer.policy_remove_attempted = $policyRemoveAttempted
+    $pointer.policy_readback_reverified = $policyReadbackReverified
+    $pointer.policy_remove_skipped_reason = $policyRemoveSkippedReason
+    $pointer.policy_rollback_state_source = $policyRollbackStateSource
+    $pointer.policy_state_drift = $policyStateDrift
+    $pointer.state = if ($policyRollbackVerified) { 'POLICY_ROLLBACK_COMPLETE' } else { 'POLICY_ROLLBACK_PENDING' }
+    Write-I2eCleanupJson -Path $PointerPath -Value $pointer
 
     $brokerDeadline = [DateTime]::UtcNow.AddSeconds(30)
     do {
@@ -241,7 +297,7 @@ try {
     $serviceStateAfterStop = if ($serviceAfterStop.present) { [string]$serviceAfterStop.state } else { 'ABSENT' }
     $servicePidAfterStop = if ($serviceAfterStop.present) { [int64]$serviceAfterStop.process_id } else { 0L }
     $ownedBrokerCountAfterStop = @(Get-I2eOwnedBrokerProcesses).Count
-    $amdCliCountAfterStop = @(Get-I2eOwnedAmdProcesses).Count
+    $amdCliCountAfterStop = @(Get-I2eOwnedAmdProcesses -ExpectedAmdCliPath $pinnedAmdCliPath).Count
     $rollbackVerification = Get-I2eRollbackVerification `
         -PolicyRollbackVerified $policyRollbackVerified `
         -ServicePresent $serviceAfterStop.present `
@@ -259,7 +315,7 @@ try {
         service_name = $ServiceName
         service_sid = $serviceSid
         right = $I2eRequiredRight
-        right_added_by_experiment = $rightNeedsRollback
+        right_added_by_experiment = $rightAddedByExperiment
         all_rights = $false
         service_stop_attempted = $serviceStopAttempted
         service_stop_verified = $serviceStopVerified
@@ -268,6 +324,11 @@ try {
         owned_broker_process_count_after_stop = $ownedBrokerCountAfterStop
         amd_cli_process_count_after_stop = $amdCliCountAfterStop
         policy_remove_attempted = $policyRemoveAttempted
+        lsa_remove_account_rights_calls = $lsaRemoveAccountRightsCalls
+        policy_readback_reverified = $policyReadbackReverified
+        policy_remove_skipped_reason = $policyRemoveSkippedReason
+        policy_rollback_state_source = $policyRollbackStateSource
+        policy_state_drift = $policyStateDrift
         policy_rollback_verified = $policyRollbackVerified
         effective_token_teardown_verified = $effectiveTokenTeardownVerified
         full_rollback_verified = $fullRollbackVerified
@@ -335,7 +396,7 @@ try {
         control_executed = $controlExecuted
         treatment_executed = $treatmentExecuted
         stop_control = $stopResult
-        lsa_remove_account_rights_calls = if ($rightNeedsRollback) { 1 } else { 0 }
+        lsa_remove_account_rights_calls = $lsaRemoveAccountRightsCalls
         right_rollback_verified = $rightRollback
         policy_rollback_verified = $policyRollbackVerified
         effective_token_teardown_verified = $effectiveTokenTeardownVerified
@@ -347,6 +408,10 @@ try {
         owned_broker_process_count_after_stop = $ownedBrokerCountAfterStop
         amd_cli_process_count_after_stop = $amdCliCountAfterStop
         policy_remove_attempted = $policyRemoveAttempted
+        policy_readback_reverified = $policyReadbackReverified
+        policy_remove_skipped_reason = $policyRemoveSkippedReason
+        policy_rollback_state_source = $policyRollbackStateSource
+        policy_state_drift = $policyStateDrift
         service_registration_removed = $serviceRemoved
         broker_process_count_after_cleanup = @(Get-I2eOwnedBrokerProcesses).Count
         service_process_gone_after_cleanup = $brokerGone
@@ -379,7 +444,7 @@ catch {
         control_executed = $controlExecuted
         treatment_executed = $treatmentExecuted
         stop_control = $stopResult
-        lsa_remove_account_rights_calls = if ($rightNeedsRollback) { 1 } else { 0 }
+        lsa_remove_account_rights_calls = $lsaRemoveAccountRightsCalls
         right_rollback_verified = $rightRollback
         policy_rollback_verified = $policyRollbackVerified
         effective_token_teardown_verified = $effectiveTokenTeardownVerified
@@ -391,6 +456,10 @@ catch {
         owned_broker_process_count_after_stop = $ownedBrokerCountAfterStop
         amd_cli_process_count_after_stop = $amdCliCountAfterStop
         policy_remove_attempted = $policyRemoveAttempted
+        policy_readback_reverified = $policyReadbackReverified
+        policy_remove_skipped_reason = $policyRemoveSkippedReason
+        policy_rollback_state_source = $policyRollbackStateSource
+        policy_state_drift = $policyStateDrift
         service_registration_removed = $serviceRemoved
         service_process_gone_after_cleanup = $brokerGone
         cli_session_processes_checked = $cliSessions.Count
