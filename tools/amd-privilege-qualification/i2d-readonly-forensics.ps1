@@ -27,6 +27,22 @@ function Get-I2dPropertyValue {
     return $Default
 }
 
+function Get-I2dLsaDiagnosticException {
+    param([AllowNull()][object]$Exception)
+
+    $current = $Exception
+    for ($depth = 0; $depth -lt 8 -and $null -ne $current; $depth++) {
+        $ntstatus = Get-I2dPropertyValue -Object $current -Name 'NtStatusHex'
+        $win32 = Get-I2dPropertyValue -Object $current -Name 'Win32Error'
+        if ($null -ne $ntstatus -or $null -ne $win32) {
+            return $current
+        }
+        $current = Get-I2dPropertyValue -Object $current -Name 'InnerException'
+    }
+
+    return $Exception
+}
+
 function ConvertTo-I2dStringArray {
     param([AllowNull()][object]$Value)
 
@@ -87,6 +103,19 @@ function ConvertTo-I2dPrivilegeArray {
     return @($items | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | Sort-Object -Unique)
 }
 
+function ConvertTo-I2dGroupSidArray {
+    param([AllowNull()][object]$Value)
+
+    $items = foreach ($item in @(ConvertTo-I2dStringArray $Value)) {
+        $sid = ([string]$item -split ':', 2)[0]
+        if (-not [string]::IsNullOrWhiteSpace($sid)) {
+            $sid
+        }
+    }
+
+    return @($items | Sort-Object -Unique)
+}
+
 function ConvertTo-I2dTokenEvidence {
     param(
         [AllowNull()][object]$Context,
@@ -103,7 +132,7 @@ function ConvertTo-I2dTokenEvidence {
         process_architecture = Get-I2dPropertyValue -Object $Context -Name 'process_architecture'
         enabled_privileges = @(ConvertTo-I2dPrivilegeArray (Get-I2dPropertyValue -Object $Context -Name 'enabled_privileges'))
         disabled_privileges = @(ConvertTo-I2dPrivilegeArray (Get-I2dPropertyValue -Object $Context -Name 'disabled_privileges'))
-        token_groups_relevant_to_access = @(ConvertTo-I2dStringArray (Get-I2dPropertyValue -Object $Context -Name 'token_groups_relevant_to_access'))
+        token_groups_relevant_to_access = @(ConvertTo-I2dGroupSidArray (Get-I2dPropertyValue -Object $Context -Name 'token_groups_relevant_to_access'))
     }
 }
 
@@ -171,12 +200,31 @@ function Initialize-I2dReadOnlyLsaType {
     Add-Type -TypeDefinition @'
 using System;
 using System.Collections.Generic;
-using System.ComponentModel;
 using System.Runtime.InteropServices;
 using System.Security.Principal;
 
+public sealed class I2dLsaException : Exception
+{
+    public int NtStatus { get; private set; }
+    public uint Win32Error { get; private set; }
+    public string NtStatusHex { get { return "0x" + unchecked((uint)NtStatus).ToString("X8"); } }
+
+    public I2dLsaException(string operation, int ntStatus, uint win32Error)
+        : base(operation + " failed with NTSTATUS 0x" + unchecked((uint)ntStatus).ToString("X8") +
+               " and Win32 error " + win32Error.ToString())
+    {
+        NtStatus = ntStatus;
+        Win32Error = win32Error;
+    }
+}
+
 public static class I2dReadOnlyLsa
 {
+    public const uint POLICY_VIEW_LOCAL_INFORMATION = 0x00000001;
+    public const uint POLICY_LOOKUP_NAMES = 0x00000800;
+    public const uint READ_ONLY_POLICY_ACCESS = POLICY_VIEW_LOCAL_INFORMATION | POLICY_LOOKUP_NAMES; // 0x00000801
+    private const int STATUS_OBJECT_NAME_NOT_FOUND = unchecked((int)0xC0000034);
+
     [StructLayout(LayoutKind.Sequential)]
     private struct LSA_UNICODE_STRING
     {
@@ -217,10 +265,58 @@ public static class I2dReadOnlyLsa
         out uint CountReturned);
 
     [DllImport("advapi32.dll")]
+    private static extern int LsaEnumerateAccountRights(
+        IntPtr PolicyHandle,
+        IntPtr AccountSid,
+        out IntPtr UserRights,
+        out uint CountOfRights);
+
+    [DllImport("advapi32.dll")]
+    private static extern uint LsaNtStatusToWinError(int Status);
+
+    [DllImport("advapi32.dll")]
     private static extern int LsaFreeMemory(IntPtr Buffer);
 
     [DllImport("advapi32.dll")]
     private static extern int LsaClose(IntPtr ObjectHandle);
+
+    private static void ThrowIfFailed(string operation, int status)
+    {
+        if (status != 0)
+        {
+            throw new I2dLsaException(operation, status, LsaNtStatusToWinError(status));
+        }
+    }
+
+    private static IntPtr OpenReadOnlyPolicy()
+    {
+        IntPtr policy;
+        var attributes = new LSA_OBJECT_ATTRIBUTES();
+        attributes.Length = (uint)Marshal.SizeOf(typeof(LSA_OBJECT_ATTRIBUTES));
+        int status = LsaOpenPolicy(IntPtr.Zero, ref attributes, READ_ONLY_POLICY_ACCESS, out policy);
+        ThrowIfFailed("LsaOpenPolicy", status);
+        return policy;
+    }
+
+    private static string ReadUnicodeString(LSA_UNICODE_STRING value)
+    {
+        if (value.Buffer == IntPtr.Zero || value.Length == 0)
+        {
+            return String.Empty;
+        }
+        return Marshal.PtrToStringUni(value.Buffer, value.Length / 2);
+    }
+
+    private static IntPtr AllocateSid(string sidString, out int length)
+    {
+        var sid = new SecurityIdentifier(sidString);
+        length = sid.BinaryLength;
+        byte[] bytes = new byte[length];
+        sid.GetBinaryForm(bytes, 0);
+        IntPtr buffer = Marshal.AllocHGlobal(length);
+        Marshal.Copy(bytes, 0, buffer, length);
+        return buffer;
+    }
 
     public static string[] Enumerate(string right)
     {
@@ -229,13 +325,7 @@ public static class I2dReadOnlyLsa
         IntPtr enumeration = IntPtr.Zero;
         try
         {
-            var attributes = new LSA_OBJECT_ATTRIBUTES();
-            attributes.Length = (uint)Marshal.SizeOf(typeof(LSA_OBJECT_ATTRIBUTES));
-            int openStatus = LsaOpenPolicy(IntPtr.Zero, ref attributes, 0x00000800, out policy);
-            if (openStatus != 0)
-            {
-                throw new Win32Exception(openStatus, "LsaOpenPolicy failed with NTSTATUS 0x" + openStatus.ToString("X8"));
-            }
+            policy = OpenReadOnlyPolicy();
 
             rightBuffer = Marshal.StringToHGlobalUni(right);
             var rightString = new LSA_UNICODE_STRING
@@ -247,10 +337,11 @@ public static class I2dReadOnlyLsa
 
             uint count;
             int enumStatus = LsaEnumerateAccountsWithUserRight(policy, ref rightString, out enumeration, out count);
-            if (enumStatus != 0)
+            if (enumStatus == STATUS_OBJECT_NAME_NOT_FOUND)
             {
-                throw new Win32Exception(enumStatus, "LsaEnumerateAccountsWithUserRight failed with NTSTATUS 0x" + enumStatus.ToString("X8"));
+                return new string[0];
             }
+            ThrowIfFailed("LsaEnumerateAccountsWithUserRight", enumStatus);
 
             var result = new List<string>();
             int itemSize = Marshal.SizeOf(typeof(LSA_ENUMERATION_INFORMATION));
@@ -283,6 +374,52 @@ public static class I2dReadOnlyLsa
             }
         }
     }
+
+    public static string[] EnumerateAccountRights(string sidString)
+    {
+        IntPtr policy = IntPtr.Zero;
+        IntPtr sidBuffer = IntPtr.Zero;
+        IntPtr rightsBuffer = IntPtr.Zero;
+        try
+        {
+            policy = OpenReadOnlyPolicy();
+            int sidLength;
+            sidBuffer = AllocateSid(sidString, out sidLength);
+            uint count;
+            int status = LsaEnumerateAccountRights(policy, sidBuffer, out rightsBuffer, out count);
+            if (status == STATUS_OBJECT_NAME_NOT_FOUND)
+            {
+                return new string[0];
+            }
+            ThrowIfFailed("LsaEnumerateAccountRights", status);
+
+            var result = new List<string>();
+            int itemSize = Marshal.SizeOf(typeof(LSA_UNICODE_STRING));
+            for (uint index = 0; index < count; index++)
+            {
+                IntPtr item = IntPtr.Add(rightsBuffer, checked((int)(index * itemSize)));
+                var right = (LSA_UNICODE_STRING)Marshal.PtrToStructure(item, typeof(LSA_UNICODE_STRING));
+                result.Add(ReadUnicodeString(right));
+            }
+            result.Sort(StringComparer.OrdinalIgnoreCase);
+            return result.ToArray();
+        }
+        finally
+        {
+            if (rightsBuffer != IntPtr.Zero)
+            {
+                LsaFreeMemory(rightsBuffer);
+            }
+            if (sidBuffer != IntPtr.Zero)
+            {
+                Marshal.FreeHGlobal(sidBuffer);
+            }
+            if (policy != IntPtr.Zero)
+            {
+                LsaClose(policy);
+            }
+        }
+    }
 }
 '@
 }
@@ -300,19 +437,60 @@ function Get-I2dUserRightAssignment {
             local_service_has_right = ($principals -contains 'S-1-5-19')
             system_has_right = ($principals -contains 'S-1-5-18')
             administrators_has_right = ($principals -contains 'S-1-5-32-544')
+            ntstatus_hex = '0x00000000'
+            win32_error = 0
             source = 'LsaEnumerateAccountsWithUserRight (read-only)'
         }
     } catch {
+        $exception = Get-I2dLsaDiagnosticException -Exception $_.Exception
+        $ntstatusHex = Get-I2dPropertyValue -Object $exception -Name 'NtStatusHex'
+        $win32Error = Get-I2dPropertyValue -Object $exception -Name 'Win32Error'
         return [ordered]@{
             right = $Right
             assigned_principals = @()
             status = 'UNAVAILABLE'
             reason = 'READ_ONLY_ACCESS_DENIED_OR_UNAVAILABLE'
-            error = $_.Exception.Message
+            error = $exception.Message
+            ntstatus_hex = $ntstatusHex
+            win32_error = $win32Error
             local_service_has_right = $null
             system_has_right = $null
             administrators_has_right = $null
             source = 'LsaEnumerateAccountsWithUserRight (read-only)'
+        }
+    }
+}
+
+function Get-I2dDirectAccountRights {
+    param(
+        [Parameter(Mandatory)][ValidateSet('LOCAL SERVICE', 'SYSTEM', 'BUILTIN\Administrators')][string]$Label,
+        [Parameter(Mandatory)][string]$Sid
+    )
+
+    try {
+        Initialize-I2dReadOnlyLsaType
+        $rights = @([I2dReadOnlyLsa]::EnumerateAccountRights($Sid))
+        return [ordered]@{
+            label = $Label
+            account_sid = $Sid
+            direct_rights = $rights
+            status = 'READ'
+            ntstatus_hex = '0x00000000'
+            win32_error = 0
+            source = 'LsaEnumerateAccountRights (read-only)'
+        }
+    } catch {
+        $exception = Get-I2dLsaDiagnosticException -Exception $_.Exception
+        return [ordered]@{
+            label = $Label
+            account_sid = $Sid
+            direct_rights = @()
+            status = 'UNAVAILABLE'
+            reason = 'READ_ONLY_ACCESS_DENIED_OR_UNAVAILABLE'
+            error = $exception.Message
+            ntstatus_hex = Get-I2dPropertyValue -Object $exception -Name 'NtStatusHex'
+            win32_error = Get-I2dPropertyValue -Object $exception -Name 'Win32Error'
+            source = 'LsaEnumerateAccountRights (read-only)'
         }
     }
 }
@@ -452,11 +630,18 @@ function Get-I2dReadOnlyReport {
     $rights = foreach ($right in @('SeSystemProfilePrivilege', 'SeProfileSingleProcessPrivilege', 'SeDebugPrivilege', 'SeLockMemoryPrivilege', 'SeCreatePermanentPrivilege')) {
         Get-I2dUserRightAssignment -Right $right
     }
+    $directRights = @(
+        Get-I2dDirectAccountRights -Label 'LOCAL SERVICE' -Sid 'S-1-5-19'
+        Get-I2dDirectAccountRights -Label 'SYSTEM' -Sid 'S-1-5-18'
+        Get-I2dDirectAccountRights -Label 'BUILTIN\Administrators' -Sid 'S-1-5-32-544'
+    )
 
     return [ordered]@{
         schema = 'amd-privilege-i2d-readonly-forensics/v1'
         qualification_only = $true
         read_only = $true
+        lsa_policy_access_mask = '0x00000801'
+        lsa_policy_access_contract = 'POLICY_VIEW_LOCAL_INFORMATION | POLICY_LOOKUP_NAMES'
         no_amd_runtime = $true
         no_service_mutation = $true
         no_acl_mutation = $true
@@ -465,6 +650,7 @@ function Get-I2dReadOnlyReport {
         system_context = $systemJson
         token_differential = if ($null -ne $localContext -and $null -ne $systemContext) { Compare-I2dTokenEvidence -LocalService $localContext -System $systemContext } else { [ordered]@{ status = 'UNAVAILABLE'; reason = 'ONE_OR_BOTH_CONTEXT_FILES_UNREADABLE' } }
         user_right_assignment = @($rights)
+        direct_account_rights = $directRights
         amd_service_driver_inventory = @(Get-I2dServiceInventory)
         filesystem_registry_forensics = Get-I2dFilesystemAndRegistryForensics
         device_interface_forensics = [ordered]@{ status = 'NOT_OBSERVED'; confidence = 'LIMITED'; note = 'No device interface or object security descriptor was identified by this bounded read-only pass; no device was opened and no IOCTL was sent.' }

@@ -227,9 +227,13 @@ Set-Location 'F:\File\codex\codex-worktrees\ac74\resource-timeline'
 ```
 
 The helper inventories fixed AMD service/file metadata and service DACLs,
-attempts read-only user-right assignment enumeration, and compares normalized
-token evidence when the two context JSON files are readable. It never invokes
+opens the LSA policy with exactly
+`POLICY_VIEW_LOCAL_INFORMATION | POLICY_LOOKUP_NAMES = 0x00000801`, records
+raw NTSTATUS plus `LsaNtStatusToWinError`, cross-checks direct rights for
+LocalService, SYSTEM, and Administrators with `LsaEnumerateAccountRights`,
+and compares normalized token evidence when the two context JSON files are
+readable. It never invokes
 `AMDuProfCLI.exe`, `sc.exe create/start/stop/delete`, `sc.exe sdset`,
 `Set-Acl`, or an LSA privilege-assignment API. Current classification is
 `MINIMUM_REQUIRED_CAPABILITY = UNRESOLVED`; the next gate is
-`HUMAN_MINIMUM_CAPABILITY_EXPERIMENT_REVIEW`.
+`HUMAN_ELEVATED_READ_ONLY_I2D_EVIDENCE_COLLECTION`.

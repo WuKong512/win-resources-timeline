@@ -32,7 +32,7 @@ SYSTEM_POWER_COUNTER_ACCESS = AVAILABLE / REAL_SYSTEM_DIFFERENTIAL
 SECURITY_CONTEXT_DIFFERENTIAL = REAL_CONFIRMED
 MINIMUM_REQUIRED_CAPABILITY = UNRESOLVED
 PRODUCTION_ACCOUNT = UNRESOLVED
-NEXT_GATE = HUMAN_MINIMUM_CAPABILITY_EXPERIMENT_REVIEW
+NEXT_GATE = HUMAN_ELEVATED_READ_ONLY_I2D_EVIDENCE_COLLECTION
 NEXT_TASK = AMD-PRIVILEGE-I2D
 PRODUCTION_ADMISSION = NOT_COMPLETE
 ```
@@ -770,7 +770,16 @@ LOCAL_SERVICE_POWER_CATEGORY_PRESENT = false
 LOCAL_SERVICE_NO_COUNTERS_DIAGNOSTIC = true
 LOCAL_SERVICE_ACCOUNT_SID = S-1-5-19
 LOCAL_SERVICE_SESSION_ID = 0
-LOCAL_SERVICE_ENABLED_PRIVILEGES_REPORTED = SeChangeNotifyPrivilege, SeCreateGlobalPrivilege, SeImpersonatePrivilege
+COMMON_ENABLED_PRIVILEGES = SeChangeNotifyPrivilege, SeCreateGlobalPrivilege, SeImpersonatePrivilege
+LOCAL_SERVICE_ENABLED_ONLY = none
+SYSTEM_ENABLED_ONLY = SeAuditPrivilege, SeCreatePagefilePrivilege, SeCreatePermanentPrivilege, SeCreateSymbolicLinkPrivilege, SeDebugPrivilege, SeDelegateSessionUserImpersonatePrivilege, SeIncreaseBasePriorityPrivilege, SeIncreaseWorkingSetPrivilege, SeLockMemoryPrivilege, SeProfileSingleProcessPrivilege, SeSystemProfilePrivilege, SeTcbPrivilege, SeTimeZonePrivilege
+COMMON_DISABLED_PRIVILEGES = SeAssignPrimaryTokenPrivilege, SeIncreaseQuotaPrivilege, SeShutdownPrivilege, SeSystemtimePrivilege, SeUndockPrivilege
+LOCAL_SERVICE_DISABLED_ONLY = SeAuditPrivilege, SeIncreaseWorkingSetPrivilege, SeTimeZonePrivilege
+SYSTEM_DISABLED_ONLY = SeBackupPrivilege, SeLoadDriverPrivilege, SeManageVolumePrivilege, SeRestorePrivilege, SeSecurityPrivilege, SeSystemEnvironmentPrivilege, SeTakeOwnershipPrivilege
+COMMON_RELEVANT_GROUPS = S-1-5-32-545, S-1-5-6
+SYSTEM_RELEVANT_GROUPS_INCLUDE = S-1-5-32-544
+SERVICE_SID_DIFFERENCE = controlled secondary difference between distinct qualification services
+TOKEN_DIFFERENTIAL_SEMANTICS = ENABLED_DISABLED_ABSENT_AND_GROUP_FIELDS_NORMALIZED
 
 SYSTEM_SCOPE = 091a72e1d38341ca9eca0877b1625082
 SYSTEM_COUNTER_DISCOVERY = REAL_POWER_AVAILABLE
@@ -782,7 +791,7 @@ SECURITY_CONTEXT_DIFFERENTIAL = REAL_CONFIRMED
 MINIMUM_REQUIRED_CAPABILITY = UNRESOLVED
 PRODUCTION_ACCOUNT = UNRESOLVED
 NEXT_TASK = AMD-PRIVILEGE-I2D
-NEXT_GATE = HUMAN_MINIMUM_CAPABILITY_EXPERIMENT_REVIEW
+NEXT_GATE = HUMAN_ELEVATED_READ_ONLY_I2D_EVIDENCE_COLLECTION
 ```
 
 The first forensic pass prioritizes `SeSystemProfilePrivilege` because it is
@@ -795,11 +804,15 @@ interface or device-object security descriptor was identified by the bounded
 read-only pass, so that evidence is explicitly limited rather than treated as
 negative proof.
 
-User-right assignment enumeration for the prioritized rights was attempted via
-read-only `LsaEnumerateAccountsWithUserRight` and returned
-`0xC0000022 / STATUS_ACCESS_DENIED` in the current shell. Token privilege
-presence, token enablement, and policy assignment therefore remain separate
-fields; policy assignment is unresolved.
+User-right assignment enumeration for the prioritized rights was previously
+attempted with an incomplete `LsaOpenPolicy` mask and returned
+`0xC0000022 / STATUS_ACCESS_DENIED`; that result is not authoritative policy
+evidence. I2D-A changes the read-only mask to
+`POLICY_VIEW_LOCAL_INFORMATION | POLICY_LOOKUP_NAMES = 0x00000801`, records
+raw NTSTATUS plus `LsaNtStatusToWinError`, and cross-checks direct assignment
+for LocalService, SYSTEM, and Administrators with
+`LsaEnumerateAccountRights`. Token privilege presence, token enablement,
+direct user-right assignment, and group-derived rights remain separate fields.
 
 The I2D helper and synthetic parser contract are
 `tools/amd-privilege-qualification/i2d-readonly-forensics.ps1` and the existing
@@ -811,5 +824,9 @@ minimum-variable experiment, not a production account switch.
 REAL_AMD_RUNTIME_DURING_I2D = 0
 SERVICE_RUNTIME_DURING_I2D = 0
 SECURITY_MUTATIONS_DURING_I2D = 0
+SE_SYSTEM_PROFILE_REAL_EXPERIMENT = NOT_AUTHORIZED
+ADMINISTRATORS_EXPERIMENT = NOT_AUTHORIZED
+DEVICE_ACL_MUTATION_EXPERIMENT = NOT_AUTHORIZED
 PRODUCTION_ACCOUNT_SWITCH = NOT_AUTHORIZED
+NEXT_GATE = HUMAN_ELEVATED_READ_ONLY_I2D_EVIDENCE_COLLECTION
 ```

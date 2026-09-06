@@ -209,7 +209,7 @@ AMD_LONG_LIVED_SESSION = planned
 AMD_TEMPERATURE_FREQUENCY = planned
 AMD_PRODUCTION_PROVIDER = planned
 NEXT_TASK = AMD-PRIVILEGE-I2D
-NEXT_GATE = HUMAN_MINIMUM_CAPABILITY_EXPERIMENT_REVIEW
+NEXT_GATE = HUMAN_ELEVATED_READ_ONLY_I2D_EVIDENCE_COLLECTION
 EXECUTION_PLAN_SINGLE_CURRENT_STATE = PASS
 ```
 
@@ -1155,7 +1155,7 @@ SERVICE_RUNTIME_DURING_PREPARATION = 0
 PRODUCTION_ACCOUNT_SELECTION = UNRESOLVED
 LOCAL_SERVICE_TO_SYSTEM_SWITCH = NOT_AUTHORIZED
 I2_REAL_RUNTIME_GATE_CONSUMED = true
-NEXT_GATE = HUMAN_MINIMUM_CAPABILITY_EXPERIMENT_REVIEW
+NEXT_GATE = HUMAN_ELEVATED_READ_ONLY_I2D_EVIDENCE_COLLECTION
 ```
 
 ## HISTORICAL / SUPERSEDED — AMD-PRIVILEGE-I2C SYSTEM PRE-RUN CLOSURE
@@ -1243,14 +1243,16 @@ enabled in the SYSTEM context and absent from the reported LocalService
 enabled-privilege set. The LocalService enabled set reported by the run is:
 
 ```text
-LOCAL_SERVICE_ENABLED_ONLY = SeChangeNotifyPrivilege, SeCreateGlobalPrivilege, SeImpersonatePrivilege
-SYSTEM_ENABLED_ONLY = SeSystemProfilePrivilege (confirmed differential; complete SYSTEM set is not inferred here)
-COMMON_ENABLED_PRIVILEGES = NOT_RECONSTRUCTED_FROM_READABLE_SOURCE
-LOCAL_SERVICE_DISABLED_ONLY = NOT_RECONSTRUCTED
-SYSTEM_DISABLED_ONLY = NOT_RECONSTRUCTED
-LOCAL_SERVICE_GROUPS_ONLY = NOT_RECONSTRUCTED_FROM_READABLE_SOURCE
-SYSTEM_GROUPS_ONLY = NOT_RECONSTRUCTED_FROM_READABLE_SOURCE
-COMMON_GROUPS = NOT_RECONSTRUCTED
+COMMON_ENABLED_PRIVILEGES = SeChangeNotifyPrivilege, SeCreateGlobalPrivilege, SeImpersonatePrivilege
+LOCAL_SERVICE_ENABLED_ONLY = none
+SYSTEM_ENABLED_ONLY = SeAuditPrivilege, SeCreatePagefilePrivilege, SeCreatePermanentPrivilege, SeCreateSymbolicLinkPrivilege, SeDebugPrivilege, SeDelegateSessionUserImpersonatePrivilege, SeIncreaseBasePriorityPrivilege, SeIncreaseWorkingSetPrivilege, SeLockMemoryPrivilege, SeProfileSingleProcessPrivilege, SeSystemProfilePrivilege, SeTcbPrivilege, SeTimeZonePrivilege
+COMMON_DISABLED_PRIVILEGES = SeAssignPrimaryTokenPrivilege, SeIncreaseQuotaPrivilege, SeShutdownPrivilege, SeSystemtimePrivilege, SeUndockPrivilege
+LOCAL_SERVICE_DISABLED_ONLY = SeAuditPrivilege, SeIncreaseWorkingSetPrivilege, SeTimeZonePrivilege
+SYSTEM_DISABLED_ONLY = SeBackupPrivilege, SeLoadDriverPrivilege, SeManageVolumePrivilege, SeRestorePrivilege, SeSecurityPrivilege, SeSystemEnvironmentPrivilege, SeTakeOwnershipPrivilege
+COMMON_RELEVANT_GROUPS = S-1-5-32-545, S-1-5-6
+SYSTEM_RELEVANT_GROUPS_INCLUDE = S-1-5-32-544
+SERVICE_SID_DIFFERENCE = controlled secondary difference between distinct qualification services
+TOKEN_DIFFERENTIAL_SEMANTICS = ENABLED_DISABLED_ABSENT_AND_GROUP_FIELDS_NORMALIZED
 ```
 
 The explicitly reviewed identifiers are separated from inference:
@@ -1269,10 +1271,16 @@ The read-only `LsaEnumerateAccountsWithUserRight` query was attempted for
 `SeSystemProfilePrivilege`, `SeProfileSingleProcessPrivilege`,
 `SeDebugPrivilege`, `SeLockMemoryPrivilege`, and
 `SeCreatePermanentPrivilege`. This execution context received NTSTATUS
-`0xC0000022` (`STATUS_ACCESS_DENIED`) for the account-assignment enumeration.
-Consequently, user-right assignment is recorded as unavailable rather than
-confused with privilege presence in a token. No LSA or local-policy mutation
-was attempted.
+`0xC0000022` (`STATUS_ACCESS_DENIED`) for the account-assignment enumeration
+before the I2D-A correction. The helper now requests only
+`POLICY_VIEW_LOCAL_INFORMATION | POLICY_LOOKUP_NAMES = 0x00000801`, records
+raw NTSTATUS plus `LsaNtStatusToWinError`, and cross-checks direct assignments
+for `S-1-5-19`, `S-1-5-18`, and `S-1-5-32-544` with
+`LsaEnumerateAccountRights`. The elevated human read-only collection is still
+required to replace the prior incomplete-mask observation with authoritative
+assignment results. Token presence, token enablement, direct user-right
+assignment, and group-derived rights remain separate fields. No LSA or
+local-policy mutation was attempted.
 
 ### Installed AMD component and object forensics
 
@@ -1399,5 +1407,5 @@ SERVICE_RUNTIME_DURING_I2D = 0
 SECURITY_MUTATIONS_DURING_I2D = 0
 AMD_DEVICE_IO_DURING_I2D = 0
 PRODUCTION_ACCOUNT_SWITCH = NOT_AUTHORIZED
-NEXT_GATE = HUMAN_MINIMUM_CAPABILITY_EXPERIMENT_REVIEW
+NEXT_GATE = HUMAN_ELEVATED_READ_ONLY_I2D_EVIDENCE_COLLECTION
 ```

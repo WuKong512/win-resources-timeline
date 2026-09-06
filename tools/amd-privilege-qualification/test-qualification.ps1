@@ -249,7 +249,20 @@ Write-Host 'LOCALSERVICE_HISTORICAL_ARTIFACT_HASH_PRESERVED=PASS'
 $i2dForensicsSource = Get-Content -LiteralPath $I2dForensics -Raw
 foreach ($requiredI2dContract in @(
         'amd-privilege-i2d-readonly-forensics/v1',
+        'POLICY_VIEW_LOCAL_INFORMATION',
+        'POLICY_LOOKUP_NAMES',
+        'READ_ONLY_POLICY_ACCESS',
+        '0x00000801',
         'LsaEnumerateAccountsWithUserRight',
+        'LsaEnumerateAccountRights',
+        'LsaNtStatusToWinError',
+        'I2dLsaException',
+        'Get-I2dLsaDiagnosticException',
+        'NtStatusHex',
+        'Win32Error',
+        'S-1-5-19',
+        'S-1-5-18',
+        'S-1-5-32-544',
         "'sdshow'",
         "'qsidtype'",
         'Get-AuthenticodeSignature',
@@ -269,6 +282,9 @@ if ($i2dForensicsSource -match '(?i)\b(Start-Service|Stop-Service|Restart-Servic
 if ($i2dForensicsSource -match '(?i)\b(Start-Process|AMDuProfCLI\.exe\s+timechart|CreateProcess)\b') {
     throw 'I2D forensics must not execute AMD or launch a child process.'
 }
+if ($i2dForensicsSource -match '(?i)\b(LsaAddAccountRights|LsaRemoveAccountRights)\b') {
+    throw 'I2D forensics must not import or call LSA mutation APIs.'
+}
 . $I2dForensics -NoExecute
 $syntheticLocalToken = [pscustomobject]@{
     account_sid = 'S-1-5-19'
@@ -278,8 +294,12 @@ $syntheticLocalToken = [pscustomobject]@{
     token_elevated = $true
     process_architecture = 'x64'
     enabled_privileges = @('SeChangeNotifyPrivilege', 'SeCreateGlobalPrivilege', 'SeImpersonatePrivilege')
-    disabled_privileges = @('SeSystemProfilePrivilege')
-    token_groups_relevant_to_access = @('S-1-5-19', 'NT AUTHORITY\SERVICE')
+    disabled_privileges = @(
+        'SeAssignPrimaryTokenPrivilege', 'SeIncreaseQuotaPrivilege', 'SeShutdownPrivilege',
+        'SeSystemtimePrivilege', 'SeUndockPrivilege', 'SeAuditPrivilege',
+        'SeIncreaseWorkingSetPrivilege', 'SeTimeZonePrivilege'
+    )
+    token_groups_relevant_to_access = @('S-1-5-32-545', 'S-1-5-6')
 }
 $syntheticSystemToken = [pscustomobject]@{
     account_sid = 'S-1-5-18'
@@ -288,18 +308,37 @@ $syntheticSystemToken = [pscustomobject]@{
     integrity_sid = 'S-1-16-16384'
     token_elevated = $true
     process_architecture = 'x64'
-    enabled_privileges = @('SeChangeNotifyPrivilege', 'SeCreateGlobalPrivilege', 'SeImpersonatePrivilege', 'SeSystemProfilePrivilege')
-    disabled_privileges = @('SeDebugPrivilege')
-    token_groups_relevant_to_access = @('S-1-5-18', 'S-1-5-32-544', 'BUILTIN\Administrators')
+    enabled_privileges = @(
+        'SeChangeNotifyPrivilege', 'SeCreateGlobalPrivilege', 'SeImpersonatePrivilege',
+        'SeAuditPrivilege', 'SeCreatePagefilePrivilege', 'SeCreatePermanentPrivilege',
+        'SeCreateSymbolicLinkPrivilege', 'SeDebugPrivilege', 'SeDelegateSessionUserImpersonatePrivilege',
+        'SeIncreaseBasePriorityPrivilege', 'SeIncreaseWorkingSetPrivilege', 'SeLockMemoryPrivilege',
+        'SeProfileSingleProcessPrivilege', 'SeSystemProfilePrivilege', 'SeTcbPrivilege', 'SeTimeZonePrivilege'
+    )
+    disabled_privileges = @(
+        'SeAssignPrimaryTokenPrivilege', 'SeIncreaseQuotaPrivilege', 'SeShutdownPrivilege',
+        'SeSystemtimePrivilege', 'SeUndockPrivilege', 'SeBackupPrivilege',
+        'SeLoadDriverPrivilege', 'SeManageVolumePrivilege', 'SeRestorePrivilege',
+        'SeSecurityPrivilege', 'SeSystemEnvironmentPrivilege', 'SeTakeOwnershipPrivilege'
+    )
+    token_groups_relevant_to_access = @('S-1-5-32-545', 'S-1-5-6', 'S-1-5-32-544')
 }
 $syntheticI2dDiff = Compare-I2dTokenEvidence -LocalService $syntheticLocalToken -System $syntheticSystemToken
-if ($syntheticI2dDiff.enabled_privileges.right_only -notcontains 'SeSystemProfilePrivilege' -or
-    $syntheticI2dDiff.groups.right_only -notcontains 'S-1-5-32-544' -or
-    $syntheticI2dDiff.enabled_privileges.left_only.Count -ne 0) {
+if ($syntheticI2dDiff.enabled_privileges.common.Count -ne 3 -or
+    $syntheticI2dDiff.enabled_privileges.left_only.Count -ne 0 -or
+    $syntheticI2dDiff.enabled_privileges.right_only -notcontains 'SeSystemProfilePrivilege' -or
+    $syntheticI2dDiff.disabled_privileges.common -notcontains 'SeAssignPrimaryTokenPrivilege' -or
+    $syntheticI2dDiff.disabled_privileges.left_only -notcontains 'SeAuditPrivilege' -or
+    $syntheticI2dDiff.disabled_privileges.right_only -notcontains 'SeBackupPrivilege' -or
+    $syntheticI2dDiff.groups.common.Count -ne 2 -or
+    $syntheticI2dDiff.groups.right_only -notcontains 'S-1-5-32-544') {
     throw 'I2D token differential parser failed its synthetic set-difference contract.'
 }
 Write-Host 'I2D_READ_ONLY_FORENSICS_CONTRACT=PASS'
 Write-Host 'I2D_TOKEN_DIFFERENTIAL_PARSER=PASS'
+Write-Host 'I2D_COMMON_ENABLED_PRIVILEGES_NOT_LOCAL_ONLY=PASS'
+Write-Host 'I2D_SYSTEM_PROFILE_IS_SYSTEM_ONLY_FIXTURE=PASS'
+Write-Host 'I2D_DISABLED_PRIVILEGE_SETS_NORMALIZED=PASS'
 Write-Host 'I2D_NO_SECURITY_MUTATION_SURFACE=PASS'
 
 $windowsSourceText = Get-Content -LiteralPath $WindowsSource -Raw
