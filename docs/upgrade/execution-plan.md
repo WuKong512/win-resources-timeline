@@ -209,7 +209,7 @@ AMD_LONG_LIVED_SESSION = planned
 AMD_TEMPERATURE_FREQUENCY = planned
 AMD_PRODUCTION_PROVIDER = planned
 NEXT_TASK = AMD-PRIVILEGE-I2E
-NEXT_GATE = HUMAN_SERVICE_SID_SESYSTEMPROFILE_EXPERIMENT_EXECUTION
+NEXT_GATE = HUMAN_I2E_TREATMENT_ONLY_RESUME
 EXECUTION_PLAN_SINGLE_CURRENT_STATE = PASS
 ```
 
@@ -1190,7 +1190,7 @@ separate setup-only stage.
 
 ## AMD-PRIVILEGE-I2E SERVICE-SID SYSTEM-PROFILE EXPERIMENT PREPARATION
 
-I2E is the next qualification-only step after the authoritative I2D
+I2E was the qualification-only step after the authoritative I2D
 read-only differential. I2D established that LocalService reports
 POWER_UNAVAILABLE while SYSTEM reports POWER_AVAILABLE for the same signed AMD
 uProf timechart --list operation. I2D also established that the SYSTEM token
@@ -1230,11 +1230,11 @@ FROZEN_EXPERIMENT_ARTIFACT_SHA256 = 871CD20D228BD9510606DE640F516F62C2983B9F4A83
 REAL_AMD_RUNTIME_DURING_PREPARATION = 0
 REAL_SERVICE_RUNTIME_DURING_PREPARATION = 0
 REAL_LSA_MUTATION_DURING_PREPARATION = 0
-I2E = PREPARED_NOT_EXECUTED
+I2E = CONTROL_REAL_COMPLETE_TREATMENT_PENDING
 MINIMUM_REQUIRED_CAPABILITY = UNRESOLVED
 PRODUCTION_ACCOUNT = UNRESOLVED
 NEXT_TASK = AMD-PRIVILEGE-I2E
-NEXT_GATE = HUMAN_I2E_FAILED_ATTEMPT_CLEANUP
+NEXT_GATE = HUMAN_I2E_TREATMENT_ONLY_RESUME
 ~~~
 
 The implementation is split from the historical LocalService and SYSTEM
@@ -1255,7 +1255,7 @@ I2E_REAL_SERVICE_DURING_PREPARATION = 0
 I2E_REAL_LSA_MUTATION_DURING_PREPARATION = 0
 PRODUCTION_ACCOUNT_SELECTION = NOT_AUTHORIZED
 LSA_POLICY_HANDLES = OPERATION_SPECIFIC_MINIMUM_ACCESS
-NEXT_GATE = HUMAN_I2E_FAILED_ATTEMPT_CLEANUP
+NEXT_GATE = HUMAN_I2E_TREATMENT_ONLY_RESUME
 ~~~
 
 ## AMD-PRIVILEGE-I2E PRE-CONTROL SCM IDENTITY INCIDENT CLOSURE
@@ -1296,13 +1296,63 @@ REAL_SERVICE_RUNTIME_DURING_REPAIR = 0
 REAL_LSA_MUTATION_DURING_REPAIR = 0
 REAL_AMD_RUNTIME_DURING_REPAIR = 0
 REAL_FAILED_ATTEMPT_CLEANUP_DURING_REPAIR = 0
-NEXT_GATE = HUMAN_I2E_FAILED_ATTEMPT_CLEANUP
-AFTER_CLEANUP_NEXT_GATE = HUMAN_SERVICE_SID_SESYSTEMPROFILE_EXPERIMENT_EXECUTION
+HISTORICAL_NEXT_GATE_AT_FIRST_INCIDENT = HUMAN_I2E_FAILED_ATTEMPT_CLEANUP
+HISTORICAL_AFTER_CLEANUP_NEXT_GATE = HUMAN_SERVICE_SID_SESYSTEMPROFILE_EXPERIMENT_EXECUTION
 ```
 
 The existing failed-attempt pointer and evidence must be closed by the human
 with the repaired cleanup wrapper before any new I2E invocation. No control,
 treatment, LSA mutation, or AMD runtime was executed by the failed attempt.
+
+## AMD-PRIVILEGE-I2E CONTROL-COMPLETE INCIDENT CLOSURE — CURRENT STATE
+
+The next human invocation corrected the SCM account spelling and reached the
+real CONTROL phase. CONTROL completed under the existing LocalService service
+and produced authoritative `POWER_UNAVAILABLE` evidence. The stop helper then
+failed after issuing the stop request because a local PowerShell `$pid`
+assignment collided with the read-only, case-insensitive `$PID` automatic
+variable. The machine state is nevertheless `Stopped / PID0`; no treatment
+mutation or treatment execution occurred.
+
+```text
+I2E_SECOND_HUMAN_INVOCATION = CONTROL_REAL_EXECUTED_THEN_ORCHESTRATION_STOP_FAILURE
+CONTROL_REAL_EXECUTION = REAL_COMPLETE
+CONTROL_RESULT = POWER_UNAVAILABLE
+CONTROL_TOKEN_GATE = PASS
+CONTROL_NO_ORPHAN_CHILD = true
+TREATMENT_REAL_EXECUTION = 0
+LSA_MUTATION = 0
+ROOT_CAUSE = POWERSHELL_AUTOMATIC_VARIABLE_PID_COLLISION
+CURRENT_POINTER_STATE = STALE_AFTER_POST_CONTROL_STOP_FAILURE
+CURRENT_SERVICE = STOPPED / PID0 / LocalService
+PAIRED_GATE_CONSUMED = true
+CONTROL_RECOVERY = PREPARED
+CONTROL_RERUN = FORBIDDEN
+TREATMENT_ONLY_RESUME = PREPARED
+NEXT_REAL_AMD_OPERATION = TREATMENT_ONLY
+NEXT_GATE = HUMAN_I2E_TREATMENT_ONLY_RESUME
+REAL_SERVICE_RUNTIME_DURING_REPAIR = 0
+REAL_LSA_MUTATION_DURING_REPAIR = 0
+REAL_AMD_RUNTIME_DURING_REPAIR = 0
+```
+
+The stale CURRENT pointer is not treated as phase evidence. A future,
+explicit treatment-only resume must first validate the immutable CONTROL
+token/context/summary/discovery evidence, write `CONTROL-RECOVERY.json`, and
+reconcile the pointer. It must retain the exact existing Service SID and frozen
+artifact, refuse to rerun CONTROL, require the right to be absent before the
+single exact Service-SID mutation, enforce the treatment token gate before AMD,
+and roll back only the right added by that experiment. This repair did not run
+recovery, cleanup, LSA mutation, a service, or AMD.
+
+The next human gate is an already elevated Administrator x64 PowerShell running
+the explicit treatment-only wrapper; this command is documented, not executed
+here:
+
+```powershell
+Set-Location 'F:\File\codex\codex-worktrees\ac74\resource-timeline'
+& '.\tools\amd-privilege-qualification\resume-admin-amd-i2e-treatment.ps1' -ExecuteAuthorizedTreatmentOnly
+```
 
 ## HISTORICAL / SUPERSEDED — AMD-PRIVILEGE-I2D MINIMUM CAPABILITY ROOT-CAUSE FORENSICS
 

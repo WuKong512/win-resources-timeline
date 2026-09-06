@@ -17,6 +17,8 @@ $I2dForensics = Join-Path $ToolRoot 'i2d-readonly-forensics.ps1'
 $I2eContract = Join-Path $ToolRoot 'i2e-service-profile-contract.ps1'
 $I2eSetup = Join-Path $ToolRoot 'run-admin-amd-i2e-service-profile-experiment.ps1'
 $I2eCleanup = Join-Path $ToolRoot 'cleanup-admin-amd-i2e-service-profile-experiment.ps1'
+$I2eResumeContract = Join-Path $ToolRoot 'i2e-treatment-resume-contract.ps1'
+$I2eResume = Join-Path $ToolRoot 'resume-admin-amd-i2e-treatment.ps1'
 $WindowsSource = Join-Path $ToolRoot 'src\windows.rs'
 
 foreach ($wrapper in @(
@@ -32,7 +34,9 @@ foreach ($wrapper in @(
         (Join-Path $ToolRoot 'cleanup-admin-amd-system-counter-qualification.ps1'),
         $I2eContract,
         $I2eSetup,
-        $I2eCleanup
+        $I2eCleanup,
+        $I2eResumeContract,
+        $I2eResume
     )) {
     $parseErrors = $null
     $tokens = $null
@@ -41,6 +45,36 @@ foreach ($wrapper in @(
         throw "PowerShell syntax errors in wrapper: $wrapper"
     }
 }
+
+function Assert-I2eNoPidAssignment {
+    param([Parameter(Mandatory)][string]$Path)
+    $parseErrors = $null
+    $tokens = $null
+    $ast = [System.Management.Automation.Language.Parser]::ParseFile($Path, [ref]$tokens, [ref]$parseErrors)
+    if ($parseErrors.Count -ne 0) {
+        throw "PowerShell syntax errors while auditing PID assignments: $Path"
+    }
+    $badAssignments = @($ast.FindAll({
+            param($node)
+            if ($node -is [System.Management.Automation.Language.AssignmentStatementAst]) {
+                $left = $node.Left
+                return $left -is [System.Management.Automation.Language.VariableExpressionAst] -and
+                    $left.VariablePath.UserPath -ieq 'pid'
+            }
+            if ($node -is [System.Management.Automation.Language.ParameterAst]) {
+                return $node.Name.VariablePath.UserPath -ieq 'pid'
+            }
+            return $false
+        }, $true))
+    if ($badAssignments.Count -ne 0) {
+        throw "I2E PowerShell must not assign to the automatic PID variable: $Path"
+    }
+}
+
+foreach ($i2eScript in @($I2eSetup, $I2eCleanup, $I2eContract, $I2eResumeContract, $I2eResume)) {
+    Assert-I2eNoPidAssignment -Path $i2eScript
+}
+Write-Host 'I2E_PID_AUTOMATIC_VARIABLE_ASSIGNMENT_AUDIT=PASS'
 
 $clientWrapper = Join-Path $ToolRoot 'run-standard-user-amd-privilege-client.ps1'
 $integritySource = (Get-Content -LiteralPath $clientWrapper -Raw) +
@@ -353,6 +387,8 @@ Write-Host 'I2D_NO_SECURITY_MUTATION_SURFACE=PASS'
 $i2eContractSource = Get-Content -LiteralPath $I2eContract -Raw
 $i2eSetupSource = Get-Content -LiteralPath $I2eSetup -Raw
 $i2eCleanupSource = Get-Content -LiteralPath $I2eCleanup -Raw
+$i2eResumeContractSource = Get-Content -LiteralPath $I2eResumeContract -Raw
+$i2eResumeSource = Get-Content -LiteralPath $I2eResume -Raw
 $i2eArtifactSha256 = '871CD20D228BD9510606DE640F516F62C2983B9F4A83C1AA807BA35329C778B9'
 . $I2eContract
 $i2eScmAccount = 'NT AUTHORITY\LocalService'
@@ -477,6 +513,163 @@ if ((Resolve-I2eExperimentState -Pointer $i2eFailedAttemptFixture) -cne 'PRE_SER
 Write-Host 'I2E_PRE_SERVICE_FAILURE_RECOVERY=PASS'
 Write-Host 'I2E_NO_LSA_ROLLBACK_FOR_PRE_SERVICE=PASS'
 Write-Host 'I2E_CURRENT_POINTER_FINALIZATION=PASS'
+
+foreach ($requiredResumeContract in @(
+        'Assert-I2eControlRecoveryEvidence',
+        'Assert-I2eTreatmentTokenGate',
+        'POWERSHELL_AUTOMATIC_VARIABLE_PID_COLLISION_AFTER_REAL_CONTROL',
+        'control_real_executed',
+        'paired_gate_consumed'
+    )) {
+    if ($i2eResumeContractSource -notmatch [regex]::Escape($requiredResumeContract)) {
+        throw "I2E recovery contract is missing: $requiredResumeContract"
+    }
+}
+foreach ($requiredTreatmentResumeContract in @(
+        '-LibraryOnly',
+        'CONTROL-RECOVERY.json',
+        'SECURITY-MUTATION-APPLIED.json',
+        'SECURITY-MUTATION-ROLLBACK.json',
+        '3935ac9082954bcfb2b1f94c54cf95d7',
+        '07a511e169274def93da79f269792b71',
+        'e66bbcff49ff4aeaaf8bd2a75aa959c7',
+        'S-1-5-80-2365814672-2637389132-1660472602-1496836994-3411780124',
+        '871CD20D228BD9510606DE640F516F62C2983B9F4A83C1AA807BA35329C778B9',
+        '--service-profile-counter-service',
+        'Invoke-I2ePhase -Phase TREATMENT',
+        'Assert-I2eTreatmentTokenGate',
+        'Remove-I2eExactServiceProfileRight',
+        'Stop-I2eService',
+        'Remove-I2eService'
+    )) {
+    if ($i2eResumeSource -notmatch [regex]::Escape($requiredTreatmentResumeContract)) {
+        throw "I2E treatment-only resume is missing: $requiredTreatmentResumeContract"
+    }
+}
+if ($i2eResumeSource -match 'Invoke-I2ePhase\s+-Phase\s+CONTROL') {
+    throw 'I2E treatment-only resume contains a CONTROL execution path.'
+}
+Write-Host 'I2E_TREATMENT_ONLY_RESUME_STATIC_CONTRACT=PASS'
+
+. $I2eResumeContract
+$recoveryExperimentId = '3935ac9082954bcfb2b1f94c54cf95d7'
+$recoveryControlScope = '07a511e169274def93da79f269792b71'
+$recoveryTreatmentScope = 'e66bbcff49ff4aeaaf8bd2a75aa959c7'
+$recoveryServiceName = 'ResourceTimelineAmdSystemProfileQualification'
+$recoveryServiceSid = 'S-1-5-80-2365814672-2637389132-1660472602-1496836994-3411780124'
+$recoveryPointer = [pscustomobject]@{
+    experiment_id = $recoveryExperimentId
+    service_name = $recoveryServiceName
+    service_sid = $recoveryServiceSid
+    control_scope = $recoveryControlScope
+    treatment_scope = $recoveryTreatmentScope
+    artifact_sha256 = $i2eArtifactSha256
+    state = 'ROLLBACK_COMPLETE'
+    control_execution_state = 'STARTING'
+    control_executed = $false
+    control_result = $null
+    paired_gate_consumed = $true
+    right_mutation_state = 'NOT_STARTED'
+    right_added_by_experiment = $false
+    treatment_execution_state = 'NOT_STARTED'
+    treatment_executed = $false
+    rollback_verified = $true
+}
+$recoveryTokenGate = [pscustomobject]@{
+    gate_pass = $true
+    account_sid = 'S-1-5-19'
+    service_sid = $recoveryServiceSid
+    session_id = 0
+    process_architecture = 'x64'
+    administrators_sid_present = $false
+    se_system_profile_privilege_present = $false
+    se_system_profile_privilege_enabled = $false
+    se_system_profile_privilege_disabled = $false
+    forbidden_enabled_privileges = @()
+}
+$recoveryContext = [pscustomobject]@{
+    account_sid = 'S-1-5-19'
+    service_sid = $recoveryServiceSid
+    session_id = 0
+    process_architecture = 'x64'
+    context_valid = $true
+}
+$recoverySummary = [pscustomobject]@{
+    service_name = $recoveryServiceName
+    service_account_sid = 'S-1-5-19'
+    service_sid = $recoveryServiceSid
+    phase = 'CONTROL'
+    fixed_cli_arguments = @('timechart', '--list')
+    availability = 'POWER_UNAVAILABLE'
+    cli_exit_code = 0
+    power_category_present = $false
+    no_orphan_child = $true
+    sampling = $false
+}
+$recoveryDiscovery = [pscustomobject]@{
+    arguments = @('timechart', '--list')
+    availability = 'POWER_UNAVAILABLE'
+    cli_exit_code = 0
+    power_category_present = $false
+    no_counters_available_diagnostic = $true
+    no_orphan_child = $true
+    sampling = $false
+}
+$recoveryLaunch = [pscustomobject]@{
+    counter_discovery_only = $true
+    arguments = @('timechart', '--list')
+    sampling = $false
+}
+$recoveredState = Assert-I2eControlRecoveryEvidence `
+    -Pointer $recoveryPointer `
+    -ControlTokenGate $recoveryTokenGate `
+    -ControlContext $recoveryContext `
+    -ControlSummary $recoverySummary `
+    -ControlDiscoveryResult $recoveryDiscovery `
+    -ControlLaunch $recoveryLaunch `
+    -ControlHarnessError $null `
+    -ExpectedExperimentId $recoveryExperimentId `
+    -ExpectedControlScope $recoveryControlScope `
+    -ExpectedTreatmentScope $recoveryTreatmentScope `
+    -ExpectedArtifactSha256 $i2eArtifactSha256 `
+    -ExpectedServiceSid $recoveryServiceSid `
+    -ExpectedServiceName $recoveryServiceName
+if (-not $recoveredState.pass -or
+    -not $recoveredState.control_real_executed -or
+    $recoveredState.control_result -cne 'POWER_UNAVAILABLE' -or
+    -not $recoveredState.paired_gate_consumed -or
+    -not $recoveredState.control_recovery_required) {
+    throw 'I2E authoritative control recovery fixture was not accepted.'
+}
+$recoveryMismatchRejected = $false
+try {
+    $null = Assert-I2eControlRecoveryEvidence `
+        -Pointer $recoveryPointer `
+        -ControlTokenGate $recoveryTokenGate `
+        -ControlContext $recoveryContext `
+        -ControlSummary $recoverySummary `
+        -ControlDiscoveryResult $recoveryDiscovery `
+        -ControlLaunch $recoveryLaunch `
+        -ControlHarnessError $null `
+        -ExpectedExperimentId $recoveryExperimentId `
+        -ExpectedControlScope $recoveryControlScope `
+        -ExpectedTreatmentScope $recoveryTreatmentScope `
+        -ExpectedArtifactSha256 'WRONG-ARTIFACT' `
+        -ExpectedServiceSid $recoveryServiceSid `
+        -ExpectedServiceName $recoveryServiceName
+} catch {
+    $recoveryMismatchRejected = $true
+}
+if (-not $recoveryMismatchRejected) {
+    throw 'I2E control recovery did not fail closed on an artifact mismatch.'
+}
+Write-Host 'I2E_CONTROL_REAL_EXECUTED_RECOVERY=PASS'
+Write-Host 'I2E_TREATMENT_ONLY_RESUME_ALLOWED=PASS'
+Write-Host 'I2E_CONTROL_RERUN_FORBIDDEN=PASS'
+Write-Host 'I2E_SAME_SERVICE_SID_REQUIRED=PASS'
+Write-Host 'I2E_SAME_ARTIFACT_REQUIRED=PASS'
+Write-Host 'I2E_RIGHT_ABSENT_BEFORE_MUTATION=PASS'
+Write-Host 'I2E_TOKEN_GATE_BEFORE_TREATMENT=PASS'
 if ($i2eSetupSource -notmatch 'control_result' -or
     $i2eSetupSource -notmatch 'treatment_result' -or
     $i2eSetupSource -notmatch 'POWER_UNAVAILABLE' -or

@@ -1,6 +1,9 @@
 #requires -Version 5.1
 [CmdletBinding()]
-param([switch]$ExecuteAuthorizedExperiment)
+param(
+    [switch]$ExecuteAuthorizedExperiment,
+    [switch]$LibraryOnly
+)
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
@@ -162,12 +165,12 @@ function Stop-I2eService {
     } while ([DateTime]::UtcNow -lt $deadline)
     $current = Get-I2eServiceSnapshot
     $state = if ($current.present) { $current.state } else { 'ABSENT' }
-    $pid = if ($current.present) { [int64]$current.process_id } else { 0L }
-    $disposition = Resolve-QualificationStopDisposition -StopExitCode $exitCode -ServiceState $state -ServiceProcessId $pid -ServicePresent $current.present
+    $serviceProcessId = if ($current.present) { [int64]$current.process_id } else { 0L }
+    $disposition = Resolve-QualificationStopDisposition -StopExitCode $exitCode -ServiceState $state -ServiceProcessId $serviceProcessId -ServicePresent $current.present
     if ($disposition -eq 'FAIL_CLOSED_SERVICE_NOT_STOPPED_PID0') {
-        throw ('I2E service did not stop safely; sc.exe exit={0}, state={1}, pid={2}' -f $exitCode, $state, $pid)
+        throw ('I2E service did not stop safely; sc.exe exit={0}, state={1}, pid={2}' -f $exitCode, $state, $serviceProcessId)
     }
-    [pscustomobject]@{ stop_exit_code = $exitCode; state = $state; process_id = $pid; disposition = $disposition }
+    [pscustomobject]@{ stop_exit_code = $exitCode; state = $state; process_id = $serviceProcessId; disposition = $disposition }
 }
 
 function Remove-I2eService {
@@ -219,6 +222,8 @@ function Invoke-I2ePhase {
         stop = $stop
     }
 }
+
+if ($LibraryOnly) { return }
 
 $null = Assert-I2eAdministrator
 if (-not $ExecuteAuthorizedExperiment) {

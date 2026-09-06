@@ -215,8 +215,8 @@ historical **I2 POWER-SAMPLING CLIENT**, not an active I2B command.
 
 ## I2E service-SID SeSystemProfile minimum-variable experiment
 
-I2E prepares, but does not execute, a paired control/treatment experiment
-against the real LocalService counter-availability differential. It keeps the
+I2E prepared a paired control/treatment experiment against the real LocalService
+counter-availability differential. Its contract keeps the
 service account as NT AUTHORITY\LOCAL SERVICE (S-1-5-19), uses the fixed
 qualification-only service ResourceTimelineAmdSystemProfileQualification, and
 uses one derived Service SID for both phases. The Service SID type must be
@@ -269,12 +269,12 @@ for both phases. I2E is prepared but not executed:
 
 ~~~text
 FROZEN_EXPERIMENT_ARTIFACT_SHA256 = 871CD20D228BD9510606DE640F516F62C2983B9F4A83C1AA807BA35329C778B9
-I2E = PREPARED_NOT_EXECUTED
+I2E = CONTROL_REAL_COMPLETE_TREATMENT_PENDING
 LOCAL_SERVICE_ACCOUNT_WIDE_RIGHT_MUTATION = FORBIDDEN
 ADMINISTRATORS_MEMBERSHIP_MUTATION = FORBIDDEN
 REAL_LSA_MUTATION_DURING_PREPARATION = 0
 REAL_AMD_RUNTIME_DURING_PREPARATION = 0
-NEXT_GATE = HUMAN_I2E_FAILED_ATTEMPT_CLEANUP
+NEXT_GATE = HUMAN_I2E_TREATMENT_ONLY_RESUME
 PRODUCTION_ACCOUNT = UNRESOLVED
 ~~~
 
@@ -304,8 +304,57 @@ TREATMENT_EXECUTED = false
 LSA_MUTATION = false
 AMD_RUNTIME = false
 PAIRED_EXPERIMENT_GATE = UNCONSUMED
-NEXT_GATE = HUMAN_I2E_FAILED_ATTEMPT_CLEANUP
-AFTER_CLEANUP_NEXT_GATE = HUMAN_SERVICE_SID_SESYSTEMPROFILE_EXPERIMENT_EXECUTION
+HISTORICAL_NEXT_GATE_AT_FIRST_INCIDENT = HUMAN_I2E_FAILED_ATTEMPT_CLEANUP
+HISTORICAL_AFTER_CLEANUP_NEXT_GATE = HUMAN_SERVICE_SID_SESYSTEMPROFILE_EXPERIMENT_EXECUTION
+```
+
+## Current I2E status: CONTROL complete, treatment-only resume prepared
+
+The first corrected human I2E invocation reached and completed the real
+LocalService CONTROL phase. The authoritative result is `POWER_UNAVAILABLE`;
+the token gate passed, the fixed non-sampling `timechart --list` command ran,
+and no orphan child remained. The orchestration then failed while stopping
+the already-completed service because a local PowerShell `$pid` assignment
+collided with the read-only, case-insensitive `$PID` automatic variable. The
+service is currently `Stopped / PID0 / LocalService`, and no right mutation or
+treatment execution occurred.
+
+```text
+I2E_SECOND_HUMAN_INVOCATION = CONTROL_REAL_EXECUTED_THEN_ORCHESTRATION_STOP_FAILURE
+CONTROL_REAL_EXECUTION = REAL_COMPLETE
+CONTROL_RESULT = POWER_UNAVAILABLE
+CONTROL_TOKEN_GATE = PASS
+CONTROL_NO_ORPHAN_CHILD = true
+TREATMENT_REAL_EXECUTION = 0
+LSA_MUTATION = 0
+ROOT_CAUSE = POWERSHELL_AUTOMATIC_VARIABLE_PID_COLLISION
+CURRENT_POINTER_STATE = STALE_AFTER_POST_CONTROL_STOP_FAILURE
+CURRENT_SERVICE = STOPPED / PID0 / LocalService
+PAIRED_GATE_CONSUMED = true
+CONTROL_RECOVERY = PREPARED
+CONTROL_RERUN = FORBIDDEN
+TREATMENT_ONLY_RESUME = PREPARED
+NEXT_REAL_AMD_OPERATION = TREATMENT_ONLY
+NEXT_GATE = HUMAN_I2E_TREATMENT_ONLY_RESUME
+```
+
+Do not trust the stale CURRENT flags over the phase evidence and do not rerun
+CONTROL. The future human gate is the explicit treatment-only wrapper
+`resume-admin-amd-i2e-treatment.ps1`; it first validates the exact existing
+experiment, writes `CONTROL-RECOVERY.json`, and reconciles the pointer. It
+then requires the existing stopped service and absent right, applies exactly
+one right to the same Service SID, enforces the treatment token gate before
+AMD, and performs exact rollback plus cleanup. This repair performed no
+recovery, cleanup, service start, LSA mutation, or AMD runtime.
+
+The next human gate is an already elevated Administrator x64 PowerShell and
+the treatment-only command below. It is intentionally not run as part of this
+repair; it consumes the remaining treatment gate and must never be replaced by
+the original control wrapper:
+
+```powershell
+Set-Location 'F:\File\codex\codex-worktrees\ac74\resource-timeline'
+& '.\tools\amd-privilege-qualification\resume-admin-amd-i2e-treatment.ps1' -ExecuteAuthorizedTreatmentOnly
 ```
 
 ## I2D read-only minimum-capability forensics

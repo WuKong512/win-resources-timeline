@@ -72,12 +72,12 @@ function Stop-I2eCleanupService {
     } while ([DateTime]::UtcNow -lt $deadline)
     $current = Get-I2eCleanupServiceSnapshot
     $state = if ($current.present) { $current.state } else { 'ABSENT' }
-    $pid = if ($current.present) { [int64]$current.process_id } else { 0L }
-    $disposition = Resolve-QualificationStopDisposition -StopExitCode $exitCode -ServiceState $state -ServiceProcessId $pid -ServicePresent $current.present
+    $serviceProcessId = if ($current.present) { [int64]$current.process_id } else { 0L }
+    $disposition = Resolve-QualificationStopDisposition -StopExitCode $exitCode -ServiceState $state -ServiceProcessId $serviceProcessId -ServicePresent $current.present
     if ($disposition -eq 'FAIL_CLOSED_SERVICE_NOT_STOPPED_PID0') {
-        throw ('I2E cleanup failed closed; service state={0}, pid={1}, sc.exe exit={2}' -f $state, $pid, $exitCode)
+        throw ('I2E cleanup failed closed; service state={0}, pid={1}, sc.exe exit={2}' -f $state, $serviceProcessId, $exitCode)
     }
-    [pscustomobject]@{ stop_exit_code = $exitCode; state = $state; process_id = $pid; disposition = $disposition }
+    [pscustomobject]@{ stop_exit_code = $exitCode; state = $state; process_id = $serviceProcessId; disposition = $disposition }
 }
 
 function Remove-I2eCleanupService {

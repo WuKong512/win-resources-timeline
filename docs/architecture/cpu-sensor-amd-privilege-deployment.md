@@ -32,7 +32,7 @@ SYSTEM_POWER_COUNTER_ACCESS = AVAILABLE / REAL_SYSTEM_DIFFERENTIAL
 SECURITY_CONTEXT_DIFFERENTIAL = REAL_CONFIRMED
 MINIMUM_REQUIRED_CAPABILITY = UNRESOLVED
 PRODUCTION_ACCOUNT = UNRESOLVED
-NEXT_GATE = HUMAN_I2E_FAILED_ATTEMPT_CLEANUP
+NEXT_GATE = HUMAN_I2E_TREATMENT_ONLY_RESUME
 NEXT_TASK = AMD-PRIVILEGE-I2E
 PRODUCTION_ADMISSION = NOT_COMPLETE
 ```
@@ -48,7 +48,7 @@ the LocalService context. `AMD-PRIVILEGE-I2B` prepared a non-sampling
 distinct SYSTEM-only comparison harness. Neither selects LocalSystem, alters
 AMD permissions, or admits a provider.
 
-## CURRENT I2E PRE-CONTROL INCIDENT
+## HISTORICAL / SUPERSEDED I2E PRE-CONTROL INCIDENT
 
 The first human-authorized I2E invocation stopped at `sc.exe create` with exit
 code `1057`. The wrapper supplied the bare SCM account value `LocalService`,
@@ -70,15 +70,14 @@ AMD_RUNTIME = false
 PAIRED_EXPERIMENT_GATE = UNCONSUMED
 FAILED_ATTEMPT_POINTER_RECOVERY = PREPARED
 CURRENT_POINTER_FINALIZATION = PREPARED
-NEXT_GATE = HUMAN_I2E_FAILED_ATTEMPT_CLEANUP
+HISTORICAL_NEXT_GATE_AT_FIRST_INCIDENT = HUMAN_I2E_FAILED_ATTEMPT_CLEANUP
 ```
 
 The repaired orchestration records explicit gate-consumption state and uses
-`NT AUTHORITY\LocalService` for the SCM `obj=` value. Its cleanup preserves a
-finalized, invocation-distinct pointer in the experiment evidence root and
-removes the mutable CURRENT pointer only after exact rollback/no-mutation,
-service absence, and owned-process absence have been verified. The human must
-run that cleanup once before a future paired control/treatment execution.
+`NT AUTHORITY\LocalService` for the SCM `obj=` value. The cleanup instruction
+above was the historical next step for that pre-service incident; it is not the
+current gate after the later real CONTROL completion. The current control
+recovery and treatment-only resume state is documented below.
 
 ## HISTORICAL / SUPERSEDED INITIAL DECISION AND STATUS
 
@@ -828,11 +827,11 @@ FROZEN_EXPERIMENT_ARTIFACT_SHA256 = 871CD20D228BD9510606DE640F516F62C2983B9F4A83
 REAL_AMD_RUNTIME_DURING_PREPARATION = 0
 REAL_SERVICE_RUNTIME_DURING_PREPARATION = 0
 REAL_LSA_MUTATION_DURING_PREPARATION = 0
-I2E = PREPARED_NOT_EXECUTED
+I2E = CONTROL_REAL_COMPLETE_TREATMENT_PENDING
 MINIMUM_REQUIRED_CAPABILITY = UNRESOLVED
 PRODUCTION_ACCOUNT = UNRESOLVED
 NEXT_TASK = AMD-PRIVILEGE-I2E
-NEXT_GATE = HUMAN_SERVICE_SID_SESYSTEMPROFILE_EXPERIMENT_EXECUTION
+NEXT_GATE = HUMAN_I2E_TREATMENT_ONLY_RESUME
 ~~~
 
 The preparation is repository-native and qualification-only. The default
@@ -849,6 +848,48 @@ enumeration uses `0x00000801`, first-assignment `LsaAddAccountRights` uses
 exact-right `LsaRemoveAccountRights` uses only `0x00000800`. No handle requests
 broader policy access, and account-object state is recorded as
 `PRESENT`, `ABSENT`, or `UNKNOWN` where the read-only status permits.
+
+## AMD-PRIVILEGE-I2E CURRENT STATE — CONTROL COMPLETE, TREATMENT PENDING
+
+The first corrected human I2E invocation completed CONTROL under the existing
+LocalService qualification service. Its authoritative result is
+`POWER_UNAVAILABLE` with a passing token gate, no orphan child, and no
+SeSystemProfilePrivilege assignment. The orchestration then failed while
+stopping the already-completed CONTROL service: PowerShell variable names are
+case-insensitive, so assigning local `$pid` collided with the read-only `$PID`
+automatic variable. The service is currently stopped with PID 0; this is a
+post-control harness incident, not CONTROL failure.
+
+```text
+I2E_SECOND_HUMAN_INVOCATION = CONTROL_REAL_EXECUTED_THEN_ORCHESTRATION_STOP_FAILURE
+CONTROL_REAL_EXECUTION = REAL_COMPLETE
+CONTROL_RESULT = POWER_UNAVAILABLE
+CONTROL_TOKEN_GATE = PASS
+CONTROL_NO_ORPHAN_CHILD = true
+TREATMENT_REAL_EXECUTION = 0
+LSA_MUTATION = 0
+ROOT_CAUSE = POWERSHELL_AUTOMATIC_VARIABLE_PID_COLLISION
+CURRENT_SERVICE = STOPPED / PID0 / LocalService
+PAIRED_GATE_CONSUMED = true
+CURRENT_POINTER_STATE = STALE_AFTER_POST_CONTROL_STOP_FAILURE
+CONTROL_RECOVERY = PREPARED
+CONTROL_RERUN = FORBIDDEN
+TREATMENT_ONLY_RESUME = PREPARED
+NEXT_REAL_AMD_OPERATION = TREATMENT_ONLY
+NEXT_GATE = HUMAN_I2E_TREATMENT_ONLY_RESUME
+REAL_SERVICE_RUNTIME_DURING_REPAIR = 0
+REAL_LSA_MUTATION_DURING_REPAIR = 0
+REAL_AMD_RUNTIME_DURING_REPAIR = 0
+```
+
+The recovery contract validates the exact experiment, control/treatment
+scopes, Service SID, frozen artifact, and immutable CONTROL evidence before it
+reconciles the stale pointer. The treatment-only wrapper has no CONTROL
+execution path: it rechecks the stopped existing service and absent right,
+adds exactly `SeSystemProfilePrivilege` to the existing Service SID only,
+enforces the treatment token gate before AMD, and performs exact rollback and
+cleanup. No recovery, cleanup, service, LSA mutation, or AMD runtime was run
+during this offline repair.
 
 > HISTORICAL / SUPERSEDED CURRENT-STATE SNAPSHOT: AMD-PRIVILEGE-I2D
 
