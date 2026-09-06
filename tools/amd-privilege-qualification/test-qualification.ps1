@@ -371,7 +371,14 @@ foreach ($requiredI2eContract in @(
         'LsaRemoveAccountRights',
         'AllRights',
         'STATUS_NO_MORE_ENTRIES',
-        'READ_ONLY_POLICY_ACCESS'
+        'READ_POLICY_ACCESS',
+        'POLICY_CREATE_ACCOUNT',
+        'ADD_POLICY_ACCESS',
+        'REMOVE_POLICY_ACCESS',
+        '0x00000810',
+        '0x00000800',
+        'EnumerateAccountRightsDetailed',
+        'account_object_state'
     )) {
     if ($i2eContractSource -notmatch [regex]::Escape($requiredI2eContract)) {
         throw "I2E contract is missing: $requiredI2eContract"
@@ -383,6 +390,29 @@ if ($i2ePlan.service_account_sid -cne 'S-1-5-19' -or
     $i2ePlan.rollback.all_rights -ne $false) {
     throw 'I2E experiment plan is not LocalService-only, non-sampling, or exact-right rollback.'
 }
+if ($i2eContractSource -notmatch 'OpenPolicy\(READ_POLICY_ACCESS\)' -or
+    $i2eContractSource -notmatch 'OpenPolicy\(ADD_POLICY_ACCESS\)' -or
+    $i2eContractSource -notmatch 'OpenPolicy\(REMOVE_POLICY_ACCESS\)' -or
+    $i2eContractSource -notmatch 'READ_POLICY_ACCESS\s*=\s*0x00000801' -or
+    $i2eContractSource -notmatch 'ADD_POLICY_ACCESS\s*=\s*0x00000810' -or
+    $i2eContractSource -notmatch 'REMOVE_POLICY_ACCESS\s*=\s*0x00000800' -or
+    $i2eContractSource -notmatch 'LsaRemoveAccountRights\([\s\S]*?false') {
+    throw 'I2E LSA operations do not use their operation-specific minimum access and exact-right removal contract.'
+}
+$i2eFirstAssignmentFixture = [pscustomobject]@{
+    account_object_state = 'ABSENT'
+    direct_rights = @()
+    required_right = 'SeSystemProfilePrivilege'
+}
+if ($i2eFirstAssignmentFixture.account_object_state -cne 'ABSENT' -or
+    $i2eFirstAssignmentFixture.direct_rights.Count -ne 0 -or
+    $i2eContractSource -notmatch 'POLICY_CREATE_ACCOUNT' -or
+    $i2eContractSource -notmatch 'ADD_POLICY_ACCESS') {
+    throw 'I2E first-assignment account-object creation path is not covered.'
+}
+Write-Host 'I2E_OPERATION_SPECIFIC_POLICY_ACCESS=PASS'
+Write-Host 'I2E_FIRST_ASSIGNMENT_CREATE_ACCOUNT_PATH=PASS'
+Write-Host 'I2E_ACCOUNT_OBJECT_STATE_DIAGNOSTIC=PASS'
 if ($i2eSetupSource -match '(?i)-Verb\s+RunAs|\bStart-Process\b|\brunas(?:\.exe)?\b|\bPsExec\b|\bsecedit\b|\bntrights(?:\.exe)?\b') {
     throw 'I2E setup must not self-elevate or use broad policy tooling.'
 }
@@ -410,7 +440,8 @@ if ($i2eCleanupSource -match '(?im)\bStop-Process\b|\btaskkill(?:\.exe)?\b|AllRi
 if ($i2eSetupSource -notmatch 'control_result' -or
     $i2eSetupSource -notmatch 'treatment_result' -or
     $i2eSetupSource -notmatch 'POWER_UNAVAILABLE' -or
-    $i2eSetupSource -notmatch 'Compare-I2eTokenDelta') {
+    $i2eSetupSource -notmatch 'Compare-I2eTokenDelta' -or
+    $i2eSetupSource -notmatch 'baseline_account_object_state') {
     throw 'I2E control-first and token-delta gates are missing.'
 }
 $controlI2eToken = [pscustomobject]@{

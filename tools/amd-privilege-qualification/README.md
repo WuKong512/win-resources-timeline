@@ -256,6 +256,14 @@ right when the mutation journal proves this experiment added it; it never
 uses an all-rights removal. Cleanup evidence is invocation-distinct and can
 recover from service creation or any later failure point.
 
+The LSA policy handle is operation-specific and least-privilege: read-only
+enumeration uses `0x00000801`, first-time exact-right assignment uses
+`0x00000810` (`POLICY_CREATE_ACCOUNT` plus name lookup), and exact-right
+rollback uses only `0x00000800` (name lookup). The direct account baseline also
+records whether the Service SID account object is `PRESENT`, `ABSENT`, or
+`UNKNOWN`; this is diagnostic and does not replace the exact-right presence
+gate.
+
 The fixed artifact SHA is recorded in the I2E wrapper and is used unchanged
 for both phases. I2E is prepared but not executed:
 
@@ -266,7 +274,7 @@ LOCAL_SERVICE_ACCOUNT_WIDE_RIGHT_MUTATION = FORBIDDEN
 ADMINISTRATORS_MEMBERSHIP_MUTATION = FORBIDDEN
 REAL_LSA_MUTATION_DURING_PREPARATION = 0
 REAL_AMD_RUNTIME_DURING_PREPARATION = 0
-NEXT_GATE = HUMAN_SERVICE_SID_SESYSTEMPROFILE_EXPERIMENT_REVIEW
+NEXT_GATE = HUMAN_SERVICE_SID_SESYSTEMPROFILE_EXPERIMENT_EXECUTION
 PRODUCTION_ACCOUNT = UNRESOLVED
 ~~~
 

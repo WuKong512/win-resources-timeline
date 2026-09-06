@@ -32,7 +32,7 @@ SYSTEM_POWER_COUNTER_ACCESS = AVAILABLE / REAL_SYSTEM_DIFFERENTIAL
 SECURITY_CONTEXT_DIFFERENTIAL = REAL_CONFIRMED
 MINIMUM_REQUIRED_CAPABILITY = UNRESOLVED
 PRODUCTION_ACCOUNT = UNRESOLVED
-NEXT_GATE = HUMAN_SERVICE_SID_SESYSTEMPROFILE_EXPERIMENT_REVIEW
+NEXT_GATE = HUMAN_SERVICE_SID_SESYSTEMPROFILE_EXPERIMENT_EXECUTION
 NEXT_TASK = AMD-PRIVILEGE-I2E
 PRODUCTION_ADMISSION = NOT_COMPLETE
 ```
@@ -784,6 +784,11 @@ PAIRED_CONTROL_TREATMENT = PREPARED
 PREEXISTING_RIGHT_PRESERVATION = PREPARED
 EXACT_ROLLBACK = PREPARED
 STATUS_NO_MORE_ENTRIES = READ_EMPTY
+LSA_READ_POLICY_ACCESS = 0x00000801
+LSA_ADD_POLICY_ACCESS = 0x00000810
+LSA_REMOVE_POLICY_ACCESS = 0x00000800
+LSA_FIRST_ASSIGNMENT_POLICY_CREATE_ACCOUNT = SUPPORTED
+ACCOUNT_OBJECT_STATE_DIAGNOSTIC = PRESENT_OR_ABSENT_OR_UNKNOWN
 FIXED_COMMAND = timechart --list
 SAMPLING = false
 FROZEN_ARTIFACT = ONE_SHA_FOR_CONTROL_AND_TREATMENT
@@ -795,7 +800,7 @@ I2E = PREPARED_NOT_EXECUTED
 MINIMUM_REQUIRED_CAPABILITY = UNRESOLVED
 PRODUCTION_ACCOUNT = UNRESOLVED
 NEXT_TASK = AMD-PRIVILEGE-I2E
-NEXT_GATE = HUMAN_SERVICE_SID_SESYSTEMPROFILE_EXPERIMENT_REVIEW
+NEXT_GATE = HUMAN_SERVICE_SID_SESYSTEMPROFILE_EXPERIMENT_EXECUTION
 ~~~
 
 The preparation is repository-native and qualification-only. The default
@@ -805,6 +810,13 @@ human authorization for the paired control/treatment execution, followed by
 the exact-right rollback and invocation-distinct cleanup. A treatment result
 can show sufficiency for the observed bounded path, but cannot by itself
 prove global minimum privilege or select the production account.
+
+The LSA mutation contract uses operation-specific minimum access: read-only
+enumeration uses `0x00000801`, first-assignment `LsaAddAccountRights` uses
+`0x00000810` so the dedicated Service SID account object may be created, and
+exact-right `LsaRemoveAccountRights` uses only `0x00000800`. No handle requests
+broader policy access, and account-object state is recorded as
+`PRESENT`, `ABSENT`, or `UNKNOWN` where the read-only status permits.
 
 > HISTORICAL / SUPERSEDED CURRENT-STATE SNAPSHOT: AMD-PRIVILEGE-I2D
 

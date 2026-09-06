@@ -302,6 +302,8 @@ try {
     $plan.control_scope = $controlScope
     $plan.treatment_scope = $treatmentScope
     $plan.baseline_direct_rights = $baseline.direct_rights
+    $plan.baseline_account_object_state = $baseline.account_object_state
+    $plan.baseline_direct_rights_status = $baseline.status
     $plan.baseline_right_assignment = $assigned
     $plan.se_system_profile_privilege_present_before = $rightPresentBefore
     $plan.right_was_present_before = $rightPresentBefore -or $rightAssignedBefore

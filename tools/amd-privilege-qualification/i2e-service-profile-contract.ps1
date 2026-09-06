@@ -128,11 +128,26 @@ public sealed class I2eLsaException : Exception
     }
 }
 
+public sealed class I2eAccountRightsResult
+{
+    public string[] Rights { get; private set; }
+    public string AccountObjectState { get; private set; }
+
+    public I2eAccountRightsResult(string[] rights, string accountObjectState)
+    {
+        Rights = rights ?? new string[0];
+        AccountObjectState = accountObjectState;
+    }
+}
+
 public static class I2eLsaMutation
 {
     private const uint POLICY_VIEW_LOCAL_INFORMATION = 0x00000001;
+    private const uint POLICY_CREATE_ACCOUNT = 0x00000010;
     private const uint POLICY_LOOKUP_NAMES = 0x00000800;
-    private const uint READ_ONLY_POLICY_ACCESS = POLICY_VIEW_LOCAL_INFORMATION | POLICY_LOOKUP_NAMES;
+    private const uint READ_POLICY_ACCESS = 0x00000801;
+    private const uint ADD_POLICY_ACCESS = 0x00000810;
+    private const uint REMOVE_POLICY_ACCESS = 0x00000800;
     private const int STATUS_OBJECT_NAME_NOT_FOUND = unchecked((int)0xC0000034);
     private const int STATUS_NO_MORE_ENTRIES = unchecked((int)0x8000001A);
 
@@ -208,13 +223,13 @@ public static class I2eLsaMutation
         }
     }
 
-    private static IntPtr OpenPolicy()
+    private static IntPtr OpenPolicy(uint desiredAccess)
     {
         IntPtr policy;
         var attributes = new LSA_OBJECT_ATTRIBUTES();
         attributes.Length = (uint)Marshal.SizeOf(typeof(LSA_OBJECT_ATTRIBUTES));
         ThrowIfFailed("LsaOpenPolicy", LsaOpenPolicy(
-            IntPtr.Zero, ref attributes, READ_ONLY_POLICY_ACCESS, out policy));
+            IntPtr.Zero, ref attributes, desiredAccess, out policy));
         return policy;
     }
 
@@ -248,20 +263,26 @@ public static class I2eLsaMutation
         return Marshal.PtrToStringUni(value.Buffer, value.Length / 2);
     }
 
-    public static string[] EnumerateAccountRights(string sidString)
+    public static I2eAccountRightsResult EnumerateAccountRightsDetailed(string sidString)
     {
         IntPtr policy = IntPtr.Zero;
         IntPtr sid = IntPtr.Zero;
         IntPtr rights = IntPtr.Zero;
         try
         {
-            policy = OpenPolicy();
+            policy = OpenPolicy(READ_POLICY_ACCESS);
             sid = AllocateSid(sidString);
             uint count;
             var status = LsaEnumerateAccountRights(policy, sid, out rights, out count);
-            if (status == STATUS_OBJECT_NAME_NOT_FOUND || status == STATUS_NO_MORE_ENTRIES)
+            if (status == STATUS_OBJECT_NAME_NOT_FOUND)
             {
-                return new string[0];
+                return new I2eAccountRightsResult(
+                    new string[0], "ABSENT");
+            }
+            if (status == STATUS_NO_MORE_ENTRIES)
+            {
+                return new I2eAccountRightsResult(
+                    new string[0], "UNKNOWN");
             }
             ThrowIfFailed("LsaEnumerateAccountRights", status);
             var result = new List<string>();
@@ -274,7 +295,7 @@ public static class I2eLsaMutation
                 result.Add(ReadUnicodeString(value));
             }
             result.Sort(StringComparer.OrdinalIgnoreCase);
-            return result.ToArray();
+            return new I2eAccountRightsResult(result.ToArray(), "PRESENT");
         }
         finally
         {
@@ -284,6 +305,11 @@ public static class I2eLsaMutation
         }
     }
 
+    public static string[] EnumerateAccountRights(string sidString)
+    {
+        return EnumerateAccountRightsDetailed(sidString).Rights;
+    }
+
     public static string[] EnumerateAccountsWithUserRight(string right)
     {
         IntPtr policy = IntPtr.Zero;
@@ -291,7 +317,7 @@ public static class I2eLsaMutation
         IntPtr enumeration = IntPtr.Zero;
         try
         {
-            policy = OpenPolicy();
+            policy = OpenPolicy(READ_POLICY_ACCESS);
             LSA_UNICODE_STRING rightValue;
             rightBuffer = AllocateRight(right, out rightValue);
             uint count;
@@ -328,7 +354,7 @@ public static class I2eLsaMutation
         IntPtr rightBuffer = IntPtr.Zero;
         try
         {
-            policy = OpenPolicy();
+            policy = OpenPolicy(ADD_POLICY_ACCESS);
             sid = AllocateSid(sidString);
             LSA_UNICODE_STRING rightValue;
             rightBuffer = AllocateRight(right, out rightValue);
@@ -350,7 +376,7 @@ public static class I2eLsaMutation
         IntPtr rightBuffer = IntPtr.Zero;
         try
         {
-            policy = OpenPolicy();
+            policy = OpenPolicy(REMOVE_POLICY_ACCESS);
             sid = AllocateSid(sidString);
             LSA_UNICODE_STRING rightValue;
             rightBuffer = AllocateRight(right, out rightValue);
@@ -376,10 +402,12 @@ function Get-I2eDirectAccountRightsSnapshot {
 
     try {
         Initialize-I2eLsaMutationType
+        $rights = [I2eLsaMutation]::EnumerateAccountRightsDetailed($Sid)
         [ordered]@{
             label = $Label
             account_sid = $Sid
-            direct_rights = @([I2eLsaMutation]::EnumerateAccountRights($Sid))
+            direct_rights = @($rights.Rights)
+            account_object_state = [string]$rights.AccountObjectState
             status = 'READ'
             source = 'LsaEnumerateAccountRights (read-only)'
         }
@@ -389,6 +417,7 @@ function Get-I2eDirectAccountRightsSnapshot {
             label = $Label
             account_sid = $Sid
             direct_rights = @()
+            account_object_state = 'UNKNOWN'
             status = 'UNAVAILABLE'
             error = $exception.Message
             ntstatus_hex = Get-I2ePropertyValue -Object $exception -Name 'NtStatusHex'
