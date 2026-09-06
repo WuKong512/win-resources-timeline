@@ -28,8 +28,12 @@ IPC_CANDIDATE = WINDOWS_NAMED_PIPE
 AMD_PRIVILEGE_I2 = real bounded LocalService IPC/AMD launch PASS; AMD counter backend unavailable
 I2_REAL_RUNTIME_GATE_CONSUMED = true
 LOCAL_SERVICE_POWER_COUNTER_ACCESS = FAILED_OR_UNAVAILABLE
-NEXT_GATE = HUMAN_SYSTEM_COUNTER_DISCOVERY_EXECUTION
-NEXT_TASK = AMD-PRIVILEGE-I2C
+SYSTEM_POWER_COUNTER_ACCESS = AVAILABLE / REAL_SYSTEM_DIFFERENTIAL
+SECURITY_CONTEXT_DIFFERENTIAL = REAL_CONFIRMED
+MINIMUM_REQUIRED_CAPABILITY = UNRESOLVED
+PRODUCTION_ACCOUNT = UNRESOLVED
+NEXT_GATE = HUMAN_MINIMUM_CAPABILITY_EXPERIMENT_REVIEW
+NEXT_TASK = AMD-PRIVILEGE-I2D
 PRODUCTION_ADMISSION = NOT_COMPLETE
 ```
 
@@ -648,7 +652,7 @@ Administrator command is documented in
   PATH, or system state was changed.
 - No production AMD provider was registered.
 
-## AMD-PRIVILEGE-I2 COMPLETION SNAPSHOT
+## HISTORICAL / SUPERSEDED — AMD-PRIVILEGE-I2 COMPLETION SNAPSHOT
 
 `AMD-PRIVILEGE-I2` prepares an independent qualification-only broker and
 synthetic security harness. It is not a production broker and has no
@@ -692,7 +696,7 @@ The first candidate is a qualification hypothesis only. Even a future
 LocalService runtime PASS may narrow the observed path to LocalService or
 less; it cannot by itself prove the absolute minimum Windows privilege.
 
-## AMD-PRIVILEGE-I2B COMPLETION SNAPSHOT
+## HISTORICAL / SUPERSEDED — AMD-PRIVILEGE-I2B COMPLETION SNAPSHOT
 
 ```text
 RESULT = COUNTER_PRIVILEGE_DIFFERENTIAL_REQUIRED
@@ -710,7 +714,7 @@ NEXT_GATE = HUMAN_COUNTER_DISCOVERY_DIFFERENTIAL
 PRODUCTION_ADMISSION = NOT_COMPLETE
 ```
 
-## AMD-PRIVILEGE-I2C CURRENT STATE
+## HISTORICAL / SUPERSEDED — AMD-PRIVILEGE-I2C CURRENT STATE AT PRE-RUN
 
 The LocalService counter-discovery side is complete real evidence at scope
 `4b30b3d64b7e469cbce7c8080c84b7d4`: the fixed non-sampling AMD uProf
@@ -751,3 +755,61 @@ The old architecture decision and early Service/Session 0 unknowns above are
 historical/superseded records. They remain to explain why the broker candidate
 was originally deferred; the current evidence now supports the broker boundary
 while leaving the AMD power-counter capability differential unresolved.
+
+## AMD-PRIVILEGE-I2D CURRENT STATE — MINIMUM CAPABILITY FORENSICS
+
+The dedicated SYSTEM comparison has now consumed its one authorized,
+non-sampling `timechart --list` run. The two results use the same signed x64
+AMD CLI (`D0812D64963DD98F7C339CAC72F650461F95FF84E757A99767C7981B4111FBAC`,
+version `5.3.521.0`) and establish a real security-context differential:
+
+```text
+LOCAL_SERVICE_SCOPE = 4b30b3d64b7e469cbce7c8080c84b7d4
+LOCAL_SERVICE_COUNTER_DISCOVERY = REAL_POWER_UNAVAILABLE
+LOCAL_SERVICE_POWER_CATEGORY_PRESENT = false
+LOCAL_SERVICE_NO_COUNTERS_DIAGNOSTIC = true
+LOCAL_SERVICE_ACCOUNT_SID = S-1-5-19
+LOCAL_SERVICE_SESSION_ID = 0
+LOCAL_SERVICE_ENABLED_PRIVILEGES_REPORTED = SeChangeNotifyPrivilege, SeCreateGlobalPrivilege, SeImpersonatePrivilege
+
+SYSTEM_SCOPE = 091a72e1d38341ca9eca0877b1625082
+SYSTEM_COUNTER_DISCOVERY = REAL_POWER_AVAILABLE
+SYSTEM_POWER_CATEGORY_PRESENT = true
+SYSTEM_ACCOUNT_SID = S-1-5-18
+SYSTEM_SESSION_ID = 0
+
+SECURITY_CONTEXT_DIFFERENTIAL = REAL_CONFIRMED
+MINIMUM_REQUIRED_CAPABILITY = UNRESOLVED
+PRODUCTION_ACCOUNT = UNRESOLVED
+NEXT_TASK = AMD-PRIVILEGE-I2D
+NEXT_GATE = HUMAN_MINIMUM_CAPABILITY_EXPERIMENT_REVIEW
+```
+
+The first forensic pass prioritizes `SeSystemProfilePrivilege` because it is
+reported enabled in SYSTEM and absent from the LocalService enabled set. A
+SYSTEM/Administrators group or AMD kernel device/object ACL remains a competing
+hypothesis. Read-only service-object DACLs were identical across the inspected
+AMD components, and the CLI/registry/file path was already usable from
+LocalService; neither observation proves the missing capability. No AMD device
+interface or device-object security descriptor was identified by the bounded
+read-only pass, so that evidence is explicitly limited rather than treated as
+negative proof.
+
+User-right assignment enumeration for the prioritized rights was attempted via
+read-only `LsaEnumerateAccountsWithUserRight` and returned
+`0xC0000022 / STATUS_ACCESS_DENIED` in the current shell. Token privilege
+presence, token enablement, and policy assignment therefore remain separate
+fields; policy assignment is unresolved.
+
+The I2D helper and synthetic parser contract are
+`tools/amd-privilege-qualification/i2d-readonly-forensics.ps1` and the existing
+offline qualification test. They perform no service, AMD, ACL, privilege,
+device, or production mutation. The prepared next step is a human review of a
+minimum-variable experiment, not a production account switch.
+
+```text
+REAL_AMD_RUNTIME_DURING_I2D = 0
+SERVICE_RUNTIME_DURING_I2D = 0
+SECURITY_MUTATIONS_DURING_I2D = 0
+PRODUCTION_ACCOUNT_SWITCH = NOT_AUTHORIZED
+```

@@ -208,8 +208,8 @@ AMD_PRIVILEGE_DEPLOYMENT = real bounded LocalService broker path qualified; AMD 
 AMD_LONG_LIVED_SESSION = planned
 AMD_TEMPERATURE_FREQUENCY = planned
 AMD_PRODUCTION_PROVIDER = planned
-NEXT_TASK = AMD-PRIVILEGE-I2C
-NEXT_GATE = HUMAN_SYSTEM_COUNTER_DISCOVERY_EXECUTION
+NEXT_TASK = AMD-PRIVILEGE-I2D
+NEXT_GATE = HUMAN_MINIMUM_CAPABILITY_EXPERIMENT_REVIEW
 EXECUTION_PLAN_SINGLE_CURRENT_STATE = PASS
 ```
 
@@ -228,7 +228,11 @@ IPC_CANDIDATE = WINDOWS_NAMED_PIPE
 MINIMUM_REQUIRED_WINDOWS_PRIVILEGES = UNPROVEN
 I2_REAL_RUNTIME_GATE_CONSUMED = true
 LOCAL_SERVICE_POWER_COUNTER_ACCESS = FAILED_OR_UNAVAILABLE
-NEXT_TASK = AMD-PRIVILEGE-I2C
+SYSTEM_POWER_COUNTER_ACCESS = AVAILABLE
+SECURITY_CONTEXT_DIFFERENTIAL = REAL_CONFIRMED
+MINIMUM_REQUIRED_CAPABILITY = UNRESOLVED
+PRODUCTION_ACCOUNT = UNRESOLVED
+NEXT_TASK = AMD-PRIVILEGE-I2D
 PRODUCTION_ADMISSION = NOT_COMPLETE
 ```
 
@@ -1093,12 +1097,13 @@ LOCAL_SERVICE_RUN_VALID = true
 FIRST_CLEANUP_RESULT_OVERWRITTEN = true
 ```
 
-I2C prepares exactly one future human-authorized SYSTEM comparison. It uses a
-distinct qualification-only service rather than mutating the LocalService
-contract:
+I2C originally prepared exactly one future human-authorized SYSTEM comparison.
+That comparison has now been executed once under the dedicated
+qualification-only service; the LocalService contract and production account
+decision remain unchanged:
 
 ```text
-SYSTEM_DIFFERENTIAL_SIDE = PREPARED / NOT_EXECUTED
+SYSTEM_DIFFERENTIAL_SIDE = REAL_COMPLETE
 SYSTEM_HARNESS_SERVICE = ResourceTimelineAmdSystemCounterQualification
 SYSTEM_ACCOUNT = NT AUTHORITY\SYSTEM
 SYSTEM_ACCOUNT_SID = S-1-5-18
@@ -1110,8 +1115,19 @@ SYSTEM_SAMPLING = false
 SYSTEM_SETUP_AND_DISCOVERY_ARE_COUPLED = true
 SYSTEM_SETUP_WRAPPER = run-admin-amd-system-counter-qualification.ps1
 SYSTEM_CLEANUP_WRAPPER = cleanup-admin-amd-system-counter-qualification.ps1
-SYSTEM_TOKEN_EVIDENCE_PREPARED = true
+SYSTEM_TOKEN_EVIDENCE = REAL_CAPTURED
 SYSTEM_CLEANUP_DUPLICATE_SAFE = true
+SYSTEM_SCOPE = 091a72e1d38341ca9eca0877b1625082
+SYSTEM_COUNTER_DISCOVERY = REAL_POWER_AVAILABLE
+SYSTEM_POWER_CATEGORY_PRESENT = true
+SYSTEM_NO_COUNTERS_DIAGNOSTIC = false
+SYSTEM_CLI_EXIT_CODE = 0
+SYSTEM_CLEANUP = PASS
+SYSTEM_SERVICE_REGISTRATION_PRESENT = false
+SYSTEM_BROKER_PROCESS_COUNT = 0
+SYSTEM_AMD_CLI_PROCESS_COUNT = 0
+SYSTEM_AMD_INSTALLATION_MUTATED = false
+SYSTEM_AMD_REGISTRY_MUTATED = false
 SYSTEM_ARTIFACT_SHA256 = 9E5A012B0A95C84DD28CD607D99EF43C9BC4D700683F33890CDE6C2108794AC3
 LOCAL_SERVICE_REAL_ARTIFACT_SHA256 = C9973BAAA01AF3C2673D8C70D8C7E626C577642505E6DFF7BA3C6026DEA63FB1
 ```
@@ -1139,10 +1155,10 @@ SERVICE_RUNTIME_DURING_PREPARATION = 0
 PRODUCTION_ACCOUNT_SELECTION = UNRESOLVED
 LOCAL_SERVICE_TO_SYSTEM_SWITCH = NOT_AUTHORIZED
 I2_REAL_RUNTIME_GATE_CONSUMED = true
-NEXT_GATE = HUMAN_SYSTEM_COUNTER_DISCOVERY_EXECUTION
+NEXT_GATE = HUMAN_MINIMUM_CAPABILITY_EXPERIMENT_REVIEW
 ```
 
-## AMD-PRIVILEGE-I2C SYSTEM PRE-RUN CLOSURE
+## HISTORICAL / SUPERSEDED — AMD-PRIVILEGE-I2C SYSTEM PRE-RUN CLOSURE
 
 The SYSTEM comparison remains a dedicated, non-IPC, non-sampling qualification
 path. Its setup wrapper now follows the safe Service SID ordering used by the
@@ -1171,3 +1187,217 @@ dedicated cleanup wrapper remains the only authorized removal path; counter
 discovery has not executed. The future Administrator wrapper intentionally
 consumes the coupled SYSTEM `timechart --list` comparison gate; there is no
 separate setup-only stage.
+
+## AMD-PRIVILEGE-I2D MINIMUM CAPABILITY ROOT-CAUSE FORENSICS
+
+I2D consumes the two immutable, human-authorized non-sampling counter-
+discovery results. It is read-only/offline forensic work; it does not repeat
+either run and does not grant a privilege, alter an ACL, or select a production
+service account.
+
+```text
+LOCAL_SERVICE_COUNTER_DISCOVERY = REAL_POWER_UNAVAILABLE
+LOCAL_SERVICE_SCOPE = 4b30b3d64b7e469cbce7c8080c84b7d4
+LOCAL_SERVICE_ACCOUNT = NT AUTHORITY\LOCAL SERVICE
+LOCAL_SERVICE_ACCOUNT_SID = S-1-5-19
+LOCAL_SERVICE_SESSION_ID = 0
+LOCAL_SERVICE_ARCHITECTURE = x64
+LOCAL_SERVICE_INTEGRITY = S-1-16-16384
+LOCAL_SERVICE_ENABLED_PRIVILEGES_REPORTED = SeChangeNotifyPrivilege, SeCreateGlobalPrivilege, SeImpersonatePrivilege
+LOCAL_SERVICE_POWER_CATEGORY_PRESENT = false
+LOCAL_SERVICE_NO_COUNTERS_DIAGNOSTIC = true
+LOCAL_SERVICE_CLI_EXIT_CODE = 0
+
+SYSTEM_COUNTER_DISCOVERY = REAL_POWER_AVAILABLE
+SYSTEM_SCOPE = 091a72e1d38341ca9eca0877b1625082
+SYSTEM_ACCOUNT = NT AUTHORITY\SYSTEM
+SYSTEM_ACCOUNT_SID = S-1-5-18
+SYSTEM_SESSION_ID = 0
+SYSTEM_ARCHITECTURE = x64
+SYSTEM_INTEGRITY = S-1-16-16384
+SYSTEM_POWER_CATEGORY_PRESENT = true
+SYSTEM_NO_COUNTERS_DIAGNOSTIC = false
+SYSTEM_CLI_EXIT_CODE = 0
+
+AMD_CLI_PATH = D:\apps\AMDuProf\bin\AMDuProfCLI.exe
+AMD_CLI_SHA256 = D0812D64963DD98F7C339CAC72F650461F95FF84E757A99767C7981B4111FBAC
+AMD_CLI_VERSION = 5.3.521.0
+AMD_CLI_SIGNATURE = VALID
+SECURITY_CONTEXT_DIFFERENTIAL = REAL_CONFIRMED
+MINIMUM_REQUIRED_CAPABILITY = UNRESOLVED
+PRODUCTION_ACCOUNT = UNRESOLVED
+NEXT_TASK = AMD-PRIVILEGE-I2D
+```
+
+The shared executable, path, version, signature, Session 0, x64 architecture,
+fixed `timechart --list` command, and machine installation are controlled
+inputs. The observed variable is the Windows security context. Exit code `0`
+is not interpreted as counter success: the LocalService stderr diagnostic is
+the authoritative `POWER_UNAVAILABLE` result, while the SYSTEM stdout exposes
+`Power [ Socket, Core ]`.
+
+### Normalized token differential and evidence limits
+
+The supplied context evidence establishes that `SeSystemProfilePrivilege` is
+enabled in the SYSTEM context and absent from the reported LocalService
+enabled-privilege set. The LocalService enabled set reported by the run is:
+
+```text
+LOCAL_SERVICE_ENABLED_ONLY = SeChangeNotifyPrivilege, SeCreateGlobalPrivilege, SeImpersonatePrivilege
+SYSTEM_ENABLED_ONLY = SeSystemProfilePrivilege (confirmed differential; complete SYSTEM set is not inferred here)
+COMMON_ENABLED_PRIVILEGES = NOT_RECONSTRUCTED_FROM_READABLE_SOURCE
+LOCAL_SERVICE_DISABLED_ONLY = NOT_RECONSTRUCTED
+SYSTEM_DISABLED_ONLY = NOT_RECONSTRUCTED
+LOCAL_SERVICE_GROUPS_ONLY = NOT_RECONSTRUCTED_FROM_READABLE_SOURCE
+SYSTEM_GROUPS_ONLY = NOT_RECONSTRUCTED_FROM_READABLE_SOURCE
+COMMON_GROUPS = NOT_RECONSTRUCTED
+```
+
+The explicitly reviewed identifiers are separated from inference:
+
+```text
+SeSystemProfilePrivilege = SYSTEM enabled / LocalService absent; high-priority hypothesis
+SeProfileSingleProcessPrivilege = assignment/token differential not established
+SeDebugPrivilege = assignment/token differential not established
+SeLockMemoryPrivilege = assignment/token differential not established
+SeCreatePermanentPrivilege = assignment/token differential not established
+BUILTIN\Administrators (S-1-5-32-544) = plausible SYSTEM-only group hypothesis; not treated as causal
+SYSTEM (S-1-5-18) = SYSTEM account identity; not treated as a sufficient explanation by itself
+```
+
+The read-only `LsaEnumerateAccountsWithUserRight` query was attempted for
+`SeSystemProfilePrivilege`, `SeProfileSingleProcessPrivilege`,
+`SeDebugPrivilege`, `SeLockMemoryPrivilege`, and
+`SeCreatePermanentPrivilege`. This execution context received NTSTATUS
+`0xC0000022` (`STATUS_ACCESS_DENIED`) for the account-assignment enumeration.
+Consequently, user-right assignment is recorded as unavailable rather than
+confused with privilege presence in a token. No LSA or local-policy mutation
+was attempted.
+
+### Installed AMD component and object forensics
+
+The bounded read-only inventory found the following installed backend pieces:
+
+```text
+AMDPowerProfiler = Running / kernel driver / Manual / AMDPowerProfiler.sys
+AMDCpuProfiler = Running / kernel driver / Manual / AMDCpuProfiler.sys
+AMDProfilerLoadService = Running / Win32 own process / Automatic / LocalSystem
+AmdPpkgSvc = Running / Win32 own process / Automatic / LocalSystem
+AMDProfilerService = not registered in the inspected service registry path
+```
+
+`AMDPowerProfiler`, `AMDProfilerLoadService`, and `AmdPpkgSvc` service-object
+security descriptors were the same in the read-only inspection. They grant
+the SYSTEM and Administrators principals broad service rights and grant
+`NT AUTHORITY\SERVICE` a limited service-control/read-style set. The service
+object DACL is therefore a separate hypothesis and is not evidence that the
+AMD device interface is accessible to LocalService. `sc.exe sdshow` was used;
+`sc.exe sdset` was not used. The inspected AMD service SID types were `NONE`.
+
+The AMD installation and driver files were readable/executable through the
+observed inherited ACLs for ordinary Users, and the real LocalService run
+already launched the same signed CLI and completed AMD installation identity
+validation. This makes a simple CLI installation-path, file-read, registry-
+discovery, or output-root explanation unlikely for the counter differential.
+The driver/service files and signed identities were inventoried without
+opening a device or sending an IOCTL.
+
+No AMD power device symbolic link, interface GUID, named kernel object, named
+pipe, or device-object security descriptor was identified by the bounded
+read-only PnP/INF/registry/static-string pass. This is a limitation, not proof
+that no such object exists. Device/object ACL access therefore remains an
+open, higher-value hypothesis than the already-discounted installation file
+path.
+
+### Ranked hypotheses
+
+| Candidate | Semantic plausibility | Access-control plausibility | Evidence strength | Testability | Security cost if granted |
+| --- | --- | --- | --- | --- | --- |
+| `SeSystemProfilePrivilege` | High | Medium/High | Medium | High | Medium/High |
+| AMD kernel device/object ACL | Medium/High | High | Low/Medium | High after interface identification | High |
+| SYSTEM/Administrators ACL path | Medium | High | Low/Medium | Medium | High |
+| AMD backend IPC or named-object ACL | Medium | Medium/High | Low | Medium | Medium/High |
+| AMD driver/service object ACL | Low/Medium | Medium | Low; inspected service DACLs are identical | Medium | High |
+| LocalSystem-specific vendor identity or token composition | Medium | Unknown | Low | Low/Medium | High |
+| registry/filesystem access | Low | Low for observed path | Medium/High against as root cause | High | Low/Medium |
+
+The narrow current classification is therefore:
+
+```text
+MOST_LIKELY_ROOT_CAUSE_CLASS = AMD_KERNEL_OR_BACKEND_SECURITY_BOUNDARY
+ROOT_CAUSE_CONFIDENCE = LOW_TO_MEDIUM
+SE_SYSTEM_PROFILE_PRIVILEGE_HYPOTHESIS = HIGH_PRIORITY_UNPROVEN
+ADMINISTRATORS_GROUP_HYPOTHESIS = PLAUSIBLE_UNPROVEN
+DEVICE_ACL_HYPOTHESIS = PLAUSIBLE_UNPROVEN
+MINIMUM_REQUIRED_CAPABILITY = UNRESOLVED
+PRODUCTION_ACCOUNT_SELECTION = UNRESOLVED
+LOCAL_SERVICE_TO_SYSTEM_SWITCH = NOT_AUTHORIZED
+```
+
+This does not establish that AMD requires LocalSystem, that
+`SeSystemProfilePrivilege` is sufficient, or that Administrators membership
+is causal.
+
+### Minimum-variable experiment plan (prepared, not authorized)
+
+The next experiment must be reviewed and explicitly authorized before any
+security mutation or real invocation. The preferred first candidate is an
+isolated qualification principal/service context with only the candidate
+profile-system-performance capability under test; it must not modify the
+production LocalService account or reuse the production broker. All other
+inputs remain the fixed CLI identity, Session 0, x64, working directory,
+`timechart --list`, timeout, job policy, bounded evidence, and cleanup.
+
+```text
+EXPERIMENT_1
+HYPOTHESIS = SeSystemProfilePrivilege is the missing capability
+CHANGE = dedicated isolated qualification context receives only that candidate right
+UNCHANGED = AMD CLI identity, command, machine, Session 0, x64, backend state, timeout, job policy
+EXPECTED_IF_CAUSAL = POWER_AVAILABLE
+EXPECTED_IF_NOT_CAUSAL = POWER_UNAVAILABLE
+REVERSIBILITY = remove the dedicated test assignment after the one bounded run
+SECURITY_COST = elevated profiling capability; human review required
+REAL_RUNTIME_REQUIRED = true (one non-sampling timechart --list only)
+HUMAN_AUTHORIZATION_REQUIRED = true
+
+EXPERIMENT_2
+HYPOTHESIS = identified AMD device/object ACL is the missing capability
+CHANGE = only the minimum identified object access on an isolated test principal
+UNCHANGED = all other token, command, installation, and service inputs
+EXPECTED_IF_CAUSAL = POWER_AVAILABLE
+EXPECTED_IF_NOT_CAUSAL = POWER_UNAVAILABLE
+REVERSIBILITY = remove the isolated object ACL after the one bounded run
+SECURITY_COST = high; do not prepare until an exact object/interface is identified
+REAL_RUNTIME_REQUIRED = true
+HUMAN_AUTHORIZATION_REQUIRED = true
+
+EXPERIMENT_3
+HYPOTHESIS = SYSTEM/Administrators ACL path is causal
+CHANGE = only an isolated group/ACL differential after object evidence supports it
+UNCHANGED = all fixed AMD and execution inputs
+EXPECTED_IF_CAUSAL = POWER_AVAILABLE
+EXPECTED_IF_NOT_CAUSAL = POWER_UNAVAILABLE
+REVERSIBILITY = dedicated test principal and bounded cleanup
+SECURITY_COST = high; lower priority than a single-right test
+REAL_RUNTIME_REQUIRED = true
+HUMAN_AUTHORIZATION_REQUIRED = true
+```
+
+No experiment above was executed by I2D. The repository now contains a
+read-only helper at
+`tools/amd-privilege-qualification/i2d-readonly-forensics.ps1`; it can emit a
+bounded JSON report, query user-right assignment without mutation, inspect
+fixed AMD service descriptors/files, and compare normalized token evidence. It
+never invokes AMD, starts/stops/creates a service, changes ACLs, or changes
+privileges. When protected ProgramData evidence is not readable to the
+current shell, it reports that limitation instead of substituting a different
+identity or attempting recovery mutation.
+
+```text
+REAL_AMD_RUNTIME_DURING_I2D = 0
+SERVICE_RUNTIME_DURING_I2D = 0
+SECURITY_MUTATIONS_DURING_I2D = 0
+AMD_DEVICE_IO_DURING_I2D = 0
+PRODUCTION_ACCOUNT_SWITCH = NOT_AUTHORIZED
+NEXT_GATE = HUMAN_MINIMUM_CAPABILITY_EXPERIMENT_REVIEW
+```

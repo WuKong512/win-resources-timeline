@@ -129,7 +129,7 @@ The fixed two-context plan is retained at
 `counter-discovery-differential-plan.json`; its SYSTEM entry is prepared until
 separately authorized.
 
-## I2C human handoff: SYSTEM counter-discovery comparison
+## HISTORICAL / SUPERSEDED I2C human handoff: SYSTEM counter-discovery comparison
 
 The LocalService differential side is complete real evidence at scope
 `4b30b3d64b7e469cbce7c8080c84b7d4`: the fixed non-sampling
@@ -138,36 +138,48 @@ The LocalService differential side is complete real evidence at scope
 duplicate cleanup invocation overwrote only the single cleanup summary; the
 discovery evidence and run validity remain preserved.
 
-I2C prepares one isolated SYSTEM comparison. It uses the distinct fixed
+I2C prepared one isolated SYSTEM comparison. It used the distinct fixed
 service `ResourceTimelineAmdSystemCounterQualification`, `LocalSystem`
 (`S-1-5-18`), Session 0, x64, a Service SID, broker-derived AMD CLI
 discovery, and the fixed arguments `timechart --list`. It has no named-pipe
 client, no sampling request, no arbitrary command surface, and no production
 integration. Setup and discovery are intentionally coupled: starting the
 dedicated service performs the one fixed non-sampling discovery operation.
-The commands below are a future human-authorized handoff only and were not run
-by this preparation:
+The one authorized comparison completed at scope
+`091a72e1d38341ca9eca0877b1625082` and reported `POWER_AVAILABLE`. Do not run
+the commands below again; they are retained as the historical execution shape
+only:
 
 ```powershell
-# Administrator x64 PowerShell — SYSTEM setup and the coupled non-sampling discovery
+# HISTORICAL command shape — already consumed; do not rerun
 Set-Location 'F:\File\codex\codex-worktrees\ac74\resource-timeline'
 & '.\tools\amd-privilege-qualification\run-admin-amd-system-counter-qualification.ps1'
 
 # No standard-user client and no named-pipe IPC are used for the SYSTEM comparison.
 
-# Administrator x64 PowerShell — exact SYSTEM cleanup, after the bounded run
+# Historical cleanup command shape — already consumed; do not rerun
 Set-Location 'F:\File\codex\codex-worktrees\ac74\resource-timeline'
 & '.\tools\amd-privilege-qualification\cleanup-admin-amd-system-counter-qualification.ps1'
 ```
 
-The SYSTEM run must remain isolated in its own evidence root and produce
+The completed SYSTEM run remained isolated in its own evidence root and
+produced
 `SYSTEM-SERVICE-CONTEXT.json`, `CLI-ARTIFACT-IDENTITY.json`,
 `AMD-COUNTER-DISCOVERY-LAUNCH.json`,
 `AMD-COUNTER-DISCOVERY-RESULT.json`, bounded stdout/stderr, and unique
 `SYSTEM-CLEANUP-RESULT-<timestamp>-<id>.json` cleanup evidence. The cleanup
-wrapper never overwrites a previous cleanup attempt and never kills an
-unrelated process. A SYSTEM result can inform the privilege differential; it
-cannot select LocalSystem as the production account.
+wrapper never overwrote a previous cleanup attempt and never killed an
+unrelated process. The SYSTEM result informs the privilege differential; it
+does not select LocalSystem as the production account.
+
+```text
+SYSTEM_COUNTER_DISCOVERY = REAL_POWER_AVAILABLE
+SYSTEM_SCOPE = 091a72e1d38341ca9eca0877b1625082
+SYSTEM_CLEANUP = PASS
+SYSTEM_SERVICE_REGISTRATION_FINAL = absent
+SYSTEM_BROKER_PROCESS_FINAL = 0
+SYSTEM_REAL_RUN_CONSUMED = true
+```
 
 ## Frozen future-run artifact
 
@@ -179,9 +191,9 @@ LOCAL_SERVICE_REAL_ARTIFACT_SHA256 = C9973BAAA01AF3C2673D8C70D8C7E626C577642505E
 LOCAL_SERVICE_ARTIFACT_STATUS = historical / used by completed LocalService run
 ```
 
-The dedicated SYSTEM comparison wrapper is pinned to a new offline release
-artifact; changing that binary requires rebuilding and recording a new hash
-before the human-authorized SYSTEM comparison execution:
+The dedicated SYSTEM comparison wrapper is pinned to the offline release
+artifact used by the completed SYSTEM comparison. Changing that binary
+requires rebuilding and recording a new hash before any future comparison:
 
 ```text
 path = tools/amd-privilege-qualification/target/release/amd-privilege-qualification.exe
@@ -189,17 +201,35 @@ architecture = x64
 build_mode = release / cargo --offline
 sha256 = 9E5A012B0A95C84DD28CD607D99EF43C9BC4D700683F33890CDE6C2108794AC3
 system_wrapper = run-admin-amd-system-counter-qualification.ps1
-system_artifact_status = new offline SYSTEM-comparison artifact / not executed
+system_artifact_status = historical artifact used by completed SYSTEM comparison
 broker_authenticode = NotSigned; exact SHA-256 is required by the SYSTEM wrapper
 ```
 
 The existing LocalService wrappers remain pinned to the historical C9973...
-hash and therefore fail closed against the newly built SYSTEM-comparison
-binary; do not use them to retry the consumed LocalService run. The active I2B
-handoff remains the non-sampling LocalService sequence above, while the I2C
-SYSTEM handoff uses only the dedicated Administrator setup and cleanup
-wrappers. The older sampling wrapper must not be substituted for either
-counter-discovery handoff:
+hash and therefore fail closed against the SYSTEM-comparison binary; do not
+use them to retry the consumed LocalService run. The older sampling wrapper
+must not be substituted for either counter-discovery path:
 
 `run-standard-user-amd-privilege-client.ps1` remains preserved as the
 historical **I2 POWER-SAMPLING CLIENT**, not an active I2B command.
+
+## I2D read-only minimum-capability forensics
+
+I2D compares the completed LocalService result with the completed SYSTEM
+result. It does not execute AMD, open a device, register a service, or mutate
+ACLs, privileges, policy, or production configuration. The repository-native
+helper is read-only and emits JSON to the console; it reports protected
+evidence as unavailable rather than attempting recovery:
+
+```powershell
+Set-Location 'F:\File\codex\codex-worktrees\ac74\resource-timeline'
+& '.\tools\amd-privilege-qualification\i2d-readonly-forensics.ps1'
+```
+
+The helper inventories fixed AMD service/file metadata and service DACLs,
+attempts read-only user-right assignment enumeration, and compares normalized
+token evidence when the two context JSON files are readable. It never invokes
+`AMDuProfCLI.exe`, `sc.exe create/start/stop/delete`, `sc.exe sdset`,
+`Set-Acl`, or an LSA privilege-assignment API. Current classification is
+`MINIMUM_REQUIRED_CAPABILITY = UNRESOLVED`; the next gate is
+`HUMAN_MINIMUM_CAPABILITY_EXPERIMENT_REVIEW`.

@@ -13,12 +13,14 @@ $Binary = Join-Path $ToolRoot 'target\debug\amd-privilege-qualification.exe'
 $ScArgumentContract = Join-Path $ToolRoot 'sc-argument-contract.ps1'
 $TokenIntegrityContract = Join-Path $ToolRoot 'token-integrity-contract.ps1'
 $CleanupStateContract = Join-Path $ToolRoot 'cleanup-state-contract.ps1'
+$I2dForensics = Join-Path $ToolRoot 'i2d-readonly-forensics.ps1'
 $WindowsSource = Join-Path $ToolRoot 'src\windows.rs'
 
 foreach ($wrapper in @(
         $ScArgumentContract,
         $TokenIntegrityContract,
         $CleanupStateContract,
+        $I2dForensics,
         (Join-Path $ToolRoot 'run-admin-amd-privilege-qualification.ps1'),
         (Join-Path $ToolRoot 'run-admin-amd-system-counter-qualification.ps1'),
         (Join-Path $ToolRoot 'run-standard-user-amd-privilege-client.ps1'),
@@ -244,6 +246,62 @@ Write-Host 'SYSTEM_CLEANUP_DUPLICATE_SAFE=PASS'
 Write-Host 'SYSTEM_WRAPPER_NEW_ARTIFACT_HASH=PASS'
 Write-Host 'LOCALSERVICE_HISTORICAL_ARTIFACT_HASH_PRESERVED=PASS'
 
+$i2dForensicsSource = Get-Content -LiteralPath $I2dForensics -Raw
+foreach ($requiredI2dContract in @(
+        'amd-privilege-i2d-readonly-forensics/v1',
+        'LsaEnumerateAccountsWithUserRight',
+        "'sdshow'",
+        "'qsidtype'",
+        'Get-AuthenticodeSignature',
+        'no_service_mutation',
+        'no_acl_mutation',
+        'no_privilege_mutation',
+        'ConvertTo-I2dTokenEvidence',
+        'Compare-I2dTokenEvidence'
+    )) {
+    if ($i2dForensicsSource -notmatch [regex]::Escape($requiredI2dContract)) {
+        throw "I2D read-only forensics contract is missing: $requiredI2dContract"
+    }
+}
+if ($i2dForensicsSource -match '(?i)\b(Start-Service|Stop-Service|Restart-Service|Set-Service|New-Service|Set-Acl|sc\.exe\s+(`"?)(create|start|stop|delete|sdset)|secedit|ntrights|LsaAddAccountRights)\b') {
+    throw 'I2D forensics must not contain service, ACL, privilege, or security-policy mutation commands.'
+}
+if ($i2dForensicsSource -match '(?i)\b(Start-Process|AMDuProfCLI\.exe\s+timechart|CreateProcess)\b') {
+    throw 'I2D forensics must not execute AMD or launch a child process.'
+}
+. $I2dForensics -NoExecute
+$syntheticLocalToken = [pscustomobject]@{
+    account_sid = 'S-1-5-19'
+    service_sid = 'S-1-5-80-synthetic-local'
+    session_id = 0
+    integrity_sid = 'S-1-16-16384'
+    token_elevated = $true
+    process_architecture = 'x64'
+    enabled_privileges = @('SeChangeNotifyPrivilege', 'SeCreateGlobalPrivilege', 'SeImpersonatePrivilege')
+    disabled_privileges = @('SeSystemProfilePrivilege')
+    token_groups_relevant_to_access = @('S-1-5-19', 'NT AUTHORITY\SERVICE')
+}
+$syntheticSystemToken = [pscustomobject]@{
+    account_sid = 'S-1-5-18'
+    service_sid = $null
+    session_id = 0
+    integrity_sid = 'S-1-16-16384'
+    token_elevated = $true
+    process_architecture = 'x64'
+    enabled_privileges = @('SeChangeNotifyPrivilege', 'SeCreateGlobalPrivilege', 'SeImpersonatePrivilege', 'SeSystemProfilePrivilege')
+    disabled_privileges = @('SeDebugPrivilege')
+    token_groups_relevant_to_access = @('S-1-5-18', 'S-1-5-32-544', 'BUILTIN\Administrators')
+}
+$syntheticI2dDiff = Compare-I2dTokenEvidence -LocalService $syntheticLocalToken -System $syntheticSystemToken
+if ($syntheticI2dDiff.enabled_privileges.right_only -notcontains 'SeSystemProfilePrivilege' -or
+    $syntheticI2dDiff.groups.right_only -notcontains 'S-1-5-32-544' -or
+    $syntheticI2dDiff.enabled_privileges.left_only.Count -ne 0) {
+    throw 'I2D token differential parser failed its synthetic set-difference contract.'
+}
+Write-Host 'I2D_READ_ONLY_FORENSICS_CONTRACT=PASS'
+Write-Host 'I2D_TOKEN_DIFFERENTIAL_PARSER=PASS'
+Write-Host 'I2D_NO_SECURITY_MUTATION_SURFACE=PASS'
+
 $windowsSourceText = Get-Content -LiteralPath $WindowsSource -Raw
 if ($windowsSourceText -match 'error\.code\(\)\.0\s+as\s+u32\s*==\s*ERROR_') {
     throw 'Windows error comparison still compares an HRESULT integer directly with a raw Win32 constant.'
@@ -363,7 +421,7 @@ Write-Host 'COUNTER_DISCOVERY_CLIENT_WRAPPER_IS_NON_SAMPLING=PASS'
 
 $readmeSource = Get-Content -LiteralPath (Join-Path $ToolRoot 'README.md') -Raw
 $i2bStart = $readmeSource.IndexOf('## I2B human handoff: non-sampling counter discovery')
-$i2cStart = $readmeSource.IndexOf('## I2C human handoff: SYSTEM counter-discovery comparison')
+$i2cStart = $readmeSource.IndexOf('## HISTORICAL / SUPERSEDED I2C human handoff: SYSTEM counter-discovery comparison')
 if ($i2bStart -lt 0 -or $i2cStart -le $i2bStart) {
     throw 'README does not contain a bounded I2B handoff section.'
 }
@@ -374,11 +432,19 @@ if ($activeI2bHandoff -notmatch 'run-standard-user-amd-counter-discovery\.ps1' -
 }
 if ($readmeSource -notmatch 'run-admin-amd-system-counter-qualification\.ps1' -or
     $readmeSource -notmatch 'cleanup-admin-amd-system-counter-qualification\.ps1' -or
-    $readmeSource -notmatch 'NOT_EXECUTED / HUMAN_AUTHORIZATION_REQUIRED') {
-    throw 'README SYSTEM comparison handoff is incomplete.'
+    $readmeSource -notmatch 'SYSTEM_REAL_RUN_CONSUMED = true' -or
+    $readmeSource -notmatch 'POWER_AVAILABLE') {
+    throw 'README SYSTEM comparison completion record is incomplete.'
 }
 Write-Host 'README_I2B_NON_SAMPLING_HANDOFF=PASS'
-Write-Host 'README_SYSTEM_HANDOFF_NOT_EXECUTED=PASS'
+Write-Host 'README_SYSTEM_COMPLETION_RECORD=PASS'
+
+$i2dStart = $readmeSource.IndexOf('## I2D read-only minimum-capability forensics')
+if ($i2dStart -lt 0 -or $readmeSource.Substring($i2dStart) -notmatch 'i2d-readonly-forensics\.ps1' -or
+    $readmeSource.Substring($i2dStart) -notmatch 'MINIMUM_REQUIRED_CAPABILITY = UNRESOLVED') {
+    throw 'README I2D read-only forensics handoff is incomplete.'
+}
+Write-Host 'README_I2D_READ_ONLY_FORENSICS=PASS'
 
 foreach ($requiredTokenDifferentialContract in @(
         'TokenPrivileges',

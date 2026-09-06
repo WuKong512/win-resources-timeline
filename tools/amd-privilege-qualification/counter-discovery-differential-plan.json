@@ -49,14 +49,22 @@
       "account": "NT AUTHORITY\\LOCAL SERVICE",
       "account_sid": "S-1-5-19",
       "session_id": 0,
-      "execution": "HUMAN_AUTHORIZATION_REQUIRED"
+      "execution": "REAL_COMPLETE",
+      "scope": "4b30b3d64b7e469cbce7c8080c84b7d4",
+      "counter_discovery_result": "POWER_UNAVAILABLE",
+      "power_category_present": false,
+      "cli_exit_code": 0
     },
     {
       "label": "SYSTEM",
       "account": "NT AUTHORITY\\SYSTEM",
       "account_sid": "S-1-5-18",
       "session_id": 0,
-      "execution": "HUMAN_AUTHORIZATION_REQUIRED"
+      "execution": "REAL_COMPLETE",
+      "scope": "091a72e1d38341ca9eca0877b1625082",
+      "counter_discovery_result": "POWER_AVAILABLE",
+      "power_category_present": true,
+      "cli_exit_code": 0
     }
   ],
   "token_evidence_fields": [
@@ -82,6 +90,16 @@
     "setup_wrapper": "run-admin-amd-system-counter-qualification.ps1",
     "cleanup_wrapper": "cleanup-admin-amd-system-counter-qualification.ps1",
     "artifact_sha256": "9E5A012B0A95C84DD28CD607D99EF43C9BC4D700683F33890CDE6C2108794AC3",
-    "execution": "PREPARED / HUMAN_AUTHORIZATION_REQUIRED / NOT_EXECUTED"
+    "execution": "REAL_COMPLETE",
+    "scope": "091a72e1d38341ca9eca0877b1625082",
+    "counter_discovery_result": "POWER_AVAILABLE",
+    "power_category_present": true,
+    "cli_exit_code": 0,
+    "cleanup": "PASS",
+    "service_registration_final": "absent",
+    "broker_process_count_final": 0,
+    "amd_cli_process_count_final": 0,
+    "amd_installation_mutated": false,
+    "amd_registry_mutated": false
   }
 }
