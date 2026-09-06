@@ -1158,6 +1158,66 @@ I2_REAL_RUNTIME_GATE_CONSUMED = true
 NEXT_GATE = HUMAN_ELEVATED_READ_ONLY_I2D_EVIDENCE_COLLECTION
 ```
 
+## PR22 AMD-I2E treatment pre-run review closure
+
+PR #22's two confirmed treatment blockers are closed offline. The immutable
+real CONTROL evidence remains authoritative (`POWER_UNAVAILABLE`) and was not
+repeated; treatment remains pending human authorization.
+
+```text
+PR_22_REVIEW = CLOSED_OFFLINE
+BLOCKER_1 = TREATMENT_CURRENT_AMD_CLI_IDENTITY_NOT_REVALIDATED
+BLOCKER_1_STATUS = CLOSED_OFFLINE
+CONTROL_AMD_CLI_PREFLIGHT = PRESERVED
+TREATMENT_AMD_CLI_REVALIDATION = PREPARED_BEFORE_LSA_MUTATION
+AMD_CLI_PATH_MATCH_REQUIRED = true
+AMD_CLI_SHA256_MATCH_REQUIRED = true
+AMD_CLI_ARCHITECTURE_MATCH_REQUIRED = true
+AMD_CLI_SIGNATURE_VALID_REQUIRED = true
+AMD_CLI_SIGNER_MATCH_REQUIRED = true
+AMD_IDENTITY_GATE_BEFORE_LSA_MUTATION = PASS
+BLOCKER_2 = ROLLBACK_POLICY_VERIFICATION_CAN_PRECEDE_EFFECTIVE_TOKEN_TEARDOWN
+BLOCKER_2_STATUS = CLOSED_OFFLINE
+POLICY_ROLLBACK_VERIFIED_SEPARATE = PASS
+EFFECTIVE_TOKEN_TEARDOWN_VERIFIED_SEPARATE = PASS
+FULL_SECURITY_ROLLBACK = PASS
+FULL_ROLLBACK_REQUIRES_SERVICE_PID0 = true
+FULL_ROLLBACK_REQUIRES_OWNED_PROCESS_ABSENCE = true
+FULL_ROLLBACK_REQUIRES_LSA_DUAL_READBACK = true
+FAILED_STOP_DOES_NOT_CLAIM_FULL_ROLLBACK = PASS
+CONTROL_RERUN = FORBIDDEN
+CONTROL_REAL_EXECUTION = REAL_COMPLETE
+CONTROL_RESULT = POWER_UNAVAILABLE
+TREATMENT_REAL_EXECUTION = 0
+REAL_LSA_MUTATION_DURING_REPAIR = 0
+REAL_SERVICE_RUNTIME_DURING_REPAIR = 0
+REAL_AMD_RUNTIME_DURING_REPAIR = 0
+FROZEN_QUALIFICATION_ARTIFACT_SHA256 = 871CD20D228BD9510606DE640F516F62C2983B9F4A83C1AA807BA35329C778B9
+ARTIFACT_CHANGED = false
+NEXT_GATE = HUMAN_I2E_TREATMENT_ONLY_RESUME_REVIEW
+```
+
+Before any future treatment mutation, both the treatment-only resume and the
+paired runner perform a fresh read-only AMD CLI preflight and compare its
+registry-derived path, installation root, SHA-256, x64 architecture, valid
+signature, AMD signer match, subject, and issuer with the immutable CONTROL
+preflight. A failing comparison writes bounded evidence and stops before LSA
+mutation, service start, or AMD execution.
+
+Rollback evidence now separates exact LSA policy removal from effective token
+teardown. The service is stopped and verified as `Stopped / PID0`, owned broker
+and AMD CLI processes must be absent, and both LSA readback directions must
+confirm the exact Service SID right is gone before `full_rollback_verified` or
+the compatibility `rollback_verified` field can become true. Failed stop or
+failed policy verification retains the CURRENT pointer and cannot close the
+experiment.
+
+```text
+PR22_BODY_TESTING_STATUS = UPDATED
+REAL_CONTROL_EVIDENCE = PRESERVED
+TREATMENT = PENDING_HUMAN_AUTHORIZATION
+```
+
 ## HISTORICAL / SUPERSEDED — AMD-PRIVILEGE-I2C SYSTEM PRE-RUN CLOSURE
 
 The SYSTEM comparison remains a dedicated, non-IPC, non-sampling qualification

@@ -269,31 +269,133 @@ function Write-I2eTreatmentMutationApplied {
 function Invoke-I2eTreatmentRollback {
     param(
         [Parameter(Mandatory = $true)][string]$ServiceSid,
-        [Parameter(Mandatory = $true)][string]$ExperimentRoot
+        [Parameter(Mandatory = $true)][string]$ExperimentRoot,
+        [Parameter(Mandatory = $true)][bool]$RightAddedByExperiment
     )
-    Remove-I2eExactServiceProfileRight -ServiceSid $ServiceSid
-    $direct = Get-I2eDirectAccountRightsSnapshot -Label 'treatment-after-rollback' -Sid $ServiceSid
-    $assigned = Get-I2eUserRightAssignmentSnapshot -Right $I2eRequiredRight
-    if ($direct.status -ne 'READ' -or $assigned.status -ne 'READ' -or
-        @($direct.direct_rights) -contains $I2eRequiredRight -or
-        @($assigned.assigned_principals) -contains $ServiceSid) {
-        throw 'Treatment exact-right rollback was not verified in both directions.'
+
+    $stopResult = $null
+    $stopError = $null
+    try {
+        $stopResult = Stop-I2eService
+    } catch {
+        $stopError = $_.Exception.Message
     }
-    Write-I2eJson -Path (Join-Path $ExperimentRoot 'SECURITY-MUTATION-ROLLBACK.json') -Value ([ordered]@{
+
+    $service = $null
+    $serviceState = 'UNKNOWN'
+    $serviceProcessId = -1L
+    try {
+        $service = Get-I2eResumeServiceConfiguration
+        if ($null -eq $service) {
+            $serviceState = 'ABSENT'
+            $serviceProcessId = 0L
+        } else {
+            $serviceState = [string]$service.state
+            $serviceProcessId = [int64]$service.process_id
+        }
+    } catch {
+        $stopError = if ($null -eq $stopError) { $_.Exception.Message } else { '{0}; service-state-read: {1}' -f $stopError, $_.Exception.Message }
+    }
+    $ownedBrokerCount = @(Get-I2eResumeOwnedBrokerProcesses).Count
+    $amdCliCount = @(Get-I2eResumeAmdProcesses).Count
+
+    $direct = $null
+    $assigned = $null
+    $policyRemoveAttempted = $false
+    $policyRollbackVerified = -not $RightAddedByExperiment
+    $policyError = $null
+    if ($RightAddedByExperiment) {
+        $policyRemoveAttempted = $true
+        try {
+            Remove-I2eExactServiceProfileRight -ServiceSid $ServiceSid
+            $direct = Get-I2eDirectAccountRightsSnapshot -Label 'treatment-after-rollback' -Sid $ServiceSid
+            $assigned = Get-I2eUserRightAssignmentSnapshot -Right $I2eRequiredRight
+            $policyRollbackVerified = $direct.status -eq 'READ' -and $assigned.status -eq 'READ' -and
+                @($direct.direct_rights) -notcontains $I2eRequiredRight -and
+                @($assigned.assigned_principals) -notcontains $ServiceSid
+            if (-not $policyRollbackVerified) {
+                $policyError = 'Treatment exact-right rollback was not verified in both LSA readback directions.'
+            }
+        } catch {
+            $policyError = $_.Exception.Message
+            $policyRollbackVerified = $false
+        }
+    }
+
+    $verification = Get-I2eRollbackVerification `
+        -PolicyRollbackVerified $policyRollbackVerified `
+        -ServicePresent ($null -ne $service) `
+        -ServiceState $serviceState `
+        -ServiceProcessId $serviceProcessId `
+        -OwnedBrokerProcessCount $ownedBrokerCount `
+        -AmdCliProcessCount $amdCliCount
+    $serviceRemoved = $false
+    $serviceRemovalError = $null
+    $rollbackEvidencePath = Join-Path $ExperimentRoot 'SECURITY-MUTATION-ROLLBACK.json'
+    $writeRollbackEvidence = {
+        param([bool]$CurrentServiceRemoved)
+        $evidence = [ordered]@{
         schema = 'amd-service-profile-security-mutation-rollback/v1'
         qualification_only = $true
         experiment_id = $ExpectedExperimentId
         service_name = $ServiceName
         service_sid = $ServiceSid
         right = $I2eRequiredRight
-        right_added_by_experiment = $true
+        right_added_by_experiment = $RightAddedByExperiment
         all_rights = $false
+        service_stop_attempted = $true
+        service_stop_verified = $verification.service_stop_verified
+        service_state_after_stop = $serviceState
+        service_pid_after_stop = $serviceProcessId
+        owned_broker_process_count_after_stop = $ownedBrokerCount
+        amd_cli_process_count_after_stop = $amdCliCount
+        policy_remove_attempted = $policyRemoveAttempted
+        policy_right_removed = $policyRollbackVerified
+        policy_rollback_verified = $policyRollbackVerified
+        effective_token_teardown_verified = $verification.effective_token_teardown_verified
+        full_rollback_verified = $verification.full_rollback_verified
+        service_registration_removed = $CurrentServiceRemoved
         rollback_at_utc = [DateTime]::UtcNow.ToString('o')
-        rollback_verified = $true
+        rollback_verified = $verification.full_rollback_verified
         direct_verification = $direct
         assignment_verification = $assigned
-    })
-    $true
+        }
+        if ($null -ne $stopError) { $evidence.stop_error = $stopError }
+        if ($null -ne $policyError) { $evidence.policy_error = $policyError }
+        if ($null -ne $serviceRemovalError) { $evidence.service_removal_error = $serviceRemovalError }
+        Write-I2eJson -Path $rollbackEvidencePath -Value $evidence
+    }
+    & $writeRollbackEvidence $false
+
+    if ($verification.full_rollback_verified -and $null -ne $service) {
+        try {
+            Remove-I2eService
+            $serviceRemoved = $true
+        } catch {
+            $serviceRemovalError = $_.Exception.Message
+        }
+        & $writeRollbackEvidence $serviceRemoved
+    }
+
+    [pscustomobject]@{
+        stop_result = $stopResult
+        service_stop_attempted = $true
+        service_stop_verified = [bool]$verification.service_stop_verified
+        service_state_after_stop = $serviceState
+        service_pid_after_stop = $serviceProcessId
+        owned_broker_process_count_after_stop = $ownedBrokerCount
+        amd_cli_process_count_after_stop = $amdCliCount
+        policy_remove_attempted = $policyRemoveAttempted
+        policy_rollback_verified = [bool]$policyRollbackVerified
+        effective_token_teardown_verified = [bool]$verification.effective_token_teardown_verified
+        full_rollback_verified = [bool]$verification.full_rollback_verified
+        service_registration_removed = $serviceRemoved -or $null -eq $service
+        direct_verification = $direct
+        assignment_verification = $assigned
+        stop_error = $stopError
+        policy_error = $policyError
+        service_removal_error = $serviceRemovalError
+    }
 }
 
 function Close-I2eTreatmentPointer {
@@ -315,6 +417,9 @@ function Close-I2eTreatmentPointer {
     $final.treatment_executed = $true
     $final.treatment_result = $TreatmentResult
     $final.right_added_by_experiment = $true
+    $final.policy_rollback_verified = $true
+    $final.effective_token_teardown_verified = $true
+    $final.full_rollback_verified = $true
     $final.rollback_verified = $true
     $final.paired_gate_consumed = $true
     $final.experiment_closed = $true
@@ -367,15 +472,46 @@ $serviceGate = Assert-I2eTreatmentResumeServiceGate
 Assert-I2eTreatmentResumeNoOwnedProcesses
 Assert-I2eTreatmentEvidenceAbsent
 $controlEvidence = Get-I2eControlRecoveryEvidence -Pointer $pointer
-$amdPreflight = Read-I2eResumeEvidence -Path (Join-Path (Join-Path $QualificationRoot $ExpectedExperimentId) 'AMD-CLI-PREFLIGHT.json')
-if (-not (Test-I2eResumeBoolean (Get-I2eResumeProperty $amdPreflight 'preflight_pass') $true)) {
-    throw 'Existing AMD CLI preflight did not pass; refusing treatment.'
+$experimentRoot = Join-Path $QualificationRoot $ExpectedExperimentId
+$controlAmdPreflightPath = Join-Path $experimentRoot 'AMD-CLI-PREFLIGHT.json'
+$controlAmdPreflight = Read-I2eResumeEvidence -Path $controlAmdPreflightPath
+$currentAmdPreflight = [pscustomobject]@{ preflight_pass = $false }
+$amdPreflightError = $null
+try {
+    $currentAmdPreflight = Get-I2eAmdCliPreflight
+} catch {
+    $amdPreflightError = $_.Exception.Message
+}
+$amdPreflightComparison = Compare-I2eAmdCliPreflight -Control $controlAmdPreflight -Current $currentAmdPreflight
+$amdPreflightEvidence = [ordered]@{
+    schema = 'amd-service-profile-treatment-amd-cli-preflight/v1'
+    qualification_only = $true
+    experiment_id = $ExpectedExperimentId
+    control_preflight_path = $controlAmdPreflightPath
+    control_identity = $controlAmdPreflight
+    current_identity = $currentAmdPreflight
+    comparison = $amdPreflightComparison.comparison
+    differing_fields = @($amdPreflightComparison.differing_fields)
+    pass = ($null -eq $amdPreflightError -and [bool]$amdPreflightComparison.pass)
+    recorded_at_utc = [DateTime]::UtcNow.ToString('o')
+}
+if ($null -ne $amdPreflightError) {
+    $amdPreflightEvidence.error = $amdPreflightError
+}
+Write-I2eJson -Path (Join-Path $experimentRoot 'TREATMENT-AMD-CLI-PREFLIGHT.json') -Value $amdPreflightEvidence
+if (-not $amdPreflightEvidence.pass) {
+    $details = if ($null -ne $amdPreflightError) { $amdPreflightError } else { ($amdPreflightComparison.differing_fields -join ', ') }
+    throw ('AMD CLI identity changed between CONTROL and TREATMENT; refusing LSA mutation. Differences: {0}' -f $details)
 }
 $before = Assert-I2eTreatmentResumeSecurityGate -ServiceSid $ExpectedServiceSid
-$experimentRoot = Join-Path $QualificationRoot $ExpectedExperimentId
 Write-I2eControlRecovery -Pointer $pointer -ControlEvidence $controlEvidence
 $pointer.right_mutation_state = 'STARTING'
 $pointer.state = 'RIGHT_MUTATION_PENDING'
+$pointer.policy_rollback_verified = $false
+$pointer.effective_token_teardown_verified = $false
+$pointer.full_rollback_verified = $false
+$pointer.service_registration_removed = $false
+$pointer.rollback_verified = $false
 Write-I2eJson -Path $PointerPath -Value $pointer
 $rightAdded = $false
 $treatment = $null
@@ -412,15 +548,31 @@ catch {
 finally {
     try {
         if ($rightAdded) {
-            $rollbackVerified = Invoke-I2eTreatmentRollback -ServiceSid $ExpectedServiceSid -ExperimentRoot $experimentRoot
+            $rollbackResult = Invoke-I2eTreatmentRollback `
+                -ServiceSid $ExpectedServiceSid `
+                -ExperimentRoot $experimentRoot `
+                -RightAddedByExperiment $true
+            $rollbackVerified = [bool]$rollbackResult.full_rollback_verified
+            $pointer.policy_rollback_verified = $rollbackResult.policy_rollback_verified
+            $pointer.effective_token_teardown_verified = $rollbackResult.effective_token_teardown_verified
+            $pointer.full_rollback_verified = $rollbackResult.full_rollback_verified
+            $pointer.service_stop_attempted = $rollbackResult.service_stop_attempted
+            $pointer.service_stop_verified = $rollbackResult.service_stop_verified
+            $pointer.service_state_after_stop = $rollbackResult.service_state_after_stop
+            $pointer.service_pid_after_stop = $rollbackResult.service_pid_after_stop
+            $pointer.owned_broker_process_count_after_stop = $rollbackResult.owned_broker_process_count_after_stop
+            $pointer.amd_cli_process_count_after_stop = $rollbackResult.amd_cli_process_count_after_stop
+            $pointer.service_registration_removed = $rollbackResult.service_registration_removed
             $pointer.rollback_verified = $rollbackVerified
-            $pointer.right_mutation_state = 'ROLLED_BACK'
+            if ($rollbackResult.policy_rollback_verified) { $pointer.right_mutation_state = 'ROLLED_BACK' }
+            if ($rollbackResult.full_rollback_verified) { $pointer.state = 'FULL_ROLLBACK_COMPLETE' }
+            elseif ($rollbackResult.policy_rollback_verified) { $pointer.state = 'POLICY_ROLLBACK_COMPLETE' }
+            else { $pointer.state = 'SERVICE_STOP_OR_POLICY_ROLLBACK_PENDING' }
+            if (-not $rollbackResult.full_rollback_verified -or -not $rollbackResult.service_registration_removed) {
+                $cleanupError = [Exception]::new('I2E treatment cleanup did not prove full rollback and service removal; CURRENT pointer retained.')
+            }
         }
-        $pointer.rollback_verified = $rollbackVerified
-        if ($rollbackVerified) { $pointer.state = 'ROLLBACK_COMPLETE' }
         Write-I2eJson -Path $PointerPath -Value $pointer
-        Stop-I2eService | Out-Null
-        Remove-I2eService
     }
     catch { $cleanupError = $_.Exception }
 }

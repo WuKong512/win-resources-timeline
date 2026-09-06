@@ -373,6 +373,60 @@ closed when either direct-root discovery file is absent, and synthetic tests
 reject a nested-only layout. Historical CONTROL evidence is not moved or
 rewritten; the next gate remains the treatment-only human invocation above.
 
+### PR #22 treatment pre-run review closure
+
+The two confirmed PR blockers are now closed offline. The real CONTROL phase
+remains immutable authoritative evidence (`POWER_UNAVAILABLE`); it was not
+rerun, and TREATMENT remains pending human authorization.
+
+```text
+PR_22_REVIEW = CLOSED_OFFLINE
+BLOCKER_1 = TREATMENT_CURRENT_AMD_CLI_IDENTITY_NOT_REVALIDATED
+BLOCKER_1_STATUS = CLOSED_OFFLINE
+CONTROL_AMD_CLI_PREFLIGHT = PRESERVED
+TREATMENT_AMD_CLI_REVALIDATION = PREPARED_BEFORE_LSA_MUTATION
+AMD_CLI_PATH_MATCH_REQUIRED = true
+AMD_CLI_SHA256_MATCH_REQUIRED = true
+AMD_CLI_ARCHITECTURE_MATCH_REQUIRED = true
+AMD_CLI_SIGNATURE_VALID_REQUIRED = true
+AMD_CLI_SIGNER_MATCH_REQUIRED = true
+AMD_IDENTITY_GATE_BEFORE_LSA_MUTATION = PASS
+BLOCKER_2 = ROLLBACK_POLICY_VERIFICATION_CAN_PRECEDE_EFFECTIVE_TOKEN_TEARDOWN
+BLOCKER_2_STATUS = CLOSED_OFFLINE
+POLICY_ROLLBACK_VERIFIED_SEPARATE = PASS
+EFFECTIVE_TOKEN_TEARDOWN_VERIFIED_SEPARATE = PASS
+FULL_SECURITY_ROLLBACK = PASS
+FULL_ROLLBACK_REQUIRES_SERVICE_PID0 = true
+FULL_ROLLBACK_REQUIRES_OWNED_PROCESS_ABSENCE = true
+FULL_ROLLBACK_REQUIRES_LSA_DUAL_READBACK = true
+FAILED_STOP_DOES_NOT_CLAIM_FULL_ROLLBACK = PASS
+CONTROL_RERUN = FORBIDDEN
+CONTROL_REAL_EXECUTION = REAL_COMPLETE
+CONTROL_RESULT = POWER_UNAVAILABLE
+TREATMENT_REAL_EXECUTION = 0
+REAL_LSA_MUTATION_DURING_REPAIR = 0
+REAL_SERVICE_RUNTIME_DURING_REPAIR = 0
+REAL_AMD_RUNTIME_DURING_REPAIR = 0
+FROZEN_QUALIFICATION_ARTIFACT_SHA256 = 871CD20D228BD9510606DE640F516F62C2983B9F4A83C1AA807BA35329C778B9
+ARTIFACT_CHANGED = false
+NEXT_GATE = HUMAN_I2E_TREATMENT_ONLY_RESUME_REVIEW
+```
+
+Before any future mutation, the current registry-derived AMD CLI identity is
+read again and compared with the immutable CONTROL preflight: path,
+installation root, SHA-256, x64 architecture, valid signature, AMD signer,
+signature subject, and issuer must match. A mismatch writes
+`TREATMENT-AMD-CLI-PREFLIGHT.json` and stops before LSA mutation, service start,
+or AMD execution.
+
+Rollback is explicit and stop-first. `policy_rollback_verified` means the
+exact Service SID right is absent in both LSA directions;
+`effective_token_teardown_verified` means the service is absent or
+`Stopped / PID0` and owned broker/AMD CLI processes are gone; only their
+conjunction sets `full_rollback_verified` and the compatibility
+`rollback_verified` field. Failed stop or policy verification retains the
+CURRENT pointer and cannot finalize the experiment.
+
 ## I2D read-only minimum-capability forensics
 
 > HISTORICAL / SUPERSEDED NEXT-GATE SNAPSHOT: I2D read-only evidence

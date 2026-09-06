@@ -565,6 +565,101 @@ foreach ($requiredDirectRootPath in @(
 }
 Write-Host 'I2E_TREATMENT_ONLY_RESUME_STATIC_CONTRACT=PASS'
 
+function New-I2eAmdCliPreflightFixture {
+    param(
+        [string]$Path = 'D:\apps\AMDuProf\bin\AMDuProfCLI.exe',
+        [string]$InstallationRoot = 'D:\apps\AMDuProf',
+        [string]$Sha256 = 'DUMMY-SHA256',
+        [string]$Architecture = 'x64',
+        [string]$SignatureStatus = 'Valid',
+        [string]$SignatureSubject = 'CN=AMD',
+        [string]$SignatureIssuer = 'CN=AMD Issuing CA',
+        [bool]$SignerMatchesAmd = $true,
+        [bool]$PreflightPass = $true
+    )
+    [pscustomobject]@{
+        path = $Path
+        installation_root = $InstallationRoot
+        sha256 = $Sha256
+        architecture = $Architecture
+        signature_status = $SignatureStatus
+        signature_subject = $SignatureSubject
+        signature_issuer = $SignatureIssuer
+        signer_matches_amd = $SignerMatchesAmd
+        preflight_pass = $PreflightPass
+    }
+}
+
+$i2eAmdControlFixture = New-I2eAmdCliPreflightFixture
+$i2eAmdExact = Compare-I2eAmdCliPreflight -Control $i2eAmdControlFixture -Current (New-I2eAmdCliPreflightFixture)
+if (-not $i2eAmdExact.pass) { throw 'I2E AMD CLI exact identity fixture did not pass.' }
+foreach ($drift in @(
+        (New-I2eAmdCliPreflightFixture -Sha256 'DRIFTED-SHA256'),
+        (New-I2eAmdCliPreflightFixture -Path 'E:\other\AMDuProfCLI.exe'),
+        (New-I2eAmdCliPreflightFixture -Architecture 'x86' -PreflightPass $false),
+        (New-I2eAmdCliPreflightFixture -SignatureStatus 'NotSigned' -PreflightPass $false),
+        (New-I2eAmdCliPreflightFixture -SignatureSubject 'CN=Unexpected' -SignerMatchesAmd $false -PreflightPass $false)
+    )) {
+    if ((Compare-I2eAmdCliPreflight -Control $i2eAmdControlFixture -Current $drift).pass) {
+        throw 'I2E AMD CLI identity drift fixture was accepted.'
+    }
+}
+if ($i2eResumeSource -notmatch 'TREATMENT-AMD-CLI-PREFLIGHT\.json' -or
+    $i2eResumeSource.IndexOf('Compare-I2eAmdCliPreflight') -lt 0 -or
+    $i2eResumeSource.IndexOf('Compare-I2eAmdCliPreflight') -ge $i2eResumeSource.IndexOf('Add-I2eExactServiceProfileRight')) {
+    throw 'I2E treatment AMD CLI identity gate is not before LSA mutation.'
+}
+if ($i2eSetupSource -notmatch 'TREATMENT-AMD-CLI-PREFLIGHT\.json' -or
+    $i2eSetupSource.IndexOf('Compare-I2eAmdCliPreflight') -lt 0 -or
+    $i2eSetupSource.IndexOf('Compare-I2eAmdCliPreflight') -ge $i2eSetupSource.IndexOf('Add-I2eExactServiceProfileRight')) {
+    throw 'I2E paired runner AMD CLI identity gate is not before LSA mutation.'
+}
+Write-Host 'I2E_AMD_CLI_IDENTITY_EXACT_MATCH=PASS'
+Write-Host 'I2E_AMD_CLI_SHA_DRIFT_FAIL_CLOSED=PASS'
+Write-Host 'I2E_AMD_CLI_PATH_DRIFT_FAIL_CLOSED=PASS'
+Write-Host 'I2E_AMD_CLI_ARCHITECTURE_DRIFT_FAIL_CLOSED=PASS'
+Write-Host 'I2E_AMD_CLI_SIGNATURE_FAIL_CLOSED=PASS'
+Write-Host 'I2E_AMD_CLI_SIGNER_DRIFT_FAIL_CLOSED=PASS'
+Write-Host 'I2E_AMD_IDENTITY_GATE_BEFORE_LSA_MUTATION=PASS'
+
+$i2eRollbackSuccess = Get-I2eRollbackVerification `
+    -PolicyRollbackVerified $true -ServicePresent $true -ServiceState 'Stopped' -ServiceProcessId 0 `
+    -OwnedBrokerProcessCount 0 -AmdCliProcessCount 0
+$i2eRollbackStopFailure = Get-I2eRollbackVerification `
+    -PolicyRollbackVerified $true -ServicePresent $true -ServiceState 'Running' -ServiceProcessId 4242 `
+    -OwnedBrokerProcessCount 0 -AmdCliProcessCount 0
+$i2eRollbackPolicyFailure = Get-I2eRollbackVerification `
+    -PolicyRollbackVerified $false -ServicePresent $true -ServiceState 'Stopped' -ServiceProcessId 0 `
+    -OwnedBrokerProcessCount 0 -AmdCliProcessCount 0
+$i2eRollbackServiceAbsent = Get-I2eRollbackVerification `
+    -PolicyRollbackVerified $true -ServicePresent $false -ServiceState 'ABSENT' -ServiceProcessId 0 `
+    -OwnedBrokerProcessCount 0 -AmdCliProcessCount 0
+if (-not $i2eRollbackSuccess.full_rollback_verified -or
+    -not $i2eRollbackSuccess.effective_token_teardown_verified -or
+    -not $i2eRollbackSuccess.service_stop_verified -or
+    -not $i2eRollbackServiceAbsent.full_rollback_verified -or
+    -not $i2eRollbackStopFailure.policy_rollback_verified -or
+    $i2eRollbackStopFailure.effective_token_teardown_verified -or
+    $i2eRollbackStopFailure.full_rollback_verified -or
+    -not $i2eRollbackPolicyFailure.effective_token_teardown_verified -or
+    $i2eRollbackPolicyFailure.full_rollback_verified) {
+    throw 'I2E rollback-state fixtures did not separate policy rollback from token teardown.'
+}
+foreach ($rollbackContractSource in @($i2eResumeSource, $i2eCleanupSource, $i2eSetupSource)) {
+    foreach ($requiredRollbackField in @('policy_rollback_verified', 'effective_token_teardown_verified', 'full_rollback_verified')) {
+        if ($rollbackContractSource -notmatch [regex]::Escape($requiredRollbackField)) {
+            throw "I2E rollback contract is missing: $requiredRollbackField"
+        }
+    }
+}
+Write-Host 'I2E_POLICY_ROLLBACK_SEPARATE=PASS'
+Write-Host 'I2E_EFFECTIVE_TOKEN_TEARDOWN_SEPARATE=PASS'
+Write-Host 'I2E_FULL_ROLLBACK_REQUIRES_STOP_PID0=PASS'
+Write-Host 'I2E_FULL_ROLLBACK_REQUIRES_PROCESS_ABSENCE=PASS'
+Write-Host 'I2E_FULL_ROLLBACK_REQUIRES_LSA_VERIFICATION=PASS'
+Write-Host 'I2E_STOP_FAILURE_DOES_NOT_CLAIM_FULL_ROLLBACK=PASS'
+Write-Host 'I2E_POLICY_FAILURE_DOES_NOT_CLAIM_FULL_ROLLBACK=PASS'
+
 . $I2eResumeContract
 $recoveryExperimentId = '3935ac9082954bcfb2b1f94c54cf95d7'
 $recoveryControlScope = '07a511e169274def93da79f269792b71'

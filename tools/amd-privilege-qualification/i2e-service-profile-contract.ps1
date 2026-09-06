@@ -83,6 +83,51 @@ function Get-I2ePhaseConfig {
     }
 }
 
+function Compare-I2eAmdCliPreflight {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]$Control,
+        [Parameter(Mandatory = $true)]$Current
+    )
+
+    $normalize = {
+        param([AllowNull()][object]$Value)
+        if ($null -eq $Value) { return '' }
+        ([string]$Value).Trim()
+    }
+    $equals = {
+        param([AllowNull()][object]$Left, [AllowNull()][object]$Right)
+        ([string](& $normalize $Left)).Equals([string](& $normalize $Right), [StringComparison]::OrdinalIgnoreCase)
+    }
+    $controlPreflightPass = [bool](Get-I2ePropertyValue -Object $Control -Name 'preflight_pass')
+    $currentPreflightPass = [bool](Get-I2ePropertyValue -Object $Current -Name 'preflight_pass')
+    $controlSignatureStatus = [string](Get-I2ePropertyValue -Object $Control -Name 'signature_status')
+    $currentSignatureStatus = [string](Get-I2ePropertyValue -Object $Current -Name 'signature_status')
+    $controlSignerMatches = [bool](Get-I2ePropertyValue -Object $Control -Name 'signer_matches_amd')
+    $currentSignerMatches = [bool](Get-I2ePropertyValue -Object $Current -Name 'signer_matches_amd')
+    $comparison = [ordered]@{
+        control_preflight_pass = $controlPreflightPass
+        current_preflight_pass = $currentPreflightPass
+        path_match = & $equals (Get-I2ePropertyValue -Object $Control -Name 'path') (Get-I2ePropertyValue -Object $Current -Name 'path')
+        installation_root_match = & $equals (Get-I2ePropertyValue -Object $Control -Name 'installation_root') (Get-I2ePropertyValue -Object $Current -Name 'installation_root')
+        sha256_match = & $equals (Get-I2ePropertyValue -Object $Control -Name 'sha256') (Get-I2ePropertyValue -Object $Current -Name 'sha256')
+        architecture_match = & $equals (Get-I2ePropertyValue -Object $Control -Name 'architecture') (Get-I2ePropertyValue -Object $Current -Name 'architecture')
+        signature_status_match = & $equals $controlSignatureStatus $currentSignatureStatus
+        signature_valid = $controlSignatureStatus -ceq 'Valid' -and $currentSignatureStatus -ceq 'Valid'
+        amd_signer_valid = $controlSignerMatches -and $currentSignerMatches
+        signature_subject_match = & $equals (Get-I2ePropertyValue -Object $Control -Name 'signature_subject') (Get-I2ePropertyValue -Object $Current -Name 'signature_subject')
+        signature_issuer_match = & $equals (Get-I2ePropertyValue -Object $Control -Name 'signature_issuer') (Get-I2ePropertyValue -Object $Current -Name 'signature_issuer')
+    }
+    $differingFields = @($comparison.Keys | Where-Object { -not [bool]$comparison[$_] })
+    [pscustomobject]@{
+        pass = ($differingFields.Count -eq 0)
+        control_identity = $Control
+        current_identity = $Current
+        comparison = $comparison
+        differing_fields = $differingFields
+    }
+}
+
 function Get-I2eDiagnosticException {
     param([AllowNull()][object]$Exception)
 

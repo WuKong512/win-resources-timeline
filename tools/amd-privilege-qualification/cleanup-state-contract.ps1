@@ -90,3 +90,27 @@ function Test-I2eExactRightRollbackRequired {
     return (Get-I2eCleanupPointerBoolean -Pointer $Pointer -Name 'right_added_by_experiment') -and
         -not (Get-I2eCleanupPointerBoolean -Pointer $Pointer -Name 'rollback_verified')
 }
+
+function Get-I2eRollbackVerification {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][bool]$PolicyRollbackVerified,
+        [Parameter(Mandatory = $true)][bool]$ServicePresent,
+        [Parameter(Mandatory = $true)][string]$ServiceState,
+        [Parameter(Mandatory = $true)][int64]$ServiceProcessId,
+        [Parameter(Mandatory = $true)][int]$OwnedBrokerProcessCount,
+        [Parameter(Mandatory = $true)][int]$AmdCliProcessCount
+    )
+
+    $serviceStopVerified = -not $ServicePresent -or
+        ($ServiceState -ceq 'Stopped' -and $ServiceProcessId -eq 0)
+    $effectiveTokenTeardownVerified = $serviceStopVerified -and
+        $OwnedBrokerProcessCount -eq 0 -and
+        $AmdCliProcessCount -eq 0
+    [pscustomobject]@{
+        policy_rollback_verified = $PolicyRollbackVerified
+        service_stop_verified = $serviceStopVerified
+        effective_token_teardown_verified = $effectiveTokenTeardownVerified
+        full_rollback_verified = $PolicyRollbackVerified -and $effectiveTokenTeardownVerified
+    }
+}

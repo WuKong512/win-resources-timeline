@@ -86,6 +86,19 @@ function Get-I2eServiceSnapshot {
     }
 }
 
+function Get-I2eOwnedBrokerProcesses {
+    $expectedPath = [IO.Path]::GetFullPath($ArtifactPath)
+    @(Get-Process -Name 'amd-privilege-qualification' -ErrorAction SilentlyContinue | Where-Object {
+        try { $_.Path -and ([IO.Path]::GetFullPath($_.Path) -ieq $expectedPath) } catch { $false }
+    })
+}
+
+function Get-I2eOwnedAmdProcesses {
+    @(Get-Process -Name 'AMDuProfCLI' -ErrorAction SilentlyContinue | Where-Object {
+        try { $_.Path -and $_.Path -ieq 'D:\apps\AMDuProf\bin\AMDuProfCLI.exe' } catch { $false }
+    })
+}
+
 function Set-I2eDirectoryAcl {
     param([Parameter(Mandatory = $true)][string]$Path, [Parameter(Mandatory = $true)][string]$ServiceSid)
     $acl = [Security.AccessControl.DirectorySecurity]::new()
@@ -357,6 +370,34 @@ try {
         throw ('Control result was {0}; treatment is not authorized.' -f $control.summary.availability)
     }
 
+    $currentAmdCliPreflight = [pscustomobject]@{ preflight_pass = $false }
+    $amdCliPreflightError = $null
+    try {
+        $currentAmdCliPreflight = Get-I2eAmdCliPreflight
+    }
+    catch {
+        $amdCliPreflightError = $_.Exception.Message
+    }
+    $amdCliComparison = Compare-I2eAmdCliPreflight -Control $amdCliPreflight -Current $currentAmdCliPreflight
+    $amdCliRevalidationEvidence = [ordered]@{
+        schema = 'amd-service-profile-treatment-amd-cli-preflight/v1'
+        qualification_only = $true
+        experiment_id = $experimentId
+        control_preflight_path = (Join-Path $experimentRoot 'AMD-CLI-PREFLIGHT.json')
+        control_identity = $amdCliPreflight
+        current_identity = $currentAmdCliPreflight
+        comparison = $amdCliComparison.comparison
+        differing_fields = @($amdCliComparison.differing_fields)
+        pass = ($null -eq $amdCliPreflightError -and [bool]$amdCliComparison.pass)
+        recorded_at_utc = [DateTime]::UtcNow.ToString('o')
+    }
+    if ($null -ne $amdCliPreflightError) { $amdCliRevalidationEvidence.error = $amdCliPreflightError }
+    Write-I2eJson -Path (Join-Path $experimentRoot 'TREATMENT-AMD-CLI-PREFLIGHT.json') -Value $amdCliRevalidationEvidence
+    if (-not $amdCliRevalidationEvidence.pass) {
+        $details = if ($null -ne $amdCliPreflightError) { $amdCliPreflightError } else { ($amdCliComparison.differing_fields -join ', ') }
+        throw ('AMD CLI identity changed between CONTROL and TREATMENT; refusing LSA mutation. Differences: {0}' -f $details)
+    }
+
     $pointer.right_mutation_state = 'STARTING'
     $pointer.state = 'RIGHT_MUTATION_PENDING'
     Save-I2eExperimentPointer
@@ -411,52 +452,128 @@ catch {
 }
 finally {
     try {
-        if ($rightAdded -and $null -ne $serviceSid) {
-            Remove-I2eExactServiceProfileRight -ServiceSid $serviceSid
-            $afterRollback = Get-I2eDirectAccountRightsSnapshot -Label 'dedicated-service-sid-after-rollback' -Sid $serviceSid
-            $assignmentAfterRollback = Get-I2eUserRightAssignmentSnapshot -Right $I2eRequiredRight
-            if ($afterRollback.status -ne 'READ' -or $assignmentAfterRollback.status -ne 'READ' -or
-                @($afterRollback.direct_rights) -contains $I2eRequiredRight -or
-                @($assignmentAfterRollback.assigned_principals) -contains $serviceSid) {
-                throw 'Exact service-SID right rollback was not verified.'
+        $stopResult = $null
+        $stopError = $null
+        $serviceStopAttempted = [bool]$serviceCreated
+        $serviceStopVerified = -not $serviceCreated
+        $serviceStateAfterStop = if ($serviceCreated) { 'UNKNOWN' } else { 'ABSENT' }
+        $servicePidAfterStop = if ($serviceCreated) { -1L } else { 0L }
+        if ($serviceCreated) {
+            try {
+                $stopResult = Stop-I2eService
             }
-            $rollbackVerified = $true
-            Write-I2eJson -Path (Join-Path $experimentRoot 'SECURITY-MUTATION-ROLLBACK.json') -Value ([ordered]@{
-                schema = 'amd-service-profile-security-mutation-rollback/v1'
-                qualification_only = $true
-                experiment_id = $experimentId
-                service_name = $ServiceName
-                service_sid = $serviceSid
-                right = $I2eRequiredRight
-                right_added_by_experiment = $true
-                rollback_at_utc = [DateTime]::UtcNow.ToString('o')
-                rollback_verified = $true
-                direct_verification = $afterRollback
-                assignment_verification = $assignmentAfterRollback
-            })
+            catch {
+                $stopError = $_.Exception.Message
+            }
         }
-        else {
-            $rollbackVerified = $true
-            Write-I2eJson -Path (Join-Path $experimentRoot 'SECURITY-MUTATION-ROLLBACK.json') -Value ([ordered]@{
-                schema = 'amd-service-profile-security-mutation-rollback/v1'
-                qualification_only = $true
-                experiment_id = $experimentId
-                service_name = $ServiceName
-                service_sid = $serviceSid
-                right = $I2eRequiredRight
-                right_added_by_experiment = $false
-                rollback_at_utc = [DateTime]::UtcNow.ToString('o')
-                rollback_verified = $true
-                verification = 'No security mutation was applied.'
-            })
+        $serviceAfterStop = Get-I2eServiceSnapshot
+        $serviceStateAfterStop = if ($serviceAfterStop.present) { [string]$serviceAfterStop.state } else { 'ABSENT' }
+        $servicePidAfterStop = if ($serviceAfterStop.present) { [int64]$serviceAfterStop.process_id } else { 0L }
+        $serviceStopVerified = -not $serviceAfterStop.present -or
+            ($serviceStateAfterStop -ceq 'Stopped' -and $servicePidAfterStop -eq 0)
+        $ownedBrokerCountAfterStop = @(Get-I2eOwnedBrokerProcesses).Count
+        $amdCliCountAfterStop = @(Get-I2eOwnedAmdProcesses).Count
+
+        $directVerification = $null
+        $assignmentVerification = $null
+        $policyRemoveAttempted = $false
+        $policyRollbackVerified = -not $rightAdded
+        $policyError = $null
+        if ($rightAdded -and $null -ne $serviceSid) {
+            $policyRemoveAttempted = $true
+            try {
+                Remove-I2eExactServiceProfileRight -ServiceSid $serviceSid
+                $directVerification = Get-I2eDirectAccountRightsSnapshot -Label 'dedicated-service-sid-after-rollback' -Sid $serviceSid
+                $assignmentVerification = Get-I2eUserRightAssignmentSnapshot -Right $I2eRequiredRight
+                $policyRollbackVerified = $directVerification.status -eq 'READ' -and
+                    $assignmentVerification.status -eq 'READ' -and
+                    @($directVerification.direct_rights) -notcontains $I2eRequiredRight -and
+                    @($assignmentVerification.assigned_principals) -notcontains $serviceSid
+                if (-not $policyRollbackVerified) {
+                    $policyError = 'Exact service-SID right rollback was not verified in both LSA readback directions.'
+                }
+            }
+            catch {
+                $policyError = $_.Exception.Message
+                $policyRollbackVerified = $false
+            }
         }
+
+        $verification = Get-I2eRollbackVerification `
+            -PolicyRollbackVerified $policyRollbackVerified `
+            -ServicePresent $serviceAfterStop.present `
+            -ServiceState $serviceStateAfterStop `
+            -ServiceProcessId $servicePidAfterStop `
+            -OwnedBrokerProcessCount $ownedBrokerCountAfterStop `
+            -AmdCliProcessCount $amdCliCountAfterStop
+        $effectiveTokenTeardownVerified = [bool]$verification.effective_token_teardown_verified
+        $fullRollbackVerified = [bool]$verification.full_rollback_verified
+        $rollbackVerified = $fullRollbackVerified
+        $serviceRemoved = -not $serviceAfterStop.present
+        $serviceRemovalError = $null
+
+        $rollbackEvidence = [ordered]@{
+            schema = 'amd-service-profile-security-mutation-rollback/v1'
+            qualification_only = $true
+            experiment_id = $experimentId
+            service_name = $ServiceName
+            service_sid = $serviceSid
+            right = $I2eRequiredRight
+            right_added_by_experiment = $rightAdded
+            all_rights = $false
+            service_stop_attempted = $serviceStopAttempted
+            service_stop_verified = $serviceStopVerified
+            service_state_after_stop = $serviceStateAfterStop
+            service_pid_after_stop = $servicePidAfterStop
+            owned_broker_process_count_after_stop = $ownedBrokerCountAfterStop
+            amd_cli_process_count_after_stop = $amdCliCountAfterStop
+            policy_remove_attempted = $policyRemoveAttempted
+            policy_rollback_verified = $policyRollbackVerified
+            effective_token_teardown_verified = $effectiveTokenTeardownVerified
+            full_rollback_verified = $fullRollbackVerified
+            service_registration_removed = $serviceRemoved
+            rollback_at_utc = [DateTime]::UtcNow.ToString('o')
+            rollback_verified = $fullRollbackVerified
+            direct_verification = $directVerification
+            assignment_verification = $assignmentVerification
+        }
+        if ($null -ne $stopError) { $rollbackEvidence.stop_error = $stopError }
+        if ($null -ne $policyError) { $rollbackEvidence.policy_error = $policyError }
+        Write-I2eJson -Path (Join-Path $experimentRoot 'SECURITY-MUTATION-ROLLBACK.json') -Value $rollbackEvidence
+
+        if ($fullRollbackVerified -and $serviceCreated -and $serviceAfterStop.present) {
+            try {
+                Remove-I2eService
+                $serviceRemoved = -not (Get-I2eServiceSnapshot).present
+            }
+            catch {
+                $serviceRemovalError = $_.Exception.Message
+                $cleanupError = $_.Exception
+            }
+        }
+        if ($null -ne $serviceRemovalError) { $rollbackEvidence.service_removal_error = $serviceRemovalError }
+        $rollbackEvidence.service_registration_removed = $serviceRemoved
+        Write-I2eJson -Path (Join-Path $experimentRoot 'SECURITY-MUTATION-ROLLBACK.json') -Value $rollbackEvidence
+        if ($serviceCreated -and (-not $fullRollbackVerified -or -not $serviceRemoved)) {
+            if ($null -eq $cleanupError) {
+                $cleanupError = [Exception]::new('I2E cleanup did not prove full rollback and service removal; CURRENT pointer retained.')
+            }
+        }
+
+        $pointer.policy_rollback_verified = $policyRollbackVerified
+        $pointer.effective_token_teardown_verified = $effectiveTokenTeardownVerified
+        $pointer.full_rollback_verified = $fullRollbackVerified
+        $pointer.service_stop_attempted = $serviceStopAttempted
+        $pointer.service_stop_verified = $serviceStopVerified
+        $pointer.service_state_after_stop = $serviceStateAfterStop
+        $pointer.service_pid_after_stop = $servicePidAfterStop
+        $pointer.owned_broker_process_count_after_stop = $ownedBrokerCountAfterStop
+        $pointer.amd_cli_process_count_after_stop = $amdCliCountAfterStop
+        $pointer.service_registration_removed = $serviceRemoved
         $pointer.rollback_verified = $rollbackVerified
-        if ($rollbackVerified -and $serviceCreated) { $pointer.state = 'ROLLBACK_COMPLETE' }
-        Save-I2eExperimentPointer
-        if ($serviceCreated -and $rollbackVerified) {
-            Stop-I2eService | Out-Null
-            Remove-I2eService
-        }
+        if ($fullRollbackVerified -and $serviceRemoved) { $pointer.state = 'ROLLBACK_COMPLETE' }
+        elseif ($policyRollbackVerified) { $pointer.state = 'POLICY_ROLLBACK_COMPLETE' }
+        else { $pointer.state = 'SERVICE_STOP_OR_POLICY_ROLLBACK_PENDING' }
         Save-I2eExperimentPointer
     }
     catch {
