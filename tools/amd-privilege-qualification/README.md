@@ -213,7 +213,67 @@ must not be substituted for either counter-discovery path:
 `run-standard-user-amd-privilege-client.ps1` remains preserved as the
 historical **I2 POWER-SAMPLING CLIENT**, not an active I2B command.
 
+## I2E service-SID SeSystemProfile minimum-variable experiment
+
+I2E prepares, but does not execute, a paired control/treatment experiment
+against the real LocalService counter-availability differential. It keeps the
+service account as NT AUTHORITY\LOCAL SERVICE (S-1-5-19), uses the fixed
+qualification-only service ResourceTimelineAmdSystemProfileQualification, and
+uses one derived Service SID for both phases. The Service SID type must be
+UNRESTRICTED.
+
+The control is LocalService plus that Service SID with
+SeSystemProfilePrivilege absent. The treatment is the same service, account,
+machine, Session 0, x64 artifact, AMD CLI, working directory, timeout, job
+policy, classifier, and fixed command, with exactly one change:
+SeSystemProfilePrivilege is assigned to the dedicated Service SID. The
+experiment never assigns the right to the global LocalService account, never
+adds Administrators membership, and never adds SeProfileSingleProcessPrivilege,
+SeDebugPrivilege, SeTcbPrivilege, or another SYSTEM-only privilege.
+
+The default administrator command is deliberately plan-only:
+
+~~~powershell
+Set-Location 'F:\File\codex\codex-worktrees\ac74\resource-timeline'
+& '.\tools\amd-privilege-qualification\run-admin-amd-i2e-service-profile-experiment.ps1'
+~~~
+
+It performs no service registration, LSA mutation, or AMD invocation. A
+future human-authorized execution would require the explicit
+ExecuteAuthorizedExperiment switch and would consume the paired control /
+treatment gate, so it must not be run during ordinary documentation or
+synthetic validation. The future fixed operation is non-sampling
+AMDuProfCLI.exe timechart --list; no power event, duration, interval, or CSV
+sampling is allowed.
+
+The token-materialization gate requires LocalService, Session 0, x64, the
+expected Service SID, no Administrators SID, SeSystemProfilePrivilege present
+and enabled only in treatment, and no newly introduced
+SeProfileSingleProcessPrivilege or SeDebugPrivilege. Before any future right
+mutation, the direct Service SID rights are read and the experiment fails
+closed if the exact right already exists. Rollback removes only the exact
+right when the mutation journal proves this experiment added it; it never
+uses an all-rights removal. Cleanup evidence is invocation-distinct and can
+recover from service creation or any later failure point.
+
+The fixed artifact SHA is recorded in the I2E wrapper and is used unchanged
+for both phases. I2E is prepared but not executed:
+
+~~~text
+FROZEN_EXPERIMENT_ARTIFACT_SHA256 = 871CD20D228BD9510606DE640F516F62C2983B9F4A83C1AA807BA35329C778B9
+I2E = PREPARED_NOT_EXECUTED
+LOCAL_SERVICE_ACCOUNT_WIDE_RIGHT_MUTATION = FORBIDDEN
+ADMINISTRATORS_MEMBERSHIP_MUTATION = FORBIDDEN
+REAL_LSA_MUTATION_DURING_PREPARATION = 0
+REAL_AMD_RUNTIME_DURING_PREPARATION = 0
+NEXT_GATE = HUMAN_SERVICE_SID_SESYSTEMPROFILE_EXPERIMENT_REVIEW
+PRODUCTION_ACCOUNT = UNRESOLVED
+~~~
+
 ## I2D read-only minimum-capability forensics
+
+> HISTORICAL / SUPERSEDED NEXT-GATE SNAPSHOT: I2D read-only evidence
+> collection is complete. The active preparation is I2E above.
 
 I2D compares the completed LocalService result with the completed SYSTEM
 result. It does not execute AMD, open a device, register a service, or mutate

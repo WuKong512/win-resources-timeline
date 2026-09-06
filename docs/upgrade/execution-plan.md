@@ -204,12 +204,12 @@ AMD_CLI_BOUNDED_SESSION = completed
 SPIKE_RESULT = PASS_WITH_FOLLOW_UPS
 PRODUCTION_ADMISSION = NOT_COMPLETE
 AMD_SERVICE_CONTEXT = completed / PASS
-AMD_PRIVILEGE_DEPLOYMENT = real bounded LocalService broker path qualified; AMD counter backend unavailable in LocalService context
+AMD_PRIVILEGE_DEPLOYMENT = real LocalService broker path qualified; counter differential narrowed to a dedicated Service SID experiment
 AMD_LONG_LIVED_SESSION = planned
 AMD_TEMPERATURE_FREQUENCY = planned
 AMD_PRODUCTION_PROVIDER = planned
-NEXT_TASK = AMD-PRIVILEGE-I2D
-NEXT_GATE = HUMAN_ELEVATED_READ_ONLY_I2D_EVIDENCE_COLLECTION
+NEXT_TASK = AMD-PRIVILEGE-I2E
+NEXT_GATE = HUMAN_SERVICE_SID_SESYSTEMPROFILE_EXPERIMENT_REVIEW
 EXECUTION_PLAN_SINGLE_CURRENT_STATE = PASS
 ```
 
@@ -232,7 +232,7 @@ SYSTEM_POWER_COUNTER_ACCESS = AVAILABLE
 SECURITY_CONTEXT_DIFFERENTIAL = REAL_CONFIRMED
 MINIMUM_REQUIRED_CAPABILITY = UNRESOLVED
 PRODUCTION_ACCOUNT = UNRESOLVED
-NEXT_TASK = AMD-PRIVILEGE-I2D
+NEXT_TASK = AMD-PRIVILEGE-I2E
 PRODUCTION_ADMISSION = NOT_COMPLETE
 ```
 
@@ -1188,7 +1188,69 @@ discovery has not executed. The future Administrator wrapper intentionally
 consumes the coupled SYSTEM `timechart --list` comparison gate; there is no
 separate setup-only stage.
 
-## AMD-PRIVILEGE-I2D MINIMUM CAPABILITY ROOT-CAUSE FORENSICS
+## AMD-PRIVILEGE-I2E SERVICE-SID SYSTEM-PROFILE EXPERIMENT PREPARATION
+
+I2E is the next qualification-only step after the authoritative I2D
+read-only differential. I2D established that LocalService reports
+POWER_UNAVAILABLE while SYSTEM reports POWER_AVAILABLE for the same signed AMD
+uProf timechart --list operation. I2D also established that the SYSTEM token
+has SeSystemProfilePrivilege enabled, LocalService does not, and a distinct
+service SID has a direct assignment of that right. This remains a high-priority
+hypothesis, not a proven root cause or production account decision.
+
+~~~text
+I2D_LOCAL_SERVICE_COUNTER_DISCOVERY = REAL_POWER_UNAVAILABLE
+I2D_LOCAL_SERVICE_SCOPE = 4b30b3d64b7e469cbce7c8080c84b7d4
+I2D_SYSTEM_COUNTER_DISCOVERY = REAL_POWER_AVAILABLE
+I2D_SYSTEM_SCOPE = 091a72e1d38341ca9eca0877b1625082
+SE_SYSTEM_PROFILE_PRIVILEGE_HYPOTHESIS = HIGH_PRIORITY / UNPROVEN
+EXPERIMENT_ACCOUNT = NT AUTHORITY\\LOCAL SERVICE
+EXPERIMENT_ACCOUNT_SID = S-1-5-19
+DEDICATED_SERVICE_NAME = ResourceTimelineAmdSystemProfileQualification
+DEDICATED_SERVICE_SID = DERIVED_AT_FUTURE_SETUP
+SERVICE_SID_TYPE = UNRESTRICTED
+CONTROL = LocalService + same Service SID + SeSystemProfilePrivilege absent
+TREATMENT = LocalService + same Service SID + SeSystemProfilePrivilege only
+LOCAL_SERVICE_ACCOUNT_WIDE_RIGHT_MUTATION = FORBIDDEN
+ADMINISTRATORS_MEMBERSHIP_MUTATION = FORBIDDEN
+OTHER_PRIVILEGE_MUTATION = FORBIDDEN
+TOKEN_MATERIALIZATION_GATE = PREPARED
+PAIRED_CONTROL_TREATMENT = PREPARED
+PREEXISTING_RIGHT_PRESERVATION = PREPARED
+EXACT_ROLLBACK = PREPARED
+STATUS_NO_MORE_ENTRIES_CLASSIFICATION = READ_EMPTY
+FIXED_COMMAND = timechart --list
+SAMPLING = false
+FROZEN_EXPERIMENT_ARTIFACT_SHA256 = 871CD20D228BD9510606DE640F516F62C2983B9F4A83C1AA807BA35329C778B9
+REAL_AMD_RUNTIME_DURING_PREPARATION = 0
+REAL_SERVICE_RUNTIME_DURING_PREPARATION = 0
+REAL_LSA_MUTATION_DURING_PREPARATION = 0
+I2E = PREPARED_NOT_EXECUTED
+MINIMUM_REQUIRED_CAPABILITY = UNRESOLVED
+PRODUCTION_ACCOUNT = UNRESOLVED
+NEXT_TASK = AMD-PRIVILEGE-I2E
+NEXT_GATE = HUMAN_SERVICE_SID_SESYSTEMPROFILE_EXPERIMENT_REVIEW
+~~~
+
+The implementation is split from the historical LocalService and SYSTEM
+counter runners. It uses one frozen qualification artifact for both phases,
+keeps the service account and all AMD inputs constant, and changes only the
+dedicated Service SID's exact SeSystemProfilePrivilege assignment. The
+default administrator wrapper invocation is plan-only. The explicit
+authorized-experiment switch is reserved for a later human review and is the
+only path that would create the qualification service, mutate the exact
+Service SID right, or execute the fixed non-sampling command. Cleanup can
+remove only a right proven to have been added by that experiment.
+
+~~~text
+I2E_SERVICE_SID_EXPERIMENT = PREPARED
+I2E_REAL_RUNTIME_DURING_PREPARATION = 0
+I2E_REAL_SERVICE_DURING_PREPARATION = 0
+I2E_REAL_LSA_MUTATION_DURING_PREPARATION = 0
+PRODUCTION_ACCOUNT_SELECTION = NOT_AUTHORIZED
+~~~
+
+## HISTORICAL / SUPERSEDED — AMD-PRIVILEGE-I2D MINIMUM CAPABILITY ROOT-CAUSE FORENSICS
 
 I2D consumes the two immutable, human-authorized non-sampling counter-
 discovery results. It is read-only/offline forensic work; it does not repeat

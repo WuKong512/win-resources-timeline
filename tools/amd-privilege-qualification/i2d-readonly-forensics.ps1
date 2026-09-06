@@ -224,6 +224,7 @@ public static class I2dReadOnlyLsa
     public const uint POLICY_LOOKUP_NAMES = 0x00000800;
     public const uint READ_ONLY_POLICY_ACCESS = POLICY_VIEW_LOCAL_INFORMATION | POLICY_LOOKUP_NAMES; // 0x00000801
     private const int STATUS_OBJECT_NAME_NOT_FOUND = unchecked((int)0xC0000034);
+    private const int STATUS_NO_MORE_ENTRIES = unchecked((int)0x8000001A);
 
     [StructLayout(LayoutKind.Sequential)]
     private struct LSA_UNICODE_STRING
@@ -337,7 +338,7 @@ public static class I2dReadOnlyLsa
 
             uint count;
             int enumStatus = LsaEnumerateAccountsWithUserRight(policy, ref rightString, out enumeration, out count);
-            if (enumStatus == STATUS_OBJECT_NAME_NOT_FOUND)
+            if (enumStatus == STATUS_OBJECT_NAME_NOT_FOUND || enumStatus == STATUS_NO_MORE_ENTRIES)
             {
                 return new string[0];
             }

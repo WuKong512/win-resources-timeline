@@ -14,6 +14,9 @@ $ScArgumentContract = Join-Path $ToolRoot 'sc-argument-contract.ps1'
 $TokenIntegrityContract = Join-Path $ToolRoot 'token-integrity-contract.ps1'
 $CleanupStateContract = Join-Path $ToolRoot 'cleanup-state-contract.ps1'
 $I2dForensics = Join-Path $ToolRoot 'i2d-readonly-forensics.ps1'
+$I2eContract = Join-Path $ToolRoot 'i2e-service-profile-contract.ps1'
+$I2eSetup = Join-Path $ToolRoot 'run-admin-amd-i2e-service-profile-experiment.ps1'
+$I2eCleanup = Join-Path $ToolRoot 'cleanup-admin-amd-i2e-service-profile-experiment.ps1'
 $WindowsSource = Join-Path $ToolRoot 'src\windows.rs'
 
 foreach ($wrapper in @(
@@ -26,7 +29,10 @@ foreach ($wrapper in @(
         (Join-Path $ToolRoot 'run-standard-user-amd-privilege-client.ps1'),
         (Join-Path $ToolRoot 'run-standard-user-amd-counter-discovery.ps1'),
         (Join-Path $ToolRoot 'cleanup-admin-amd-privilege-qualification.ps1'),
-        (Join-Path $ToolRoot 'cleanup-admin-amd-system-counter-qualification.ps1')
+        (Join-Path $ToolRoot 'cleanup-admin-amd-system-counter-qualification.ps1'),
+        $I2eContract,
+        $I2eSetup,
+        $I2eCleanup
     )) {
     $parseErrors = $null
     $tokens = $null
@@ -258,6 +264,8 @@ foreach ($requiredI2dContract in @(
         'LsaNtStatusToWinError',
         'I2dLsaException',
         'Get-I2dLsaDiagnosticException',
+        'STATUS_NO_MORE_ENTRIES',
+        '0x8000001A',
         'NtStatusHex',
         'Win32Error',
         'S-1-5-19',
@@ -339,7 +347,110 @@ Write-Host 'I2D_TOKEN_DIFFERENTIAL_PARSER=PASS'
 Write-Host 'I2D_COMMON_ENABLED_PRIVILEGES_NOT_LOCAL_ONLY=PASS'
 Write-Host 'I2D_SYSTEM_PROFILE_IS_SYSTEM_ONLY_FIXTURE=PASS'
 Write-Host 'I2D_DISABLED_PRIVILEGE_SETS_NORMALIZED=PASS'
+Write-Host 'I2D_STATUS_NO_MORE_ENTRIES_IS_READ=PASS'
 Write-Host 'I2D_NO_SECURITY_MUTATION_SURFACE=PASS'
+
+$i2eContractSource = Get-Content -LiteralPath $I2eContract -Raw
+$i2eSetupSource = Get-Content -LiteralPath $I2eSetup -Raw
+$i2eCleanupSource = Get-Content -LiteralPath $I2eCleanup -Raw
+$i2eArtifactSha256 = '871CD20D228BD9510606DE640F516F62C2983B9F4A83C1AA807BA35329C778B9'
+. $I2eContract
+$i2ePlan = Get-I2eExperimentPlan -ArtifactSha256 'SYNTHETIC-I2E-ARTIFACT'
+foreach ($requiredI2eContract in @(
+        'ResourceTimelineAmdSystemProfileQualification',
+        'NT AUTHORITY\LOCAL SERVICE',
+        'S-1-5-19',
+        'SeSystemProfilePrivilege',
+        'SeProfileSingleProcessPrivilege',
+        'SeDebugPrivilege',
+        'timechart',
+        '--list',
+        'CONTROL',
+        'TREATMENT',
+        'LsaAddAccountRights',
+        'LsaRemoveAccountRights',
+        'AllRights',
+        'STATUS_NO_MORE_ENTRIES',
+        'READ_ONLY_POLICY_ACCESS'
+    )) {
+    if ($i2eContractSource -notmatch [regex]::Escape($requiredI2eContract)) {
+        throw "I2E contract is missing: $requiredI2eContract"
+    }
+}
+if ($i2ePlan.service_account_sid -cne 'S-1-5-19' -or
+    $i2ePlan.right -cne 'SeSystemProfilePrivilege' -or
+    $i2ePlan.sampling -ne $false -or
+    $i2ePlan.rollback.all_rights -ne $false) {
+    throw 'I2E experiment plan is not LocalService-only, non-sampling, or exact-right rollback.'
+}
+if ($i2eSetupSource -match '(?i)-Verb\s+RunAs|\bStart-Process\b|\brunas(?:\.exe)?\b|\bPsExec\b|\bsecedit\b|\bntrights(?:\.exe)?\b') {
+    throw 'I2E setup must not self-elevate or use broad policy tooling.'
+}
+if ($i2eSetupSource -match '(?i)--event|--duration|--interval|--output-dir|raw_command|executable_path|registry_path|working_directory') {
+    throw 'I2E setup must not expose a sampling or arbitrary command surface.'
+}
+if ($i2eSetupSource -notmatch '\[switch\]\$ExecuteAuthorizedExperiment' -or
+    $i2eSetupSource -notmatch 'I2E_PLAN_ONLY=true' -or
+    $i2eSetupSource -notmatch '--service-profile-counter-service' -or
+    $i2eSetupSource -notmatch 'AUTHORIZED_ORDER: SERVICE_CREATE < SIDTYPE_UNRESTRICTED' -or
+    $i2eSetupSource -notmatch [regex]::Escape($i2eArtifactSha256)) {
+    throw 'I2E setup must be plan-only by default and fixed to the service-profile broker.'
+}
+if ($i2eSetupSource -match 'Add-I2eExactServiceProfileRight\s+-ServiceSid\s+\$I2eServiceAccountSid' -or
+    $i2eSetupSource -match 'S-1-5-32-544.*LsaAddAccountRights') {
+    throw 'I2E must not mutate the LocalService account or Administrators group.'
+}
+if ($i2eCleanupSource -match '(?im)\bStop-Process\b|\btaskkill(?:\.exe)?\b|AllRights\s*=\s*\$true' -or
+    $i2eCleanupSource -notmatch 'I2E-CLEANUP-RESULT-' -or
+    $i2eCleanupSource -notmatch 'right_added_by_experiment' -or
+    $i2eCleanupSource -notmatch '\$rightNeedsRollback' -or
+    $i2eCleanupSource -notmatch 'service creation') {
+    throw 'I2E cleanup is not exact, duplicate-safe, and fail-closed.'
+}
+if ($i2eSetupSource -notmatch 'control_result' -or
+    $i2eSetupSource -notmatch 'treatment_result' -or
+    $i2eSetupSource -notmatch 'POWER_UNAVAILABLE' -or
+    $i2eSetupSource -notmatch 'Compare-I2eTokenDelta') {
+    throw 'I2E control-first and token-delta gates are missing.'
+}
+$controlI2eToken = [pscustomobject]@{
+    account_sid = 'S-1-5-19'
+    service_sid = 'S-1-5-80-synthetic'
+    session_id = 0
+    process_architecture = 'x64'
+    enabled_privileges = @('SeChangeNotifyPrivilege', 'SeCreateGlobalPrivilege', 'SeImpersonatePrivilege')
+    disabled_privileges = @('SeAssignPrimaryTokenPrivilege')
+    token_groups_relevant_to_access = @('S-1-5-18:ENABLED', 'S-1-5-80-synthetic:ENABLED')
+}
+$treatmentI2eToken = [pscustomobject]@{
+    account_sid = 'S-1-5-19'
+    service_sid = 'S-1-5-80-synthetic'
+    session_id = 0
+    process_architecture = 'x64'
+    enabled_privileges = @('SeChangeNotifyPrivilege', 'SeCreateGlobalPrivilege', 'SeImpersonatePrivilege', 'SeSystemProfilePrivilege')
+    disabled_privileges = @('SeAssignPrimaryTokenPrivilege')
+    token_groups_relevant_to_access = @('S-1-5-18:ENABLED', 'S-1-5-80-synthetic:ENABLED')
+}
+$i2eDelta = Compare-I2eTokenDelta -ControlContext $controlI2eToken -TreatmentContext $treatmentI2eToken
+if (-not $i2eDelta.pass) { throw 'I2E exact one-privilege token delta fixture failed.' }
+$unexpectedI2eDelta = Compare-I2eTokenDelta -ControlContext $controlI2eToken -TreatmentContext ([pscustomobject]@{
+        account_sid = 'S-1-5-19'
+        service_sid = 'S-1-5-80-synthetic'
+        session_id = 0
+        process_architecture = 'x64'
+        enabled_privileges = @('SeChangeNotifyPrivilege', 'SeCreateGlobalPrivilege', 'SeImpersonatePrivilege', 'SeSystemProfilePrivilege', 'SeDebugPrivilege')
+        disabled_privileges = @('SeAssignPrimaryTokenPrivilege')
+        token_groups_relevant_to_access = @('S-1-5-18:ENABLED', 'S-1-5-80-synthetic:ENABLED')
+    })
+if ($unexpectedI2eDelta.pass) { throw 'I2E token delta accepted an unexplained privilege addition.' }
+Write-Host 'I2E_SERVICE_SID_EXPERIMENT_CONTRACT=PASS'
+Write-Host 'I2E_NO_LOCALSERVICE_ACCOUNT_WIDE_MUTATION=PASS'
+Write-Host 'I2E_NO_ADMINISTRATORS_MUTATION=PASS'
+Write-Host 'I2E_FIXED_TIMECHART_LIST=PASS'
+Write-Host 'I2E_CONTROL_FIRST_TREATMENT_GATE=PASS'
+Write-Host 'I2E_TOKEN_DELTA_EXACT_ONE_RIGHT=PASS'
+Write-Host 'I2E_EXACT_ROLLBACK_AND_PREEXISTING_RIGHT_PRESERVATION=PASS'
+Write-Host 'I2E_CLEANUP_BEFORE_SERVICE_SID_RESOLUTION=PASS'
 
 $windowsSourceText = Get-Content -LiteralPath $WindowsSource -Raw
 if ($windowsSourceText -match 'error\.code\(\)\.0\s+as\s+u32\s*==\s*ERROR_') {

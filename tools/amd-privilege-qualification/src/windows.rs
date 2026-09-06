@@ -13,7 +13,7 @@ use crate::{
     ResponseStatus, SemanticRequest, SessionCoordinator, SessionResultSummary, SessionState,
     CLIENT_DISCONNECT_POLICY, COUNTER_DISCOVERY_MAX_OUTPUT_BYTES, COUNTER_DISCOVERY_TIMEOUT_MS,
     FIXED_EVENT, OUTPUT_SUBDIRECTORY, QUALIFICATION_ONLY, SERVICE_ACCOUNT_SID, SERVICE_NAME,
-    SERVICE_SID_ACCOUNT,
+    SERVICE_PROFILE_FORBIDDEN_PRIVILEGES, SERVICE_SID_ACCOUNT,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -95,6 +95,7 @@ const SE_GROUP_ENABLED: u32 = 0x0000_0004;
 static STOP_REQUESTED: AtomicBool = AtomicBool::new(false);
 static CONFIG: OnceLock<BrokerConfig> = OnceLock::new();
 static SYSTEM_COUNTER_CONFIG: OnceLock<SystemCounterConfig> = OnceLock::new();
+static SERVICE_PROFILE_COUNTER_CONFIG: OnceLock<ServiceProfileCounterConfig> = OnceLock::new();
 static STOP_EVENT: Mutex<Option<isize>> = Mutex::new(None);
 static STATUS_HANDLE: Mutex<Option<isize>> = Mutex::new(None);
 static SERVICE_ERROR_DETAILS: Mutex<Option<Value>> = Mutex::new(None);
@@ -203,6 +204,19 @@ struct SystemCounterConfig {
     output_root: String,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+struct ServiceProfileCounterConfig {
+    schema: String,
+    service_name: String,
+    service_account: String,
+    service_account_sid: String,
+    service_sid: String,
+    scope: String,
+    output_root: String,
+    phase: String,
+    expected_se_system_profile_privilege: bool,
+}
+
 #[derive(Clone)]
 struct BrokerState {
     config: BrokerConfig,
@@ -251,6 +265,31 @@ pub fn run_system_counter_service() -> Result<(), String> {
         SERVICE_TABLE_ENTRYW {
             lpServiceName: PWSTR::from_raw(service_name.as_mut_ptr()),
             lpServiceProc: Some(system_counter_service_main),
+        },
+        SERVICE_TABLE_ENTRYW {
+            lpServiceName: PWSTR::null(),
+            lpServiceProc: None,
+        },
+    ];
+    unsafe { StartServiceCtrlDispatcherW(table.as_ptr()) }
+        .map_err(|error| format!("StartServiceCtrlDispatcherW failed: {error}"))
+}
+
+/// Run the paired I2E service-SID experiment mode.  The service account remains LocalService;
+/// the phase config controls only whether the dedicated Service SID must materialize
+/// SeSystemProfilePrivilege in the effective token.  The mode is qualification-only and uses
+/// the same fixed non-sampling counter-discovery runner as the SYSTEM comparison.
+pub fn run_service_profile_counter_service() -> Result<(), String> {
+    let config = load_service_profile_counter_config()?;
+    SERVICE_PROFILE_COUNTER_CONFIG
+        .set(config)
+        .map_err(|_| "service-profile counter configuration was initialized twice".to_owned())?;
+    STOP_REQUESTED.store(false, Ordering::SeqCst);
+    let mut service_name = wide_null(crate::SERVICE_PROFILE_COUNTER_SERVICE_NAME);
+    let table = [
+        SERVICE_TABLE_ENTRYW {
+            lpServiceName: PWSTR::from_raw(service_name.as_mut_ptr()),
+            lpServiceProc: Some(service_profile_counter_service_main),
         },
         SERVICE_TABLE_ENTRYW {
             lpServiceName: PWSTR::null(),
@@ -334,6 +373,48 @@ unsafe extern "system" fn system_counter_service_main(_argc: u32, _argv: *mut PW
         Err(error) => {
             let _ = crate::write_json(
                 &root.join("SYSTEM-SERVICE-HARNESS-ERROR.json"),
+                &service_error_evidence_for(&config.service_name, error),
+            );
+            let _ = set_service_status(status_handle, SERVICE_STOPPED, 1, 0, 0);
+        }
+    }
+    clear_status_handle(status_handle);
+}
+
+unsafe extern "system" fn service_profile_counter_service_main(_argc: u32, _argv: *mut PWSTR) {
+    let Some(config) = SERVICE_PROFILE_COUNTER_CONFIG.get().cloned() else {
+        return;
+    };
+    let root = PathBuf::from(&config.output_root);
+    let _ = fs::create_dir_all(&root);
+    let service_name = wide_null(&config.service_name);
+    let handler = unsafe {
+        RegisterServiceCtrlHandlerExW(
+            PCWSTR::from_raw(service_name.as_ptr()),
+            Some(service_handler),
+            None,
+        )
+    };
+    let Ok(status_handle) = handler else {
+        let _ = crate::write_json(
+            &root.join("SERVICE-PROFILE-SERVICE-HARNESS-ERROR.json"),
+            &service_error_evidence_for(
+                &config.service_name,
+                "RegisterServiceCtrlHandlerExW failed".to_owned(),
+            ),
+        );
+        return;
+    };
+
+    set_status_handle(status_handle);
+    let _ = set_service_status(status_handle, SERVICE_START_PENDING, 0, 1, 30_000);
+    match service_profile_counter_service_entry(status_handle, &config) {
+        Ok(()) => {
+            let _ = set_service_status(status_handle, SERVICE_STOPPED, 0, 0, 0);
+        }
+        Err(error) => {
+            let _ = crate::write_json(
+                &root.join("SERVICE-PROFILE-SERVICE-HARNESS-ERROR.json"),
                 &service_error_evidence_for(&config.service_name, error),
             );
             let _ = set_service_status(status_handle, SERVICE_STOPPED, 1, 0, 0);
@@ -558,6 +639,127 @@ fn system_counter_service_entry(
     )
     .map_err(|error| format!("writing SYSTEM-COUNTER-DISCOVERY-SUMMARY.json failed: {error}"))?;
     Ok(())
+}
+
+fn service_profile_counter_service_entry(
+    status_handle: SERVICE_STATUS_HANDLE,
+    config: &ServiceProfileCounterConfig,
+) -> Result<(), String> {
+    let context = collect_service_context_for(
+        &config.service_name,
+        &config.service_account,
+        &config.service_account_sid,
+        Some(config.service_sid.clone()),
+        "amd-service-profile-service-context/v1",
+    )?;
+    let root = Path::new(&config.output_root);
+    crate::write_json(&root.join("SERVICE-PROFILE-SERVICE-CONTEXT.json"), &context)
+        .map_err(|error| format!("writing SERVICE-PROFILE-SERVICE-CONTEXT.json failed: {error}"))?;
+
+    let token_gate = service_profile_token_gate(&context, config);
+    crate::write_json(&root.join("SERVICE-PROFILE-TOKEN-GATE.json"), &token_gate)
+        .map_err(|error| format!("writing SERVICE-PROFILE-TOKEN-GATE.json failed: {error}"))?;
+    if !token_gate
+        .get("gate_pass")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+    {
+        return Err(format!(
+            "service-profile token materialization gate failed for {}",
+            config.phase
+        ));
+    }
+    if STOP_REQUESTED.load(Ordering::Acquire) {
+        return Ok(());
+    }
+
+    set_service_status(status_handle, SERVICE_RUNNING, 0, 0, 0)?;
+    let request_id = format!("service-profile-{}", config.phase.to_ascii_lowercase());
+    let status = execute_counter_discovery_at(root, root, &request_id)?;
+    crate::write_json(
+        &root.join("SERVICE-PROFILE-COUNTER-SUMMARY.json"),
+        &json!({
+            "schema": "amd-service-profile-counter-summary/v1",
+            "qualification_only": QUALIFICATION_ONLY,
+            "service_name": config.service_name,
+            "service_account": config.service_account,
+            "service_account_sid": config.service_account_sid,
+            "service_sid": config.service_sid,
+            "phase": config.phase,
+            "expected_se_system_profile_privilege": config.expected_se_system_profile_privilege,
+            "session_id": 0,
+            "fixed_cli_arguments": fixed_counter_discovery_arguments(),
+            "sampling": false,
+            "availability": status.availability.as_str(),
+            "cli_exit_code": status.cli_exit_code,
+            "power_category_present": status.power_category_present,
+            "no_orphan_child": status.no_orphan_child,
+            "token_gate_passed": true
+        }),
+    )
+    .map_err(|error| format!("writing SERVICE-PROFILE-COUNTER-SUMMARY.json failed: {error}"))?;
+    Ok(())
+}
+
+fn service_profile_token_gate(
+    context: &ServiceContextEvidence,
+    config: &ServiceProfileCounterConfig,
+) -> Value {
+    let profile_enabled = context
+        .enabled_privileges
+        .iter()
+        .any(|value| value.eq_ignore_ascii_case(crate::SERVICE_PROFILE_REQUIRED_PRIVILEGE));
+    let profile_disabled = context
+        .disabled_privileges
+        .iter()
+        .any(|value| value.eq_ignore_ascii_case(crate::SERVICE_PROFILE_REQUIRED_PRIVILEGE));
+    let administrators_sid_present = context
+        .token_groups_relevant_to_access
+        .iter()
+        .any(|value| token_group_sid(value).eq_ignore_ascii_case("S-1-5-32-544"));
+    let forbidden_enabled: Vec<String> = SERVICE_PROFILE_FORBIDDEN_PRIVILEGES
+        .iter()
+        .filter(|privilege| {
+            context
+                .enabled_privileges
+                .iter()
+                .any(|value| value.eq_ignore_ascii_case(privilege))
+        })
+        .map(|privilege| (*privilege).to_owned())
+        .collect();
+    let expected_state_matches = if config.expected_se_system_profile_privilege {
+        profile_enabled && !profile_disabled
+    } else {
+        !profile_enabled && !profile_disabled
+    };
+    let gate_pass = context.context_valid
+        && expected_state_matches
+        && !administrators_sid_present
+        && forbidden_enabled.is_empty();
+    json!({
+        "schema": "amd-service-profile-token-gate/v1",
+        "qualification_only": QUALIFICATION_ONLY,
+        "phase": config.phase,
+        "service_name": config.service_name,
+        "service_sid": config.service_sid,
+        "account_sid": context.account_sid,
+        "session_id": context.session_id,
+        "process_architecture": context.process_architecture,
+        "context_valid": context.context_valid,
+        "expected_se_system_profile_privilege": config.expected_se_system_profile_privilege,
+        "se_system_profile_privilege_present": profile_enabled || profile_disabled,
+        "se_system_profile_privilege_enabled": profile_enabled,
+        "se_system_profile_privilege_disabled": profile_disabled,
+        "administrators_sid_present": administrators_sid_present,
+        "forbidden_enabled_privileges": forbidden_enabled,
+        "se_profile_single_process_privilege_newly_introduced": false,
+        "se_debug_privilege_newly_introduced": false,
+        "gate_pass": gate_pass
+    })
+}
+
+fn token_group_sid(value: &str) -> &str {
+    value.split(':').next().unwrap_or(value)
 }
 
 fn abandon_startup_accept(
@@ -3252,6 +3454,40 @@ fn load_system_counter_config() -> Result<SystemCounterConfig, String> {
     Ok(config)
 }
 
+fn load_service_profile_counter_config() -> Result<ServiceProfileCounterConfig, String> {
+    let path = service_profile_counter_config_path();
+    let bytes = fs::read(&path)
+        .map_err(|error| format!("reading service-profile counter config failed: {error}"))?;
+    let config: ServiceProfileCounterConfig = serde_json::from_slice(&bytes)
+        .map_err(|error| format!("service-profile counter config is invalid: {error}"))?;
+    let expected_output_root = program_data_root()
+        .join(crate::SERVICE_PROFILE_COUNTER_OUTPUT_SUBDIRECTORY)
+        .join(&config.scope);
+    let output_root_matches = Path::new(&config.output_root)
+        .to_string_lossy()
+        .eq_ignore_ascii_case(&expected_output_root.to_string_lossy());
+    let expected_phase_state = match config.phase.as_str() {
+        "CONTROL" => !config.expected_se_system_profile_privilege,
+        "TREATMENT" => config.expected_se_system_profile_privilege,
+        _ => false,
+    };
+    if config.schema != "amd-service-profile-counter-config/v1"
+        || config.service_name != crate::SERVICE_PROFILE_COUNTER_SERVICE_NAME
+        || config.service_account != crate::SERVICE_PROFILE_COUNTER_SERVICE_ACCOUNT
+        || config.service_account_sid != crate::SERVICE_PROFILE_COUNTER_SERVICE_ACCOUNT_SID
+        || config.service_sid.is_empty()
+        || !config.service_sid.starts_with("S-1-5-80-")
+        || !output_root_matches
+        || crate::validate_scope(&config.scope).is_err()
+        || !expected_phase_state
+    {
+        return Err(
+            "service-profile counter config is outside the fixed qualification contract".to_owned(),
+        );
+    }
+    Ok(config)
+}
+
 fn load_config() -> Result<BrokerConfig, String> {
     let path = config_path();
     let bytes =
@@ -3285,6 +3521,12 @@ pub fn system_counter_config_path() -> PathBuf {
     program_data_root()
         .join(crate::SYSTEM_COUNTER_OUTPUT_SUBDIRECTORY)
         .join("SYSTEM-CONFIG.json")
+}
+
+pub fn service_profile_counter_config_path() -> PathBuf {
+    program_data_root()
+        .join(crate::SERVICE_PROFILE_COUNTER_OUTPUT_SUBDIRECTORY)
+        .join("I2E-CONFIG.json")
 }
 
 pub fn program_data_root() -> PathBuf {
@@ -3332,6 +3574,34 @@ mod tests {
         assert_eq!(SERVICE_NAME, "ResourceTimelineAmdPrivilegeQualification");
         assert!(crate::pipe_name_for_scope("0123456789abcdef0123456789abcdef").is_ok());
         assert!(crate::pipe_name_for_scope("bad").is_err());
+    }
+
+    #[test]
+    fn service_profile_experiment_contract_is_narrow_and_fixed() {
+        assert_eq!(
+            crate::SERVICE_PROFILE_COUNTER_SERVICE_NAME,
+            "ResourceTimelineAmdSystemProfileQualification"
+        );
+        assert_eq!(
+            crate::SERVICE_PROFILE_COUNTER_SERVICE_ACCOUNT,
+            "NT AUTHORITY\\LOCAL SERVICE"
+        );
+        assert_eq!(
+            crate::SERVICE_PROFILE_COUNTER_SERVICE_ACCOUNT_SID,
+            "S-1-5-19"
+        );
+        assert_eq!(
+            crate::SERVICE_PROFILE_REQUIRED_PRIVILEGE,
+            "SeSystemProfilePrivilege"
+        );
+        assert_eq!(
+            SERVICE_PROFILE_FORBIDDEN_PRIVILEGES,
+            ["SeProfileSingleProcessPrivilege", "SeDebugPrivilege"]
+        );
+        assert_eq!(
+            fixed_counter_discovery_arguments(),
+            vec!["timechart".to_owned(), "--list".to_owned()]
+        );
     }
 
     #[test]

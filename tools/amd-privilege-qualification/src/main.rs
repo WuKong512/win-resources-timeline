@@ -44,6 +44,14 @@ fn main() {
                     std::process::exit(1);
                 }
             }
+            Some("--service-profile-counter-service") if args.len() == 1 => {
+                if let Err(error) =
+                    amd_privilege_qualification::windows::run_service_profile_counter_service()
+                {
+                    eprintln!("service-SID SeSystemProfile qualification service failed: {error}");
+                    std::process::exit(1);
+                }
+            }
             Some("--client") => {
                 let operation = args.get(1).map(String::as_str).unwrap_or("get-status");
                 if !matches!(operation, "get-status" | "counter-discovery" | "start") {
@@ -85,7 +93,7 @@ fn option_value(args: &[String], name: &str) -> Option<u32> {
 
 fn usage_and_exit() -> ! {
     eprintln!(
-        "usage: amd-privilege-qualification --synthetic [--evidence-root PATH] | --broker | --system-counter-service | --client get-status|counter-discovery|start"
+        "usage: amd-privilege-qualification --synthetic [--evidence-root PATH] | --broker | --system-counter-service | --service-profile-counter-service | --client get-status|counter-discovery|start"
     );
     std::process::exit(2)
 }

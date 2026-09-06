@@ -32,8 +32,8 @@ SYSTEM_POWER_COUNTER_ACCESS = AVAILABLE / REAL_SYSTEM_DIFFERENTIAL
 SECURITY_CONTEXT_DIFFERENTIAL = REAL_CONFIRMED
 MINIMUM_REQUIRED_CAPABILITY = UNRESOLVED
 PRODUCTION_ACCOUNT = UNRESOLVED
-NEXT_GATE = HUMAN_ELEVATED_READ_ONLY_I2D_EVIDENCE_COLLECTION
-NEXT_TASK = AMD-PRIVILEGE-I2D
+NEXT_GATE = HUMAN_SERVICE_SID_SESYSTEMPROFILE_EXPERIMENT_REVIEW
+NEXT_TASK = AMD-PRIVILEGE-I2E
 PRODUCTION_ADMISSION = NOT_COMPLETE
 ```
 
@@ -756,7 +756,59 @@ historical/superseded records. They remain to explain why the broker candidate
 was originally deferred; the current evidence now supports the broker boundary
 while leaving the AMD power-counter capability differential unresolved.
 
-## AMD-PRIVILEGE-I2D CURRENT STATE — MINIMUM CAPABILITY FORENSICS
+## AMD-PRIVILEGE-I2E CURRENT STATE — SERVICE-SID SYSTEM-PROFILE EXPERIMENT PREPARATION
+
+I2D established a real LocalService-versus-SYSTEM counter-availability
+differential, but did not isolate the minimum Windows capability. The
+read-only evidence shows that SYSTEM has SeSystemProfilePrivilege enabled
+while LocalService does not, and that a distinct service SID already has a
+direct assignment of that right. I2E therefore prepares a paired,
+minimum-variable experiment without granting the right to the global
+LocalService account and without adding Administrators membership.
+
+~~~text
+EXPERIMENT_ACCOUNT = NT AUTHORITY\\LOCAL SERVICE
+EXPERIMENT_ACCOUNT_SID = S-1-5-19
+DEDICATED_SERVICE_NAME = ResourceTimelineAmdSystemProfileQualification
+DEDICATED_SERVICE_SID = DERIVED_AT_FUTURE_SETUP
+SERVICE_SID_TYPE = UNRESTRICTED
+CONTROL = LocalService + same dedicated Service SID + SeSystemProfilePrivilege absent
+TREATMENT = LocalService + same dedicated Service SID + SeSystemProfilePrivilege only
+SERVICE_SID_SESYSTEMPROFILE_MUTATION = EXACT_ONE_RIGHT_ONLY
+LOCAL_SERVICE_ACCOUNT_WIDE_RIGHT_MUTATION = FORBIDDEN
+ADMINISTRATORS_MEMBERSHIP_MUTATION = FORBIDDEN
+SEPROFILE_SINGLE_PROCESS_MUTATION = FORBIDDEN
+SEDEBUG_MUTATION = FORBIDDEN
+TOKEN_MATERIALIZATION_GATE = PREPARED
+PAIRED_CONTROL_TREATMENT = PREPARED
+PREEXISTING_RIGHT_PRESERVATION = PREPARED
+EXACT_ROLLBACK = PREPARED
+STATUS_NO_MORE_ENTRIES = READ_EMPTY
+FIXED_COMMAND = timechart --list
+SAMPLING = false
+FROZEN_ARTIFACT = ONE_SHA_FOR_CONTROL_AND_TREATMENT
+FROZEN_EXPERIMENT_ARTIFACT_SHA256 = 871CD20D228BD9510606DE640F516F62C2983B9F4A83C1AA807BA35329C778B9
+REAL_AMD_RUNTIME_DURING_PREPARATION = 0
+REAL_SERVICE_RUNTIME_DURING_PREPARATION = 0
+REAL_LSA_MUTATION_DURING_PREPARATION = 0
+I2E = PREPARED_NOT_EXECUTED
+MINIMUM_REQUIRED_CAPABILITY = UNRESOLVED
+PRODUCTION_ACCOUNT = UNRESOLVED
+NEXT_TASK = AMD-PRIVILEGE-I2E
+NEXT_GATE = HUMAN_SERVICE_SID_SESYSTEMPROFILE_EXPERIMENT_REVIEW
+~~~
+
+The preparation is repository-native and qualification-only. The default
+administrator wrapper invocation is plan-only and performs no service,
+security-policy, or AMD operation. The future real gate requires explicit
+human authorization for the paired control/treatment execution, followed by
+the exact-right rollback and invocation-distinct cleanup. A treatment result
+can show sufficiency for the observed bounded path, but cannot by itself
+prove global minimum privilege or select the production account.
+
+> HISTORICAL / SUPERSEDED CURRENT-STATE SNAPSHOT: AMD-PRIVILEGE-I2D
+
+## HISTORICAL / SUPERSEDED — AMD-PRIVILEGE-I2D MINIMUM CAPABILITY FORENSICS
 
 The dedicated SYSTEM comparison has now consumed its one authorized,
 non-sampling `timechart --list` run. The two results use the same signed x64

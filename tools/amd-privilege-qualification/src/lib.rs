@@ -33,6 +33,17 @@ pub const SYSTEM_COUNTER_SERVICE_SID_ACCOUNT: &str =
 pub const SYSTEM_COUNTER_SERVICE_ACCOUNT: &str = "NT AUTHORITY\\SYSTEM";
 pub const SYSTEM_COUNTER_SERVICE_ACCOUNT_SID: &str = "S-1-5-18";
 pub const SYSTEM_COUNTER_FIXED_ARGUMENTS: [&str; 2] = ["timechart", "--list"];
+pub const SERVICE_PROFILE_COUNTER_SERVICE_NAME: &str =
+    "ResourceTimelineAmdSystemProfileQualification";
+pub const SERVICE_PROFILE_COUNTER_SERVICE_SID_ACCOUNT: &str =
+    "NT SERVICE\\ResourceTimelineAmdSystemProfileQualification";
+pub const SERVICE_PROFILE_COUNTER_SERVICE_ACCOUNT: &str = "NT AUTHORITY\\LOCAL SERVICE";
+pub const SERVICE_PROFILE_COUNTER_SERVICE_ACCOUNT_SID: &str = "S-1-5-19";
+pub const SERVICE_PROFILE_COUNTER_OUTPUT_SUBDIRECTORY: &str =
+    "ResourceTimeline\\qualification\\amd-system-profile";
+pub const SERVICE_PROFILE_REQUIRED_PRIVILEGE: &str = "SeSystemProfilePrivilege";
+pub const SERVICE_PROFILE_FORBIDDEN_PRIVILEGES: [&str; 2] =
+    ["SeProfileSingleProcessPrivilege", "SeDebugPrivilege"];
 pub const SYSTEM_SID: &str = "S-1-5-18";
 pub const PIPE_PREFIX: &str = r"\\.\pipe\ResourceTimeline-AmdPrivilegeQualification-";
 pub const OUTPUT_SUBDIRECTORY: &str = "ResourceTimeline\\qualification\\amd-privilege";
