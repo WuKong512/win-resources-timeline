@@ -274,9 +274,39 @@ LOCAL_SERVICE_ACCOUNT_WIDE_RIGHT_MUTATION = FORBIDDEN
 ADMINISTRATORS_MEMBERSHIP_MUTATION = FORBIDDEN
 REAL_LSA_MUTATION_DURING_PREPARATION = 0
 REAL_AMD_RUNTIME_DURING_PREPARATION = 0
-NEXT_GATE = HUMAN_SERVICE_SID_SESYSTEMPROFILE_EXPERIMENT_EXECUTION
+NEXT_GATE = HUMAN_I2E_FAILED_ATTEMPT_CLEANUP
 PRODUCTION_ACCOUNT = UNRESOLVED
 ~~~
+
+## Current I2E status: pre-control harness incident
+
+The first human-authorized I2E invocation failed before Service creation:
+`sc.exe create` returned `1057` because the SCM-facing account value was the
+bare `LocalService` string. This did not execute the control or treatment, add
+the right, or run AMD. The wrapper now uses the exact Windows SCM identity
+`NT AUTHORITY\LocalService` and records explicit gate state in the mutable
+`I2E-EXPERIMENT-CURRENT.json` pointer.
+
+The failed attempt must first be closed by the human with the repaired cleanup
+wrapper. Cleanup preserves an invocation-distinct `I2E-EXPERIMENT-FINAL-*.json`
+inside the experiment evidence root, verifies that no exact right was added (or
+that an experiment-added right was exactly rolled back), proves owned service
+and process absence, and only then removes the top-level CURRENT pointer. Do
+not delete the pointer or evidence manually, and do not rerun the experiment
+before cleanup.
+
+```text
+I2E_FIRST_REAL_ATTEMPT = PRE_SERVICE_CREATE_FAILURE
+SC_CREATE_EXIT = 1057
+SCM_SERVICE_ACCOUNT = NT AUTHORITY\LocalService
+CONTROL_EXECUTED = false
+TREATMENT_EXECUTED = false
+LSA_MUTATION = false
+AMD_RUNTIME = false
+PAIRED_EXPERIMENT_GATE = UNCONSUMED
+NEXT_GATE = HUMAN_I2E_FAILED_ATTEMPT_CLEANUP
+AFTER_CLEANUP_NEXT_GATE = HUMAN_SERVICE_SID_SESYSTEMPROFILE_EXPERIMENT_EXECUTION
+```
 
 ## I2D read-only minimum-capability forensics
 

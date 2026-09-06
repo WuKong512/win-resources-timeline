@@ -10,7 +10,10 @@ $ErrorActionPreference = 'Stop'
 
 $ServiceName = $I2eServiceName
 $ServiceAccount = $I2eServiceAccount
-$ScServiceAccount = 'LocalService'
+$ScServiceAccount = 'NT AUTHORITY\LocalService'
+if ($ScServiceAccount -cne 'NT AUTHORITY\LocalService') {
+    throw 'I2E SCM service account must use the Windows predefined LocalService identity form.'
+}
 $ServiceSidAccount = $I2eServiceSidAccount
 $ArtifactPath = Join-Path $PSScriptRoot 'target\release\amd-privilege-qualification.exe'
 $ExpectedArtifactSha256 = '871CD20D228BD9510606DE640F516F62C2983B9F4A83C1AA807BA35329C778B9'
@@ -265,8 +268,24 @@ $pointer = [ordered]@{
     control_output_root = $controlRoot
     treatment_scope = $treatmentScope
     treatment_output_root = $treatmentRoot
+    state = 'PRE_SERVICE_CREATE'
+    service_create_succeeded = $false
+    service_sid_resolved = $false
+    control_execution_state = 'NOT_STARTED'
+    control_executed = $false
+    control_result = $null
+    paired_gate_consumed = $false
+    right_mutation_state = 'NOT_STARTED'
     right_added_by_experiment = $false
+    treatment_execution_state = 'NOT_STARTED'
+    treatment_executed = $false
+    treatment_result = $null
     rollback_verified = $false
+    experiment_closed = $false
+}
+
+function Save-I2eExperimentPointer {
+    Write-I2eJson -Path $PointerPath -Value $pointer
 }
 
 try {
@@ -277,16 +296,25 @@ try {
     $createArgs = New-QualificationServiceCreateArguments -ServiceName $ServiceName -BinPath $binPath -ServiceAccount $ScServiceAccount -DisplayName 'Resource Timeline AMD service-profile qualification'
     Invoke-I2eSc -Arguments $createArgs | Out-Null
     $serviceCreated = $true
+    $pointer.service_create_succeeded = $true
+    $pointer.state = 'SERVICE_CREATED'
+    Save-I2eExperimentPointer
     Invoke-I2eSc -Arguments @('sidtype', $ServiceName, 'unrestricted') | Out-Null
+    $pointer.state = 'SERVICE_SID_CONFIGURED'
+    Save-I2eExperimentPointer
     Assert-I2eServiceSidType
     $serviceSid = Resolve-I2eServiceSid
     $pointer.service_sid = $serviceSid
-    Write-I2eJson -Path $PointerPath -Value $pointer
+    $pointer.service_sid_resolved = $true
+    $pointer.state = 'SERVICE_SID_RESOLVED'
+    Save-I2eExperimentPointer
     Set-I2eDirectoryAcl -Path $QualificationRoot -ServiceSid $serviceSid
     Set-I2eDirectoryAcl -Path $experimentRoot -ServiceSid $serviceSid
     Set-I2eDirectoryAcl -Path $controlRoot -ServiceSid $serviceSid
     Set-I2eDirectoryAcl -Path $treatmentRoot -ServiceSid $serviceSid
     Write-I2eJson -Path (Join-Path $experimentRoot 'AMD-CLI-PREFLIGHT.json') -Value $amdCliPreflight
+    $pointer.state = 'READY_FOR_CONTROL'
+    Save-I2eExperimentPointer
 
     $baseline = Get-I2eDirectAccountRightsSnapshot -Label 'dedicated-service-sid-before' -Sid $serviceSid
     $assigned = Get-I2eUserRightAssignmentSnapshot -Right $I2eRequiredRight
@@ -309,16 +337,30 @@ try {
     $plan.right_was_present_before = $rightPresentBefore -or $rightAssignedBefore
     Write-I2eJson -Path (Join-Path $experimentRoot 'SECURITY-MUTATION-PLAN.json') -Value $plan
 
+    $pointer.control_execution_state = 'STARTING'
+    $pointer.paired_gate_consumed = $true
+    $pointer.state = 'CONTROL_EXECUTING'
+    Save-I2eExperimentPointer
     $control = Invoke-I2ePhase -Phase CONTROL -Scope $controlScope -OutputRoot $controlRoot -ServiceSid $serviceSid
+    $pointer.control_execution_state = 'COMPLETED'
+    $pointer.control_executed = $true
+    $pointer.control_result = [string]$control.summary.availability
+    $pointer.state = 'CONTROL_EXECUTED'
+    Save-I2eExperimentPointer
     Write-I2eJson -Path (Join-Path $experimentRoot 'CONTROL-RESULT.json') -Value $control.summary
     if ([string]$control.summary.availability -cne 'POWER_UNAVAILABLE') {
         throw ('Control result was {0}; treatment is not authorized.' -f $control.summary.availability)
     }
 
+    $pointer.right_mutation_state = 'STARTING'
+    $pointer.state = 'RIGHT_MUTATION_PENDING'
+    Save-I2eExperimentPointer
     Add-I2eExactServiceProfileRight -ServiceSid $serviceSid
     $rightAdded = $true
     $pointer.right_added_by_experiment = $true
-    Write-I2eJson -Path $PointerPath -Value $pointer
+    $pointer.right_mutation_state = 'COMPLETED'
+    $pointer.state = 'RIGHT_MUTATED'
+    Save-I2eExperimentPointer
     $afterAdd = Get-I2eDirectAccountRightsSnapshot -Label 'dedicated-service-sid-after-add' -Sid $serviceSid
     $assignmentAfterAdd = Get-I2eUserRightAssignmentSnapshot -Right $I2eRequiredRight
     if ($afterAdd.status -ne 'READ' -or $assignmentAfterAdd.status -ne 'READ' -or
@@ -340,7 +382,15 @@ try {
         assignment_verification = $assignmentAfterAdd
     })
 
+    $pointer.treatment_execution_state = 'STARTING'
+    $pointer.state = 'TREATMENT_EXECUTING'
+    Save-I2eExperimentPointer
     $treatment = Invoke-I2ePhase -Phase TREATMENT -Scope $treatmentScope -OutputRoot $treatmentRoot -ServiceSid $serviceSid
+    $pointer.treatment_execution_state = 'COMPLETED'
+    $pointer.treatment_executed = $true
+    $pointer.treatment_result = [string]$treatment.summary.availability
+    $pointer.state = 'TREATMENT_EXECUTED'
+    Save-I2eExperimentPointer
     Write-I2eJson -Path (Join-Path $experimentRoot 'TREATMENT-RESULT.json') -Value $treatment.summary
     $tokenDelta = Compare-I2eTokenDelta -ControlContext $control.context -TreatmentContext $treatment.context
     Write-I2eJson -Path (Join-Path $experimentRoot 'TOKEN-DELTA.json') -Value $tokenDelta
@@ -348,7 +398,7 @@ try {
     $pointer.control_result = [string]$control.summary.availability
     $pointer.treatment_result = [string]$treatment.summary.availability
     $pointer.token_delta_verified = $true
-    Write-I2eJson -Path $PointerPath -Value $pointer
+    Save-I2eExperimentPointer
     Write-Host ('I2E paired experiment completed; evidence root: {0}' -f $experimentRoot)
 }
 catch {
@@ -396,12 +446,13 @@ finally {
             })
         }
         $pointer.rollback_verified = $rollbackVerified
-        Write-I2eJson -Path $PointerPath -Value $pointer
+        if ($rollbackVerified -and $serviceCreated) { $pointer.state = 'ROLLBACK_COMPLETE' }
+        Save-I2eExperimentPointer
         if ($serviceCreated -and $rollbackVerified) {
             Stop-I2eService | Out-Null
             Remove-I2eService
         }
-        Write-I2eJson -Path $PointerPath -Value $pointer
+        Save-I2eExperimentPointer
     }
     catch {
         $cleanupError = $_.Exception

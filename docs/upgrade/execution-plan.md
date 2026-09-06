@@ -1234,7 +1234,7 @@ I2E = PREPARED_NOT_EXECUTED
 MINIMUM_REQUIRED_CAPABILITY = UNRESOLVED
 PRODUCTION_ACCOUNT = UNRESOLVED
 NEXT_TASK = AMD-PRIVILEGE-I2E
-NEXT_GATE = HUMAN_SERVICE_SID_SESYSTEMPROFILE_EXPERIMENT_EXECUTION
+NEXT_GATE = HUMAN_I2E_FAILED_ATTEMPT_CLEANUP
 ~~~
 
 The implementation is split from the historical LocalService and SYSTEM
@@ -1255,8 +1255,54 @@ I2E_REAL_SERVICE_DURING_PREPARATION = 0
 I2E_REAL_LSA_MUTATION_DURING_PREPARATION = 0
 PRODUCTION_ACCOUNT_SELECTION = NOT_AUTHORIZED
 LSA_POLICY_HANDLES = OPERATION_SPECIFIC_MINIMUM_ACCESS
-NEXT_GATE = HUMAN_SERVICE_SID_SESYSTEMPROFILE_EXPERIMENT_EXECUTION
+NEXT_GATE = HUMAN_I2E_FAILED_ATTEMPT_CLEANUP
 ~~~
+
+## AMD-PRIVILEGE-I2E PRE-CONTROL SCM IDENTITY INCIDENT CLOSURE
+
+The first human-authorized I2E invocation did not reach the control phase. The
+qualification wrapper attempted `sc.exe create` with the bare SCM account value
+`LocalService`, and Windows returned exit code `1057` before the service was
+created. This is a harness identity failure, not AMD counter evidence.
+
+```text
+I2E_FIRST_REAL_ATTEMPT = PRE_SERVICE_CREATE_FAILURE
+SC_CREATE_EXIT = 1057
+ROOT_CAUSE = SCM_ACCOUNT_NAME_WAS_BARE_LocalService
+SCM_SERVICE_ACCOUNT = NT AUTHORITY\LocalService
+SERVICE_CREATED = false
+SERVICE_SID_RESOLVED = false
+CONTROL_EXECUTED = false
+TREATMENT_EXECUTED = false
+LSA_MUTATION = false
+AMD_RUNTIME = false
+PAIRED_EXPERIMENT_GATE = UNCONSUMED
+FAILED_ATTEMPT_CLASS = PRE_SERVICE_CREATE
+```
+
+The I2E wrapper now passes the Windows-required `NT AUTHORITY\LocalService`
+form and records explicit service-create, control, right-mutation, treatment,
+rollback, and closed-state fields in `I2E-EXPERIMENT-CURRENT.json`. The cleanup
+wrapper retains an invocation-distinct final pointer inside the evidence root,
+verifies that the exact right was never added (or was exactly rolled back),
+proves that owned service/process state is absent, and only then removes the
+mutable CURRENT pointer. It never removes an all-rights assignment or an
+account-wide LocalService right.
+
+```text
+FAILED_ATTEMPT_POINTER_RECOVERY = PREPARED
+CURRENT_POINTER_FINALIZATION = PREPARED
+REAL_SERVICE_RUNTIME_DURING_REPAIR = 0
+REAL_LSA_MUTATION_DURING_REPAIR = 0
+REAL_AMD_RUNTIME_DURING_REPAIR = 0
+REAL_FAILED_ATTEMPT_CLEANUP_DURING_REPAIR = 0
+NEXT_GATE = HUMAN_I2E_FAILED_ATTEMPT_CLEANUP
+AFTER_CLEANUP_NEXT_GATE = HUMAN_SERVICE_SID_SESYSTEMPROFILE_EXPERIMENT_EXECUTION
+```
+
+The existing failed-attempt pointer and evidence must be closed by the human
+with the repaired cleanup wrapper before any new I2E invocation. No control,
+treatment, LSA mutation, or AMD runtime was executed by the failed attempt.
 
 ## HISTORICAL / SUPERSEDED — AMD-PRIVILEGE-I2D MINIMUM CAPABILITY ROOT-CAUSE FORENSICS
 

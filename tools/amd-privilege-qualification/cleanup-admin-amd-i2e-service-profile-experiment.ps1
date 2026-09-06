@@ -120,24 +120,43 @@ if (-not (Test-Path -LiteralPath $PointerPath -PathType Leaf)) {
 }
 $pointer = Read-I2eCleanupJson -Path $PointerPath
 $experimentId = [string]$pointer.experiment_id
-$serviceSid = [string]$pointer.service_sid
+$serviceSid = [string](Get-I2eCleanupPointerField -Pointer $pointer -Name 'service_sid' -Default '')
 # A pointer may survive service creation before Service SID resolution.
 if ($experimentId -notmatch '^[0-9a-fA-F]{32}$') {
     throw 'I2E pointer has an invalid experiment identity.'
 }
-$rightNeedsRollback = [bool]$pointer.right_added_by_experiment -and -not [bool]$pointer.rollback_verified
+$failedAttemptClass = Resolve-I2eExperimentState -Pointer $pointer
+if ($failedAttemptClass -eq 'CLOSED') {
+    throw 'I2E experiment pointer is already finalized; refusing duplicate cleanup.'
+}
+$pairedGateConsumed = Test-I2ePairedGateConsumed -Pointer $pointer
+$serviceCreateSucceeded = Get-I2eCleanupPointerBoolean -Pointer $pointer -Name 'service_create_succeeded'
+$controlExecuted = Get-I2eCleanupPointerBoolean -Pointer $pointer -Name 'control_executed'
+$treatmentExecuted = Get-I2eCleanupPointerBoolean -Pointer $pointer -Name 'treatment_executed'
+$rightAddedByExperiment = Get-I2eCleanupPointerBoolean -Pointer $pointer -Name 'right_added_by_experiment'
+$rollbackAlreadyVerified = Get-I2eCleanupPointerBoolean -Pointer $pointer -Name 'rollback_verified'
+$rightMutationState = [string](Get-I2eCleanupPointerField -Pointer $pointer -Name 'right_mutation_state' -Default 'NOT_STARTED')
+if ($rightMutationState -eq 'STARTING' -and -not $rightAddedByExperiment) {
+    throw 'I2E pointer records an unresolved right mutation attempt; refusing cleanup without authoritative mutation evidence.'
+}
+$rightNeedsRollback = Test-I2eExactRightRollbackRequired -Pointer $pointer
 if ($rightNeedsRollback -and $serviceSid -notmatch '^S-1-5-80-') {
     throw 'I2E pointer requires exact-right rollback but has no valid Service SID identity.'
 }
 $experimentRoot = Join-Path $QualificationRoot $experimentId
+if (-not (Test-Path -LiteralPath $experimentRoot -PathType Container)) {
+    throw ('I2E experiment evidence root is absent; refusing pointer finalization: {0}' -f $experimentRoot)
+}
 $attempt = '{0}-{1}' -f [DateTime]::UtcNow.ToString('yyyyMMddTHHmmssfffZ'), [Guid]::NewGuid().ToString('N')
 $evidencePath = Join-Path $experimentRoot ('I2E-CLEANUP-RESULT-{0}.json' -f $attempt)
+$finalPointerPath = Join-Path $experimentRoot ('I2E-EXPERIMENT-FINAL-{0}.json' -f $attempt)
 $stopResult = $null
 $rightRollback = $false
 $serviceRemoved = $false
 $brokerGone = $false
 $cliGone = $false
 $cliSessions = @()
+$currentPointerRemoved = $false
 
 try {
     $stopResult = Stop-I2eCleanupService
@@ -209,21 +228,61 @@ try {
     } while ([DateTime]::UtcNow -lt $cliDeadline)
     if (-not $cliGone) { throw 'An owned AMD counter-discovery process identity remained; no unrelated process was killed.' }
 
+    $finalPointer = [ordered]@{}
+    foreach ($property in $pointer.PSObject.Properties) {
+        $finalPointer[$property.Name] = $property.Value
+    }
+    $finalPointer.schema = 'amd-service-profile-experiment-final/v1'
+    $finalPointer.state = 'CLOSED'
+    $finalPointer.service_create_succeeded = $serviceCreateSucceeded
+    $finalPointer.control_executed = $controlExecuted
+    $finalPointer.control_result = Get-I2eCleanupPointerField -Pointer $pointer -Name 'control_result'
+    $finalPointer.right_added_by_experiment = $rightAddedByExperiment
+    $finalPointer.treatment_executed = $treatmentExecuted
+    $finalPointer.treatment_result = Get-I2eCleanupPointerField -Pointer $pointer -Name 'treatment_result'
+    $finalPointer.rollback_verified = $rightRollback
+    $finalPointer.failed_attempt_class = $failedAttemptClass
+    $finalPointer.paired_gate_consumed = $pairedGateConsumed
+    $finalPointer.cleanup_attempt = $attempt
+    $finalPointer.experiment_closed = $true
+    $finalPointer.current_pointer_removed = $false
+    $finalPointer.closed_at_utc = [DateTime]::UtcNow.ToString('o')
+    Write-I2eCleanupJson -Path $finalPointerPath -Value $finalPointer
+
+    Remove-Item -LiteralPath $PointerPath -Force -ErrorAction Stop
+    $currentPointerRemoved = -not (Test-Path -LiteralPath $PointerPath -PathType Leaf)
+    if (-not $currentPointerRemoved) {
+        throw 'I2E CURRENT pointer remained after finalization; refusing successful cleanup.'
+    }
+    $finalPointer.current_pointer_removed = $true
+    $finalPointer.finalization_verified_at_utc = [DateTime]::UtcNow.ToString('o')
+    Write-I2eCleanupJson -Path $finalPointerPath -Value $finalPointer
+
     $result = [ordered]@{
         schema = 'amd-service-profile-cleanup/v1'
         qualification_only = $true
         experiment_id = $experimentId
         cleanup_attempt = $attempt
         cleanup_evidence_path = $evidencePath
+        final_pointer_path = $finalPointerPath
         service_name = $ServiceName
         service_sid = $serviceSid
+        failed_attempt_class = $failedAttemptClass
+        paired_gate_consumed = $pairedGateConsumed
+        service_create_succeeded = $serviceCreateSucceeded
+        control_executed = $controlExecuted
+        treatment_executed = $treatmentExecuted
         stop_control = $stopResult
+        lsa_remove_account_rights_calls = if ($rightNeedsRollback) { 1 } else { 0 }
         right_rollback_verified = $rightRollback
         service_registration_removed = $serviceRemoved
         broker_process_count_after_cleanup = @(Get-I2eOwnedBrokerProcesses).Count
         service_process_gone_after_cleanup = $brokerGone
         cli_session_processes_checked = $cliSessions.Count
         cli_process_gone_after_cleanup = $cliGone
+        experiment_closed = $true
+        current_pointer_finalized = $true
+        current_pointer_removed = $currentPointerRemoved
         amd_installation_mutated = $false
         amd_registry_mutated = $false
         lsa_mutation_scope = 'exact Service SID + SeSystemProfilePrivilege only; no AllRights'
@@ -239,14 +298,24 @@ catch {
         experiment_id = $experimentId
         cleanup_attempt = $attempt
         cleanup_evidence_path = $evidencePath
+        final_pointer_path = $finalPointerPath
         service_name = $ServiceName
         service_sid = $serviceSid
+        failed_attempt_class = $failedAttemptClass
+        paired_gate_consumed = $pairedGateConsumed
+        service_create_succeeded = $serviceCreateSucceeded
+        control_executed = $controlExecuted
+        treatment_executed = $treatmentExecuted
         stop_control = $stopResult
+        lsa_remove_account_rights_calls = if ($rightNeedsRollback) { 1 } else { 0 }
         right_rollback_verified = $rightRollback
         service_registration_removed = $serviceRemoved
         service_process_gone_after_cleanup = $brokerGone
         cli_session_processes_checked = $cliSessions.Count
         cli_process_gone_after_cleanup = $cliGone
+        experiment_closed = $false
+        current_pointer_finalized = $false
+        current_pointer_removed = $currentPointerRemoved
         error = $_.Exception.Message
         recorded_at_utc = [DateTime]::UtcNow.ToString('o')
     }

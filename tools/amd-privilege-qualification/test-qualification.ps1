@@ -355,6 +355,27 @@ $i2eSetupSource = Get-Content -LiteralPath $I2eSetup -Raw
 $i2eCleanupSource = Get-Content -LiteralPath $I2eCleanup -Raw
 $i2eArtifactSha256 = '871CD20D228BD9510606DE640F516F62C2983B9F4A83C1AA807BA35329C778B9'
 . $I2eContract
+$i2eScmAccount = 'NT AUTHORITY\LocalService'
+$i2eScmArguments = @(
+    New-QualificationServiceCreateArguments `
+        -ServiceName 'ResourceTimelineAmdSystemProfileQualification' `
+        -BinPath '"F:\Qualification Root\amd-privilege-qualification.exe" --service-profile-counter-service' `
+        -ServiceAccount $i2eScmAccount `
+        -DisplayName 'Resource Timeline AMD service-profile qualification'
+)
+if ($i2eScmArguments[7] -cne $i2eScmAccount -or
+    $i2eSetupSource -notmatch [regex]::Escape("`$ScServiceAccount = '$i2eScmAccount'") -or
+    $i2eSetupSource -notmatch [regex]::Escape("`$ScServiceAccount -cne '$i2eScmAccount'") -or
+    (Get-Content -LiteralPath (Join-Path $ToolRoot 'run-admin-amd-privilege-qualification.ps1') -Raw) -notmatch [regex]::Escape("`$ServiceAccount = '$i2eScmAccount'")) {
+    throw 'I2E SCM service account contract is not the Windows NT AUTHORITY\\LocalService form.'
+}
+if ($i2eScmArguments -ccontains 'LocalService') {
+    throw 'I2E SCM service account must not use the bare LocalService value.'
+}
+Write-Host 'I2E_SCM_SERVICE_ACCOUNT=PASS'
+Write-Host 'I2E_SCM_ACCOUNT_SID=S-1-5-19'
+Write-Host 'I2E_HISTORICAL_LOCALSERVICE_ACCOUNT_CONTRACT=PASS'
+Write-Host 'I2E_BARE_LOCALSERVICE_REJECTED=PASS'
 $i2ePlan = Get-I2eExperimentPlan -ArtifactSha256 'SYNTHETIC-I2E-ARTIFACT'
 foreach ($requiredI2eContract in @(
         'ResourceTimelineAmdSystemProfileQualification',
@@ -432,11 +453,30 @@ if ($i2eSetupSource -match 'Add-I2eExactServiceProfileRight\s+-ServiceSid\s+\$I2
 }
 if ($i2eCleanupSource -match '(?im)\bStop-Process\b|\btaskkill(?:\.exe)?\b|AllRights\s*=\s*\$true' -or
     $i2eCleanupSource -notmatch 'I2E-CLEANUP-RESULT-' -or
+    $i2eCleanupSource -notmatch 'I2E-EXPERIMENT-FINAL-' -or
+    $i2eCleanupSource -notmatch 'current_pointer_removed' -or
+    $i2eCleanupSource -notmatch 'Remove-Item\s+-LiteralPath\s+\$PointerPath' -or
     $i2eCleanupSource -notmatch 'right_added_by_experiment' -or
     $i2eCleanupSource -notmatch '\$rightNeedsRollback' -or
     $i2eCleanupSource -notmatch 'service creation') {
     throw 'I2E cleanup is not exact, duplicate-safe, and fail-closed.'
 }
+$i2eFailedAttemptFixture = [pscustomobject]@{
+    service_create_succeeded = $false
+    control_executed = $false
+    right_added_by_experiment = $false
+    treatment_executed = $false
+    rollback_verified = $true
+    experiment_closed = $false
+}
+if ((Resolve-I2eExperimentState -Pointer $i2eFailedAttemptFixture) -cne 'PRE_SERVICE_CREATE' -or
+    (Test-I2ePairedGateConsumed -Pointer $i2eFailedAttemptFixture) -or
+    (Test-I2eExactRightRollbackRequired -Pointer $i2eFailedAttemptFixture)) {
+    throw 'I2E pre-service failed-attempt recovery fixture was not fail-closed and unconsumed.'
+}
+Write-Host 'I2E_PRE_SERVICE_FAILURE_RECOVERY=PASS'
+Write-Host 'I2E_NO_LSA_ROLLBACK_FOR_PRE_SERVICE=PASS'
+Write-Host 'I2E_CURRENT_POINTER_FINALIZATION=PASS'
 if ($i2eSetupSource -notmatch 'control_result' -or
     $i2eSetupSource -notmatch 'treatment_result' -or
     $i2eSetupSource -notmatch 'POWER_UNAVAILABLE' -or

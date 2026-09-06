@@ -32,7 +32,7 @@ SYSTEM_POWER_COUNTER_ACCESS = AVAILABLE / REAL_SYSTEM_DIFFERENTIAL
 SECURITY_CONTEXT_DIFFERENTIAL = REAL_CONFIRMED
 MINIMUM_REQUIRED_CAPABILITY = UNRESOLVED
 PRODUCTION_ACCOUNT = UNRESOLVED
-NEXT_GATE = HUMAN_SERVICE_SID_SESYSTEMPROFILE_EXPERIMENT_EXECUTION
+NEXT_GATE = HUMAN_I2E_FAILED_ATTEMPT_CLEANUP
 NEXT_TASK = AMD-PRIVILEGE-I2E
 PRODUCTION_ADMISSION = NOT_COMPLETE
 ```
@@ -47,6 +47,38 @@ the LocalService context. `AMD-PRIVILEGE-I2B` prepared a non-sampling
 `timechart --list` differential, and `AMD-PRIVILEGE-I2C` now prepares a
 distinct SYSTEM-only comparison harness. Neither selects LocalSystem, alters
 AMD permissions, or admits a provider.
+
+## CURRENT I2E PRE-CONTROL INCIDENT
+
+The first human-authorized I2E invocation stopped at `sc.exe create` with exit
+code `1057`. The wrapper supplied the bare SCM account value `LocalService`,
+which is not the Windows predefined account spelling accepted by the Service
+Control Manager. The service was not created, no Service SID was resolved, and
+neither paired phase began.
+
+```text
+I2E_FIRST_REAL_ATTEMPT = PRE_SERVICE_CREATE_FAILURE
+SC_CREATE_EXIT = 1057
+ROOT_CAUSE = SCM_ACCOUNT_NAME_WAS_BARE_LocalService
+SCM_SERVICE_ACCOUNT = NT AUTHORITY\LocalService
+SERVICE_CREATED = false
+SERVICE_SID_RESOLVED = false
+CONTROL_EXECUTED = false
+TREATMENT_EXECUTED = false
+LSA_MUTATION = false
+AMD_RUNTIME = false
+PAIRED_EXPERIMENT_GATE = UNCONSUMED
+FAILED_ATTEMPT_POINTER_RECOVERY = PREPARED
+CURRENT_POINTER_FINALIZATION = PREPARED
+NEXT_GATE = HUMAN_I2E_FAILED_ATTEMPT_CLEANUP
+```
+
+The repaired orchestration records explicit gate-consumption state and uses
+`NT AUTHORITY\LocalService` for the SCM `obj=` value. Its cleanup preserves a
+finalized, invocation-distinct pointer in the experiment evidence root and
+removes the mutable CURRENT pointer only after exact rollback/no-mutation,
+service absence, and owned-process absence have been verified. The human must
+run that cleanup once before a future paired control/treatment execution.
 
 ## HISTORICAL / SUPERSEDED INITIAL DECISION AND STATUS
 
