@@ -182,31 +182,53 @@ function Write-I2eControlRecovery {
         [Parameter(Mandatory = $true)]$ControlEvidence
     )
     $experimentRoot = Join-Path $QualificationRoot $ExpectedExperimentId
-    Write-I2eJson -Path (Join-Path $experimentRoot 'CONTROL-RECOVERY.json') -Value ([ordered]@{
-        schema = 'amd-service-profile-control-recovery/v1'
-        qualification_only = $true
-        experiment_id = $ExpectedExperimentId
-        control_scope = $ExpectedControlScope
-        original_pointer_state = [string](Get-I2eResumeProperty $Pointer 'state' -Default 'UNKNOWN')
-        original_control_execution_state = [string](Get-I2eResumeProperty $Pointer 'control_execution_state' -Default 'UNKNOWN')
-        recovery_reason = 'POWERSHELL_AUTOMATIC_VARIABLE_PID_COLLISION_AFTER_REAL_CONTROL'
-        authoritative_sources = @(
-            (Join-Path $ControlEvidence.control_root 'SERVICE-PROFILE-TOKEN-GATE.json'),
-            (Join-Path $ControlEvidence.control_root 'SERVICE-PROFILE-SERVICE-CONTEXT.json'),
-            (Join-Path $ControlEvidence.control_root 'SERVICE-PROFILE-COUNTER-SUMMARY.json'),
-            (Join-Path $ControlEvidence.control_root 'AMD-COUNTER-DISCOVERY-RESULT.json'),
-            (Join-Path $ControlEvidence.control_root 'AMD-COUNTER-DISCOVERY-LAUNCH.json')
-        )
-        control_real_executed = $true
-        control_result = 'POWER_UNAVAILABLE'
-        paired_gate_consumed = $true
-        recovered_at_utc = [DateTime]::UtcNow.ToString('o')
-    })
-    $Pointer.control_execution_state = 'COMPLETED_RECOVERED'
-    $Pointer.control_executed = $true
-    $Pointer.control_result = 'POWER_UNAVAILABLE'
-    $Pointer.paired_gate_consumed = $true
-    $Pointer.state = 'CONTROL_EXECUTED_RECOVERED'
+    $recoveryPath = Join-Path $experimentRoot 'CONTROL-RECOVERY.json'
+    $authoritativeSources = @(
+        (Join-Path $ControlEvidence.control_root 'SERVICE-PROFILE-TOKEN-GATE.json'),
+        (Join-Path $ControlEvidence.control_root 'SERVICE-PROFILE-SERVICE-CONTEXT.json'),
+        (Join-Path $ControlEvidence.control_root 'SERVICE-PROFILE-COUNTER-SUMMARY.json'),
+        (Join-Path $ControlEvidence.control_root 'AMD-COUNTER-DISCOVERY-RESULT.json'),
+        (Join-Path $ControlEvidence.control_root 'AMD-COUNTER-DISCOVERY-LAUNCH.json')
+    )
+    if (Test-Path -LiteralPath $recoveryPath -PathType Leaf) {
+        $existing = Read-I2eJson -Path $recoveryPath
+        foreach ($check in @(
+                @{ Name = 'schema'; Actual = Get-I2eResumeProperty $existing 'schema'; Expected = 'amd-service-profile-control-recovery/v1' },
+                @{ Name = 'experiment_id'; Actual = Get-I2eResumeProperty $existing 'experiment_id'; Expected = $ExpectedExperimentId },
+                @{ Name = 'control_scope'; Actual = Get-I2eResumeProperty $existing 'control_scope'; Expected = $ExpectedControlScope },
+                @{ Name = 'control_result'; Actual = Get-I2eResumeProperty $existing 'control_result'; Expected = 'POWER_UNAVAILABLE' }
+            )) {
+            if (-not (Test-I2eResumeExactValue $check.Actual $check.Expected)) {
+                throw ('Existing CONTROL-RECOVERY.json mismatch: {0}' -f $check.Name)
+            }
+        }
+        if (-not (Test-I2eResumeBoolean (Get-I2eResumeProperty $existing 'control_real_executed') $true) -or
+            -not (Test-I2eResumeBoolean (Get-I2eResumeProperty $existing 'paired_gate_consumed') $true) -or
+            (@(Get-I2eResumeProperty $existing 'authoritative_sources' -Default @()) -join "`n") -cne ($authoritativeSources -join "`n")) {
+            throw 'Existing CONTROL-RECOVERY.json does not validate against the authoritative CONTROL evidence.'
+        }
+    }
+    else {
+        Write-I2eJson -Path $recoveryPath -Value ([ordered]@{
+            schema = 'amd-service-profile-control-recovery/v1'
+            qualification_only = $true
+            experiment_id = $ExpectedExperimentId
+            control_scope = $ExpectedControlScope
+            original_pointer_state = [string](Get-I2eResumeProperty $Pointer 'state' -Default 'UNKNOWN')
+            original_control_execution_state = [string](Get-I2eResumeProperty $Pointer 'control_execution_state' -Default 'UNKNOWN')
+            recovery_reason = 'POWERSHELL_AUTOMATIC_VARIABLE_PID_COLLISION_AFTER_REAL_CONTROL'
+            authoritative_sources = $authoritativeSources
+            control_real_executed = $true
+            control_result = 'POWER_UNAVAILABLE'
+            paired_gate_consumed = $true
+            recovered_at_utc = [DateTime]::UtcNow.ToString('o')
+        })
+    }
+    Set-I2eObjectProperty -Object $Pointer -Name 'control_execution_state' -Value 'COMPLETED_RECOVERED' | Out-Null
+    Set-I2eObjectProperty -Object $Pointer -Name 'control_executed' -Value $true | Out-Null
+    Set-I2eObjectProperty -Object $Pointer -Name 'control_result' -Value 'POWER_UNAVAILABLE' | Out-Null
+    Set-I2eObjectProperty -Object $Pointer -Name 'paired_gate_consumed' -Value $true | Out-Null
+    Set-I2eObjectProperty -Object $Pointer -Name 'state' -Value 'CONTROL_EXECUTED_RECOVERED' | Out-Null
     Write-I2eJson -Path $PointerPath -Value $Pointer
 }
 
@@ -525,13 +547,13 @@ if (-not $amdPreflightEvidence.pass) {
 }
 $before = Assert-I2eTreatmentResumeSecurityGate -ServiceSid $ExpectedServiceSid
 Write-I2eControlRecovery -Pointer $pointer -ControlEvidence $controlEvidence
-$pointer.right_mutation_state = 'STARTING'
-$pointer.state = 'RIGHT_MUTATION_PENDING'
-$pointer.policy_rollback_verified = $false
-$pointer.effective_token_teardown_verified = $false
-$pointer.full_rollback_verified = $false
-$pointer.service_registration_removed = $false
-$pointer.rollback_verified = $false
+Set-I2eObjectProperty -Object $pointer -Name 'right_mutation_state' -Value 'STARTING' | Out-Null
+Set-I2eObjectProperty -Object $pointer -Name 'state' -Value 'RIGHT_MUTATION_PENDING' | Out-Null
+Set-I2eObjectProperty -Object $pointer -Name 'policy_rollback_verified' -Value $false | Out-Null
+Set-I2eObjectProperty -Object $pointer -Name 'effective_token_teardown_verified' -Value $false | Out-Null
+Set-I2eObjectProperty -Object $pointer -Name 'full_rollback_verified' -Value $false | Out-Null
+Set-I2eObjectProperty -Object $pointer -Name 'service_registration_removed' -Value $false | Out-Null
+Set-I2eObjectProperty -Object $pointer -Name 'rollback_verified' -Value $false | Out-Null
 Write-I2eJson -Path $PointerPath -Value $pointer
 $rightAdded = $false
 $treatment = $null
@@ -541,21 +563,21 @@ $cleanupError = $null
 try {
     Add-I2eExactServiceProfileRight -ServiceSid $ExpectedServiceSid
     $rightAdded = $true
-    $pointer.right_added_by_experiment = $true
-    $pointer.right_mutation_state = 'COMPLETED'
-    $pointer.state = 'RIGHT_MUTATED'
+    Set-I2eObjectProperty -Object $pointer -Name 'right_added_by_experiment' -Value $true | Out-Null
+    Set-I2eObjectProperty -Object $pointer -Name 'right_mutation_state' -Value 'COMPLETED' | Out-Null
+    Set-I2eObjectProperty -Object $pointer -Name 'state' -Value 'RIGHT_MUTATED' | Out-Null
     Write-I2eJson -Path $PointerPath -Value $pointer
     $null = Write-I2eTreatmentMutationApplied -ServiceSid $ExpectedServiceSid -Before $before
 
-    $pointer.treatment_execution_state = 'STARTING'
-    $pointer.state = 'TREATMENT_EXECUTING'
+    Set-I2eObjectProperty -Object $pointer -Name 'treatment_execution_state' -Value 'STARTING' | Out-Null
+    Set-I2eObjectProperty -Object $pointer -Name 'state' -Value 'TREATMENT_EXECUTING' | Out-Null
     Write-I2eJson -Path $PointerPath -Value $pointer
     $treatment = Invoke-I2ePhase -Phase TREATMENT -Scope $ExpectedTreatmentScope -OutputRoot (Join-Path $QualificationRoot $ExpectedTreatmentScope) -ServiceSid $ExpectedServiceSid
     Assert-I2eTreatmentTokenGate -TokenGate $treatment.token_gate -Context $treatment.context -ExpectedServiceSid $ExpectedServiceSid
-    $pointer.treatment_execution_state = 'COMPLETED'
-    $pointer.treatment_executed = $true
-    $pointer.treatment_result = [string]$treatment.summary.availability
-    $pointer.state = 'TREATMENT_EXECUTED'
+    Set-I2eObjectProperty -Object $pointer -Name 'treatment_execution_state' -Value 'COMPLETED' | Out-Null
+    Set-I2eObjectProperty -Object $pointer -Name 'treatment_executed' -Value $true | Out-Null
+    Set-I2eObjectProperty -Object $pointer -Name 'treatment_result' -Value ([string]$treatment.summary.availability) | Out-Null
+    Set-I2eObjectProperty -Object $pointer -Name 'state' -Value 'TREATMENT_EXECUTED' | Out-Null
     Write-I2eJson -Path $PointerPath -Value $pointer
     Write-I2eJson -Path (Join-Path $experimentRoot 'TREATMENT-RESULT.json') -Value $treatment.summary
     $delta = Compare-I2eTokenDelta -ControlContext $controlEvidence.context -TreatmentContext $treatment.context
@@ -573,21 +595,21 @@ finally {
                 -ExperimentRoot $experimentRoot `
                 -RightAddedByExperiment $true
             $rollbackVerified = [bool]$rollbackResult.full_rollback_verified
-            $pointer.policy_rollback_verified = $rollbackResult.policy_rollback_verified
-            $pointer.effective_token_teardown_verified = $rollbackResult.effective_token_teardown_verified
-            $pointer.full_rollback_verified = $rollbackResult.full_rollback_verified
-            $pointer.service_stop_attempted = $rollbackResult.service_stop_attempted
-            $pointer.service_stop_verified = $rollbackResult.service_stop_verified
-            $pointer.service_state_after_stop = $rollbackResult.service_state_after_stop
-            $pointer.service_pid_after_stop = $rollbackResult.service_pid_after_stop
-            $pointer.owned_broker_process_count_after_stop = $rollbackResult.owned_broker_process_count_after_stop
-            $pointer.amd_cli_process_count_after_stop = $rollbackResult.amd_cli_process_count_after_stop
-            $pointer.service_registration_removed = $rollbackResult.service_registration_removed
-            $pointer.rollback_verified = $rollbackVerified
-            if ($rollbackResult.policy_rollback_verified) { $pointer.right_mutation_state = 'ROLLED_BACK' }
-            if ($rollbackResult.full_rollback_verified) { $pointer.state = 'FULL_ROLLBACK_COMPLETE' }
-            elseif ($rollbackResult.policy_rollback_verified) { $pointer.state = 'POLICY_ROLLBACK_COMPLETE' }
-            else { $pointer.state = 'SERVICE_STOP_OR_POLICY_ROLLBACK_PENDING' }
+            Set-I2eObjectProperty -Object $pointer -Name 'policy_rollback_verified' -Value $rollbackResult.policy_rollback_verified | Out-Null
+            Set-I2eObjectProperty -Object $pointer -Name 'effective_token_teardown_verified' -Value $rollbackResult.effective_token_teardown_verified | Out-Null
+            Set-I2eObjectProperty -Object $pointer -Name 'full_rollback_verified' -Value $rollbackResult.full_rollback_verified | Out-Null
+            Set-I2eObjectProperty -Object $pointer -Name 'service_stop_attempted' -Value $rollbackResult.service_stop_attempted | Out-Null
+            Set-I2eObjectProperty -Object $pointer -Name 'service_stop_verified' -Value $rollbackResult.service_stop_verified | Out-Null
+            Set-I2eObjectProperty -Object $pointer -Name 'service_state_after_stop' -Value $rollbackResult.service_state_after_stop | Out-Null
+            Set-I2eObjectProperty -Object $pointer -Name 'service_pid_after_stop' -Value $rollbackResult.service_pid_after_stop | Out-Null
+            Set-I2eObjectProperty -Object $pointer -Name 'owned_broker_process_count_after_stop' -Value $rollbackResult.owned_broker_process_count_after_stop | Out-Null
+            Set-I2eObjectProperty -Object $pointer -Name 'amd_cli_process_count_after_stop' -Value $rollbackResult.amd_cli_process_count_after_stop | Out-Null
+            Set-I2eObjectProperty -Object $pointer -Name 'service_registration_removed' -Value $rollbackResult.service_registration_removed | Out-Null
+            Set-I2eObjectProperty -Object $pointer -Name 'rollback_verified' -Value $rollbackVerified | Out-Null
+            if ($rollbackResult.policy_rollback_verified) { Set-I2eObjectProperty -Object $pointer -Name 'right_mutation_state' -Value 'ROLLED_BACK' | Out-Null }
+            if ($rollbackResult.full_rollback_verified) { Set-I2eObjectProperty -Object $pointer -Name 'state' -Value 'FULL_ROLLBACK_COMPLETE' | Out-Null }
+            elseif ($rollbackResult.policy_rollback_verified) { Set-I2eObjectProperty -Object $pointer -Name 'state' -Value 'POLICY_ROLLBACK_COMPLETE' | Out-Null }
+            else { Set-I2eObjectProperty -Object $pointer -Name 'state' -Value 'SERVICE_STOP_OR_POLICY_ROLLBACK_PENDING' | Out-Null }
             if (-not $rollbackResult.full_rollback_verified -or -not $rollbackResult.service_registration_removed) {
                 $cleanupError = [Exception]::new('I2E treatment cleanup did not prove full rollback and service removal; CURRENT pointer retained.')
             }

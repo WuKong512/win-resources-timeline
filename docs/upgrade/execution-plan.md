@@ -1239,6 +1239,50 @@ PRODUCTION_ACCOUNT = UNRESOLVED
 NEXT_GATE = HUMAN_I2E_TREATMENT_ONLY_RESUME_REVIEW
 ```
 
+## PR22 I2E historical pointer schema compatibility closure
+
+The latest treatment-only invocation stopped before LSA mutation because a
+historical `ConvertFrom-Json` pointer was a `PSCustomObject` without the newer
+rollback fields. Direct assignment to a missing property failed during the
+pre-mutation pointer update. The real CONTROL recovery and read-only AMD CLI
+identity revalidation were already valid and remain authoritative; this was a
+pre-mutation orchestration incident, not a treatment runtime result.
+
+```text
+I2E_TREATMENT_ATTEMPT = PRE_MUTATION_ORCHESTRATION_FAILURE
+ROOT_CAUSE = HISTORICAL_PSCUSTOMOBJECT_SCHEMA_EVOLUTION_UNSAFE_DIRECT_PROPERTY_ASSIGNMENT
+CONTROL_RECOVERY = REAL_PERSISTED
+CONTROL_RESULT = POWER_UNAVAILABLE
+AMD_CLI_REVALIDATION = REAL_READ_ONLY_PASS
+LSA_MUTATION = 0
+SERVICE_START = 0
+TREATMENT_RUNTIME = 0
+AMD_RUNTIME = 0
+SERVICE_FINAL_STATE = Stopped / PID0
+DEDICATED_SERVICE_SID_RIGHT = ABSENT
+TREATMENT_GATE = STILL_UNCONSUMED
+SET_OR_ADD_PROPERTY_HELPER = PASS
+HISTORICAL_JSON_POINTER_FIXTURE = PASS
+POINTER_PERSIST_BEFORE_LSA_ADD = PASS
+POST_REMOVE_PRE_POINTER_CRASH_RECOVERY = PASS
+PRE_REMOVE_DUAL_READBACK = PASS
+POLICY_STATE_DRIFT = FAIL_CLOSED
+CONTROL_RERUN = FORBIDDEN
+REAL_LSA_MUTATION_DURING_REPAIR = 0
+REAL_SERVICE_RUNTIME_DURING_REPAIR = 0
+REAL_AMD_RUNTIME_DURING_REPAIR = 0
+NEXT_GATE = HUMAN_I2E_TREATMENT_ONLY_RESUME_REVIEW
+```
+
+All schema-evolving writes to a deserialized CURRENT pointer now use one
+set-or-add helper, preserving false, null, zero, and empty-string values.
+Cleanup performs fresh direct-right and assignment readback before deciding on
+an exact remove, so a right already removed before a pointer write or crash is
+recorded as `POLICY_ALREADY_ABSENT_ON_RECOVERY` without a duplicate LSA call.
+Unexpected policy-state drift and unavailable readback fail closed. The
+authoritative CONTROL phase was not repeated and the real treatment gate
+remains unconsumed.
+
 ## HISTORICAL / SUPERSEDED — AMD-PRIVILEGE-I2C SYSTEM PRE-RUN CLOSURE
 
 The SYSTEM comparison remains a dedicated, non-IPC, non-sampling qualification

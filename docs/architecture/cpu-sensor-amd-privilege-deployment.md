@@ -891,6 +891,40 @@ enforces the treatment token gate before AMD, and performs exact rollback and
 cleanup. No recovery, cleanup, service, LSA mutation, or AMD runtime was run
 during this offline repair.
 
+## AMD-PRIVILEGE-I2E HISTORICAL POINTER SCHEMA COMPATIBILITY CLOSURE
+
+The latest treatment-only attempt stopped before mutation because the
+historical CURRENT pointer was a `PSCustomObject` without the newer rollback
+fields and direct property assignment could not evolve its schema. Active I2E
+pointer updates now use a canonical set-or-add helper and persist the
+pre-mutation state before `LsaAddAccountRights` can run. The immutable CONTROL
+evidence remains authoritative and the treatment gate remains unconsumed.
+
+```text
+I2E_TREATMENT_ATTEMPT = PRE_MUTATION_ORCHESTRATION_FAILURE
+ROOT_CAUSE = HISTORICAL_PSCUSTOMOBJECT_SCHEMA_EVOLUTION_UNSAFE_DIRECT_PROPERTY_ASSIGNMENT
+CONTROL_RECOVERY = REAL_PERSISTED
+CONTROL_RESULT = POWER_UNAVAILABLE
+AMD_CLI_REVALIDATION = REAL_READ_ONLY_PASS
+LSA_MUTATION = 0
+SERVICE_START = 0
+TREATMENT_RUNTIME = 0
+AMD_RUNTIME = 0
+SET_OR_ADD_PROPERTY_HELPER = PASS
+HISTORICAL_JSON_POINTER_FIXTURE = PASS
+POINTER_PERSIST_BEFORE_LSA_ADD = PASS
+PRE_REMOVE_DUAL_READBACK = PASS
+POST_REMOVE_PRE_POINTER_CRASH_RECOVERY = PASS
+POLICY_STATE_DRIFT = FAIL_CLOSED
+NEXT_GATE = HUMAN_I2E_TREATMENT_ONLY_RESUME_REVIEW
+```
+
+Cleanup distinguishes policy rollback from effective token teardown and
+performs fresh dual LSA readback before an exact removal. If both directions
+already prove absence, it records `POLICY_ALREADY_ABSENT_ON_RECOVERY` and makes
+zero duplicate removal calls. No service, LSA mutation, or AMD runtime was
+executed during this offline closure.
+
 > HISTORICAL / SUPERSEDED CURRENT-STATE SNAPSHOT: AMD-PRIVILEGE-I2D
 
 ## HISTORICAL / SUPERSEDED — AMD-PRIVILEGE-I2D MINIMUM CAPABILITY FORENSICS

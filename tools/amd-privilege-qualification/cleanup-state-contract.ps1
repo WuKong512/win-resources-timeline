@@ -38,6 +38,28 @@ function Get-I2eCleanupPointerField {
     return $Default
 }
 
+function Set-I2eObjectProperty {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][object]$Object,
+        [Parameter(Mandatory = $true)][string]$Name,
+        [AllowNull()][object]$Value
+    )
+
+    $property = @(
+        $Object.PSObject.Properties |
+            Where-Object Name -eq $Name |
+            Select-Object -First 1
+    )
+    if ($property.Count -eq 1) {
+        $property[0].Value = $Value
+    }
+    else {
+        $Object | Add-Member -MemberType NoteProperty -Name $Name -Value $Value
+    }
+    return $Object
+}
+
 function Get-I2eCleanupPointerBoolean {
     [CmdletBinding()]
     param(
@@ -126,6 +148,93 @@ function Test-I2ePolicyRollbackStateDrift {
 
     $state = Get-I2ePolicyRollbackState -Pointer $Pointer
     return $state.verified -and $ReadbackAvailable -and ($RightPresent -or $AssignmentPresent)
+}
+
+function Resolve-I2ePolicyRollbackDecision {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][object]$Pointer,
+        [Parameter(Mandatory = $true)][bool]$ReadbackAvailable,
+        [Parameter(Mandatory = $true)][bool]$RightPresent,
+        [Parameter(Mandatory = $true)][bool]$AssignmentPresent
+    )
+
+    $rightAdded = Get-I2eCleanupPointerBoolean -Pointer $Pointer -Name 'right_added_by_experiment'
+    $policyState = Get-I2ePolicyRollbackState -Pointer $Pointer
+    $policyPresent = $RightPresent -or $AssignmentPresent
+
+    if (-not $rightAdded) {
+        return [pscustomobject]@{
+            right_added_by_experiment = $false
+            policy_rollback_required = $false
+            policy_remove_allowed = $false
+            policy_rollback_verified = $true
+            policy_readback_required = $false
+            policy_already_absent = $false
+            policy_state_drift = $false
+            fail_closed = $false
+            policy_remove_skipped_reason = 'NO_RIGHT_ADDED'
+        }
+    }
+
+    if (-not $ReadbackAvailable) {
+        return [pscustomobject]@{
+            right_added_by_experiment = $true
+            policy_rollback_required = -not $policyState.verified
+            policy_remove_allowed = $false
+            policy_rollback_verified = $false
+            policy_readback_required = $true
+            policy_already_absent = $false
+            policy_state_drift = $false
+            fail_closed = $true
+            policy_remove_skipped_reason = 'READBACK_UNAVAILABLE'
+        }
+    }
+
+    if (-not $policyPresent) {
+        return [pscustomobject]@{
+            right_added_by_experiment = $true
+            policy_rollback_required = $false
+            policy_remove_allowed = $false
+            policy_rollback_verified = $true
+            policy_readback_required = $true
+            policy_already_absent = $true
+            policy_state_drift = $false
+            fail_closed = $false
+            policy_remove_skipped_reason = if ($policyState.verified) {
+                'ALREADY_VERIFIED_REMOVED'
+            }
+            else {
+                'POLICY_ALREADY_ABSENT_ON_RECOVERY'
+            }
+        }
+    }
+
+    if ($policyState.verified) {
+        return [pscustomobject]@{
+            right_added_by_experiment = $true
+            policy_rollback_required = $false
+            policy_remove_allowed = $false
+            policy_rollback_verified = $false
+            policy_readback_required = $true
+            policy_already_absent = $false
+            policy_state_drift = $true
+            fail_closed = $true
+            policy_remove_skipped_reason = 'POLICY_ROLLBACK_STATE_DRIFT'
+        }
+    }
+
+    [pscustomobject]@{
+        right_added_by_experiment = $true
+        policy_rollback_required = $true
+        policy_remove_allowed = $true
+        policy_rollback_verified = $false
+        policy_readback_required = $true
+        policy_already_absent = $false
+        policy_state_drift = $false
+        fail_closed = $false
+        policy_remove_skipped_reason = $null
+    }
 }
 
 function Get-I2eRollbackVerification {

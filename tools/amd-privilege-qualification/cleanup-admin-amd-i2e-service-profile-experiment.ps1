@@ -172,7 +172,6 @@ if (-not (Test-Path -LiteralPath $experimentRoot -PathType Container)) {
 $pinnedAmdCliPath = Get-I2ePinnedAmdCliPath -ExperimentRoot $experimentRoot
 $policyRollbackState = Get-I2ePolicyRollbackState -Pointer $pointer
 $policyRollbackStateSource = [string]$policyRollbackState.source
-$rightNeedsRollback = Test-I2eExactRightRollbackRequired -Pointer $pointer
 if ($rightAddedByExperiment -and $serviceSid -notmatch '^S-1-5-80-') {
     throw 'I2E pointer records an added right but has no valid Service SID identity.'
 }
@@ -212,32 +211,48 @@ try {
     $ownedBrokerCountAfterStop = @(Get-I2eOwnedBrokerProcesses).Count
     $amdCliCountAfterStop = @(Get-I2eOwnedAmdProcesses -ExpectedAmdCliPath $pinnedAmdCliPath).Count
     if ($rightAddedByExperiment) {
-        if ($rightNeedsRollback) {
-            $policyRemoveAttempted = $true
-            $lsaRemoveAccountRightsCalls = 1
-            Remove-I2eExactServiceProfileRight -ServiceSid $serviceSid
-        }
-        else {
-            $policyRemoveSkippedReason = 'ALREADY_VERIFIED_REMOVED'
-        }
-        $direct = Get-I2eDirectAccountRightsSnapshot -Label 'cleanup-after-rollback' -Sid $serviceSid
+        # Always read both LSA directions before deciding whether a remove is
+        # necessary.  This closes the crash window after a successful remove
+        # but before pointer.policy_rollback_verified was persisted.
+        $direct = Get-I2eDirectAccountRightsSnapshot -Label 'cleanup-before-rollback' -Sid $serviceSid
         $assigned = Get-I2eUserRightAssignmentSnapshot -Right $I2eRequiredRight
         $policyReadbackReverified = $true
         $policyReadbackAvailable = $direct.status -eq 'READ' -and $assigned.status -eq 'READ'
         $directRightPresent = $policyReadbackAvailable -and @($direct.direct_rights) -contains $I2eRequiredRight
         $assignmentPresent = $policyReadbackAvailable -and @($assigned.assigned_principals) -contains $serviceSid
-        if (-not $policyReadbackAvailable -or $directRightPresent -or $assignmentPresent) {
-            if (Test-I2ePolicyRollbackStateDrift -Pointer $pointer `
-                    -ReadbackAvailable $policyReadbackAvailable `
-                    -RightPresent $directRightPresent `
-                    -AssignmentPresent $assignmentPresent) {
-                $policyStateDrift = $true
+        $policyDecision = Resolve-I2ePolicyRollbackDecision `
+            -Pointer $pointer `
+            -ReadbackAvailable $policyReadbackAvailable `
+            -RightPresent $directRightPresent `
+            -AssignmentPresent $assignmentPresent
+        $policyStateDrift = [bool]$policyDecision.policy_state_drift
+        $policyRollbackStateSource = '{0}+fresh_dual_readback' -f $policyRollbackStateSource
+        if ($policyDecision.fail_closed) {
+            if ($policyStateDrift) {
                 throw 'POLICY_ROLLBACK_STATE_DRIFT: pointer claimed the exact right was removed, but fresh dual LSA readback disagreed.'
             }
-            throw 'I2E cleanup could not verify removal of the exact experiment right.'
+            throw 'I2E cleanup could not read both exact-right LSA directions; refusing mutation.'
+        }
+        if ($policyDecision.policy_remove_allowed) {
+            $policyRemoveAttempted = $true
+            $lsaRemoveAccountRightsCalls = 1
+            Remove-I2eExactServiceProfileRight -ServiceSid $serviceSid
+            $policyRemoveSkippedReason = $null
+            $direct = Get-I2eDirectAccountRightsSnapshot -Label 'cleanup-after-rollback' -Sid $serviceSid
+            $assigned = Get-I2eUserRightAssignmentSnapshot -Right $I2eRequiredRight
+            $policyReadbackAvailable = $direct.status -eq 'READ' -and $assigned.status -eq 'READ'
+            $directRightPresent = $policyReadbackAvailable -and @($direct.direct_rights) -contains $I2eRequiredRight
+            $assignmentPresent = $policyReadbackAvailable -and @($assigned.assigned_principals) -contains $serviceSid
+            if (-not $policyReadbackAvailable -or $directRightPresent -or $assignmentPresent) {
+                throw 'I2E cleanup could not verify removal of the exact experiment right.'
+            }
+            $policyRollbackVerified = $true
+        }
+        else {
+            $policyRemoveSkippedReason = [string]$policyDecision.policy_remove_skipped_reason
+            $policyRollbackVerified = [bool]$policyDecision.policy_rollback_verified
         }
         $rightRollback = $true
-        $policyRollbackVerified = $true
     }
     else {
         $rightRollback = $true
@@ -246,16 +261,16 @@ try {
 
     # Persist policy rollback immediately.  A later service/process teardown or
     # deletion failure must not make a retry issue a duplicate LSA removal.
-    $pointer.policy_rollback_verified = $policyRollbackVerified
-    $pointer.effective_token_teardown_verified = $false
-    $pointer.full_rollback_verified = $false
-    $pointer.rollback_verified = $false
-    $pointer.policy_remove_attempted = $policyRemoveAttempted
-    $pointer.policy_readback_reverified = $policyReadbackReverified
-    $pointer.policy_remove_skipped_reason = $policyRemoveSkippedReason
-    $pointer.policy_rollback_state_source = $policyRollbackStateSource
-    $pointer.policy_state_drift = $policyStateDrift
-    $pointer.state = if ($policyRollbackVerified) { 'POLICY_ROLLBACK_COMPLETE' } else { 'POLICY_ROLLBACK_PENDING' }
+    Set-I2eObjectProperty -Object $pointer -Name 'policy_rollback_verified' -Value $policyRollbackVerified | Out-Null
+    Set-I2eObjectProperty -Object $pointer -Name 'effective_token_teardown_verified' -Value $false | Out-Null
+    Set-I2eObjectProperty -Object $pointer -Name 'full_rollback_verified' -Value $false | Out-Null
+    Set-I2eObjectProperty -Object $pointer -Name 'rollback_verified' -Value $false | Out-Null
+    Set-I2eObjectProperty -Object $pointer -Name 'policy_remove_attempted' -Value $policyRemoveAttempted | Out-Null
+    Set-I2eObjectProperty -Object $pointer -Name 'policy_readback_reverified' -Value $policyReadbackReverified | Out-Null
+    Set-I2eObjectProperty -Object $pointer -Name 'policy_remove_skipped_reason' -Value $policyRemoveSkippedReason | Out-Null
+    Set-I2eObjectProperty -Object $pointer -Name 'policy_rollback_state_source' -Value $policyRollbackStateSource | Out-Null
+    Set-I2eObjectProperty -Object $pointer -Name 'policy_state_drift' -Value $policyStateDrift | Out-Null
+    Set-I2eObjectProperty -Object $pointer -Name 'state' -Value (if ($policyRollbackVerified) { 'POLICY_ROLLBACK_COMPLETE' } else { 'POLICY_ROLLBACK_PENDING' }) | Out-Null
     Write-I2eCleanupJson -Path $PointerPath -Value $pointer
 
     $brokerDeadline = [DateTime]::UtcNow.AddSeconds(30)
@@ -308,6 +323,27 @@ try {
     $serviceStopVerified = $rollbackVerification.service_stop_verified
     $effectiveTokenTeardownVerified = $rollbackVerification.effective_token_teardown_verified
     $fullRollbackVerified = $rollbackVerification.full_rollback_verified
+    $pointerStateAfterVerification = if ($fullRollbackVerified) {
+        'FULL_ROLLBACK_COMPLETE'
+    }
+    elseif ($policyRollbackVerified) {
+        'POLICY_ROLLBACK_COMPLETE'
+    }
+    else {
+        'SERVICE_STOP_OR_POLICY_ROLLBACK_PENDING'
+    }
+    Set-I2eObjectProperty -Object $pointer -Name 'service_stop_attempted' -Value $serviceStopAttempted | Out-Null
+    Set-I2eObjectProperty -Object $pointer -Name 'service_stop_verified' -Value $serviceStopVerified | Out-Null
+    Set-I2eObjectProperty -Object $pointer -Name 'service_state_after_stop' -Value $serviceStateAfterStop | Out-Null
+    Set-I2eObjectProperty -Object $pointer -Name 'service_pid_after_stop' -Value $servicePidAfterStop | Out-Null
+    Set-I2eObjectProperty -Object $pointer -Name 'owned_broker_process_count_after_stop' -Value $ownedBrokerCountAfterStop | Out-Null
+    Set-I2eObjectProperty -Object $pointer -Name 'amd_cli_process_count_after_stop' -Value $amdCliCountAfterStop | Out-Null
+    Set-I2eObjectProperty -Object $pointer -Name 'service_registration_removed' -Value $false | Out-Null
+    Set-I2eObjectProperty -Object $pointer -Name 'effective_token_teardown_verified' -Value $effectiveTokenTeardownVerified | Out-Null
+    Set-I2eObjectProperty -Object $pointer -Name 'full_rollback_verified' -Value $fullRollbackVerified | Out-Null
+    Set-I2eObjectProperty -Object $pointer -Name 'rollback_verified' -Value $fullRollbackVerified | Out-Null
+    Set-I2eObjectProperty -Object $pointer -Name 'state' -Value $pointerStateAfterVerification | Out-Null
+    Write-I2eCleanupJson -Path $PointerPath -Value $pointer
     Write-I2eCleanupJson -Path (Join-Path $experimentRoot 'SECURITY-MUTATION-ROLLBACK.json') -Value ([ordered]@{
         schema = 'amd-service-profile-security-mutation-rollback/v1'
         qualification_only = $true
@@ -344,6 +380,9 @@ try {
     Remove-I2eCleanupService | Out-Null
     $serviceRemoved = -not (Get-I2eCleanupServiceSnapshot).present
     if (-not $serviceRemoved) { throw 'I2E service registration remained after verified rollback.' }
+    Set-I2eObjectProperty -Object $pointer -Name 'service_registration_removed' -Value $serviceRemoved | Out-Null
+    Set-I2eObjectProperty -Object $pointer -Name 'state' -Value 'FULL_ROLLBACK_COMPLETE' | Out-Null
+    Write-I2eCleanupJson -Path $PointerPath -Value $pointer
     $rollbackEvidence = Read-I2eCleanupJson -Path (Join-Path $experimentRoot 'SECURITY-MUTATION-ROLLBACK.json')
     $rollbackEvidence.service_registration_removed = $serviceRemoved
     Write-I2eCleanupJson -Path (Join-Path $experimentRoot 'SECURITY-MUTATION-ROLLBACK.json') -Value $rollbackEvidence

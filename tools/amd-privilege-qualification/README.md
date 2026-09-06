@@ -451,6 +451,38 @@ AMD_CLI_OWNERSHIP_PATH = PINNED_PREFLIGHT_DERIVED
 HARD_CODED_AMD_CLI_PATH = REMOVED_FROM_ACTIVE_I2E_OWNERSHIP
 ```
 
+### PR #22 I2E historical pointer schema compatibility closure
+
+The latest authorized treatment-only attempt failed before LSA mutation when
+an old JSON CURRENT pointer was deserialized as a `PSCustomObject` that lacked
+new rollback fields. The resume path now updates historical pointers through a
+canonical set-or-add helper, and persists the pre-mutation state before any
+exact Service SID right can be added. Cleanup first re-reads both LSA
+directions; an already-absent right is marked recovered without issuing a
+duplicate removal, while state drift or unavailable readback fails closed.
+
+```text
+I2E_TREATMENT_ATTEMPT = PRE_MUTATION_ORCHESTRATION_FAILURE
+ROOT_CAUSE = HISTORICAL_PSCUSTOMOBJECT_SCHEMA_EVOLUTION_UNSAFE_DIRECT_PROPERTY_ASSIGNMENT
+CONTROL_RECOVERY = REAL_PERSISTED
+CONTROL_RESULT = POWER_UNAVAILABLE
+AMD_CLI_REVALIDATION = REAL_READ_ONLY_PASS
+LSA_MUTATION = 0
+SERVICE_START = 0
+TREATMENT_RUNTIME = 0
+AMD_RUNTIME = 0
+SET_OR_ADD_PROPERTY_HELPER = PASS
+HISTORICAL_POINTER_FIXTURE = PASS
+POINTER_PERSIST_BEFORE_LSA_ADD = PASS
+POST_REMOVE_PRE_POINTER_CRASH_RECOVERY = PASS
+PRE_REMOVE_DUAL_READBACK = PASS
+POLICY_STATE_DRIFT = FAIL_CLOSED
+CONTROL_RERUN = FORBIDDEN
+TREATMENT = PENDING_HUMAN_AUTHORIZATION
+```
+
+No service, LSA mutation, or AMD runtime was performed by this closure.
+
 ## I2D read-only minimum-capability forensics
 
 > HISTORICAL / SUPERSEDED NEXT-GATE SNAPSHOT: I2D read-only evidence

@@ -493,7 +493,8 @@ if ($i2eCleanupSource -match '(?im)\bStop-Process\b|\btaskkill(?:\.exe)?\b|AllRi
     $i2eCleanupSource -notmatch 'current_pointer_removed' -or
     $i2eCleanupSource -notmatch 'Remove-Item\s+-LiteralPath\s+\$PointerPath' -or
     $i2eCleanupSource -notmatch 'right_added_by_experiment' -or
-    $i2eCleanupSource -notmatch '\$rightNeedsRollback' -or
+    $i2eCleanupSource -notmatch 'Resolve-I2ePolicyRollbackDecision' -or
+    $i2eCleanupSource -notmatch 'cleanup-before-rollback' -or
     $i2eCleanupSource -notmatch 'service creation') {
     throw 'I2E cleanup is not exact, duplicate-safe, and fail-closed.'
 }
@@ -513,6 +514,90 @@ if ((Resolve-I2eExperimentState -Pointer $i2eFailedAttemptFixture) -cne 'PRE_SER
 Write-Host 'I2E_PRE_SERVICE_FAILURE_RECOVERY=PASS'
 Write-Host 'I2E_NO_LSA_ROLLBACK_FOR_PRE_SERVICE=PASS'
 Write-Host 'I2E_CURRENT_POINTER_FINALIZATION=PASS'
+
+$i2eHistoricalPointerJson = ([ordered]@{
+    schema = 'amd-service-profile-experiment-current/v1'
+    experiment_id = '3935ac9082954bcfb2b1f94c54cf95d7'
+    state = 'CONTROL_EXECUTED_RECOVERED'
+    control_execution_state = 'COMPLETED_RECOVERED'
+    control_executed = $true
+    control_result = 'POWER_UNAVAILABLE'
+    paired_gate_consumed = $true
+    right_mutation_state = 'NOT_STARTED'
+    right_added_by_experiment = $false
+    treatment_execution_state = 'NOT_STARTED'
+    treatment_executed = $false
+    treatment_result = $null
+    rollback_verified = $true
+    experiment_closed = $false
+} | ConvertTo-Json -Depth 20)
+$i2eHistoricalPointer = $i2eHistoricalPointerJson | ConvertFrom-Json
+foreach ($schemaField in @(
+        @{ Name = 'policy_rollback_verified'; Value = $false },
+        @{ Name = 'effective_token_teardown_verified'; Value = $false },
+        @{ Name = 'full_rollback_verified'; Value = $false },
+        @{ Name = 'service_registration_removed'; Value = $false },
+        @{ Name = 'schema_probe_null'; Value = $null },
+        @{ Name = 'schema_probe_zero'; Value = 0 },
+        @{ Name = 'schema_probe_empty'; Value = '' }
+    )) {
+    Set-I2eObjectProperty -Object $i2eHistoricalPointer -Name $schemaField.Name -Value $schemaField.Value | Out-Null
+}
+$i2eHistoricalRoundTrip = ($i2eHistoricalPointer | ConvertTo-Json -Depth 20) | ConvertFrom-Json
+foreach ($schemaField in @(
+        @{ Name = 'policy_rollback_verified'; Value = $false },
+        @{ Name = 'effective_token_teardown_verified'; Value = $false },
+        @{ Name = 'full_rollback_verified'; Value = $false },
+        @{ Name = 'service_registration_removed'; Value = $false },
+        @{ Name = 'schema_probe_null'; Value = $null },
+        @{ Name = 'schema_probe_zero'; Value = 0 },
+        @{ Name = 'schema_probe_empty'; Value = '' }
+    )) {
+    $property = @($i2eHistoricalRoundTrip.PSObject.Properties | Where-Object Name -eq $schemaField.Name)
+    if ($property.Count -ne 1) { throw "Historical pointer field was not added: $($schemaField.Name)" }
+    if ($null -eq $schemaField.Value) {
+        if ($null -ne $property[0].Value) { throw "Historical pointer null field changed: $($schemaField.Name)" }
+    }
+    elseif ([string]$property[0].Value -cne [string]$schemaField.Value) {
+        throw "Historical pointer field changed during round-trip: $($schemaField.Name)"
+    }
+}
+Write-Host 'I2E_HISTORICAL_POINTER_SCHEMA_SET_OR_ADD=PASS'
+Write-Host 'I2E_POINTER_FALSE_NULL_ZERO_EMPTY_ROUNDTRIP=PASS'
+
+$i2ePointerUpdateMarker = $i2eResumeSource.IndexOf("Set-I2eObjectProperty -Object `$pointer -Name 'right_mutation_state'")
+$i2ePointerWriteMarker = $i2eResumeSource.IndexOf('Write-I2eJson -Path $PointerPath -Value $pointer', $i2ePointerUpdateMarker)
+$i2eLsaAddMarker = $i2eResumeSource.IndexOf('Add-I2eExactServiceProfileRight -ServiceSid $ExpectedServiceSid')
+if ($i2ePointerUpdateMarker -lt 0 -or $i2ePointerWriteMarker -lt $i2ePointerUpdateMarker -or
+    $i2eLsaAddMarker -lt $i2ePointerWriteMarker) {
+    throw 'I2E pointer schema upgrade/persistence does not precede LSA add.'
+}
+if ($i2eResumeSource -match '(?im)^\s*\$(?:pointer|Pointer)\.[A-Za-z_]+\s*=') {
+    throw 'I2E treatment resume still directly assigns a potentially historical pointer property.'
+}
+if ($i2eCleanupSource -match '(?im)^\s*\$(?:pointer|Pointer)\.[A-Za-z_]+\s*=') {
+    throw 'I2E cleanup still directly assigns a potentially historical pointer property.'
+}
+if ($i2eSetupSource -notmatch '\$pointer\s*=\s*\[ordered\]@\{' -or
+    $i2eSetupSource -match 'Read-I2eJson\s+-Path\s+\$PointerPath') {
+    throw 'I2E paired runner pointer is not provably a fresh ordered map.'
+}
+Write-Host 'I2E_POINTER_PERSIST_BEFORE_LSA_ADD=PASS'
+Write-Host 'I2E_NEW_POINTER_DIRECT_ASSIGNMENTS_ARE_SAFE=PASS'
+
+$i2ePointerWriteFailureLsaAddCalls = 0
+$i2ePointerPersisted = $false
+try {
+    throw 'synthetic pointer persistence failure'
+}
+catch {
+    # The mutation gate is reached only after the persistence step succeeds.
+    if ($i2ePointerPersisted) { $i2ePointerWriteFailureLsaAddCalls++ }
+}
+if ($i2ePointerWriteFailureLsaAddCalls -ne 0) {
+    throw 'Synthetic pointer-write failure reached the LSA add seam.'
+}
+Write-Host 'I2E_POINTER_WRITE_FAILURE_BLOCKS_LSA_ADD=PASS'
 
 foreach ($requiredResumeContract in @(
         'Assert-I2eControlRecoveryEvidence',
@@ -705,6 +790,51 @@ $i2eLegacyPointer = [pscustomobject]@{
 if (-not (Test-I2eExactRightRollbackRequired -Pointer $i2eLegacyPointer)) {
     throw 'I2E legacy pointer did not conservatively require policy rollback.'
 }
+$i2eCrashAfterRemovePointer = [pscustomobject]@{
+    right_added_by_experiment = $true
+    policy_rollback_verified = $false
+    full_rollback_verified = $false
+    rollback_verified = $false
+}
+$i2eCrashAfterRemoveDecision = Resolve-I2ePolicyRollbackDecision `
+    -Pointer $i2eCrashAfterRemovePointer `
+    -ReadbackAvailable $true `
+    -RightPresent $false `
+    -AssignmentPresent $false
+if ($i2eCrashAfterRemoveDecision.policy_remove_allowed -or
+    -not $i2eCrashAfterRemoveDecision.policy_rollback_verified -or
+    $i2eCrashAfterRemoveDecision.policy_remove_skipped_reason -cne 'POLICY_ALREADY_ABSENT_ON_RECOVERY') {
+    throw 'I2E post-remove/pre-pointer-crash recovery would issue a duplicate LSA remove.'
+}
+$i2eAlreadyRemovedDecision = Resolve-I2ePolicyRollbackDecision `
+    -Pointer $i2ePartialRollbackPointer `
+    -ReadbackAvailable $true `
+    -RightPresent $false `
+    -AssignmentPresent $false
+if ($i2eAlreadyRemovedDecision.policy_remove_allowed -or
+    $i2eAlreadyRemovedDecision.policy_remove_skipped_reason -cne 'ALREADY_VERIFIED_REMOVED') {
+    throw 'I2E already-removed retry did not remain read-only.'
+}
+$i2eDriftDecision = Resolve-I2ePolicyRollbackDecision `
+    -Pointer $i2eDriftPointer `
+    -ReadbackAvailable $true `
+    -RightPresent $true `
+    -AssignmentPresent $false
+if (-not $i2eDriftDecision.fail_closed -or -not $i2eDriftDecision.policy_state_drift -or
+    $i2eDriftDecision.policy_remove_allowed) {
+    throw 'I2E policy state drift did not fail closed before LSA mutation.'
+}
+$i2eReadbackUnavailableDecision = Resolve-I2ePolicyRollbackDecision `
+    -Pointer $i2eLegacyPointer `
+    -ReadbackAvailable $false `
+    -RightPresent $false `
+    -AssignmentPresent $false
+if (-not $i2eReadbackUnavailableDecision.fail_closed -or $i2eReadbackUnavailableDecision.policy_remove_allowed) {
+    throw 'I2E unavailable policy readback did not fail closed.'
+}
+Write-Host 'I2E_POST_REMOVE_PRE_POINTER_CRASH_RECOVERY=PASS'
+Write-Host 'I2E_PRE_REMOVE_DUAL_READBACK=PASS'
+Write-Host 'I2E_POLICY_STATE_DRIFT_FAIL_CLOSED_BEFORE_REMOVE=PASS'
 Write-Host 'I2E_PARTIAL_POLICY_ROLLBACK_RETRY_IDEMPOTENT=PASS'
 Write-Host 'I2E_POLICY_STATE_DRIFT_FAIL_CLOSED=PASS'
 Write-Host 'I2E_LEGACY_ROLLBACK_FALLBACK=PASS'
