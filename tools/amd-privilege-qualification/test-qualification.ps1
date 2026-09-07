@@ -19,6 +19,10 @@ $I2eSetup = Join-Path $ToolRoot 'run-admin-amd-i2e-service-profile-experiment.ps
 $I2eCleanup = Join-Path $ToolRoot 'cleanup-admin-amd-i2e-service-profile-experiment.ps1'
 $I2eResumeContract = Join-Path $ToolRoot 'i2e-treatment-resume-contract.ps1'
 $I2eResume = Join-Path $ToolRoot 'resume-admin-amd-i2e-treatment.ps1'
+$I2fContract = Join-Path $ToolRoot 'i2f-service-profile-contract.ps1'
+$I2fSetup = Join-Path $ToolRoot 'run-admin-amd-i2f-service-profile-experiment.ps1'
+$I2fCleanup = Join-Path $ToolRoot 'cleanup-admin-amd-i2f-service-profile-experiment.ps1'
+$I2eFinalFixture = Join-Path $ToolRoot 'i2e-token-materialization-final.example.json'
 $WindowsSource = Join-Path $ToolRoot 'src\windows.rs'
 
 foreach ($wrapper in @(
@@ -36,7 +40,10 @@ foreach ($wrapper in @(
         $I2eSetup,
         $I2eCleanup,
         $I2eResumeContract,
-        $I2eResume
+        $I2eResume,
+        $I2fContract,
+        $I2fSetup,
+        $I2fCleanup
     )) {
     $parseErrors = $null
     $tokens = $null
@@ -71,7 +78,7 @@ function Assert-I2eNoPidAssignment {
     }
 }
 
-foreach ($i2eScript in @($I2eSetup, $I2eCleanup, $I2eContract, $I2eResumeContract, $I2eResume)) {
+foreach ($i2eScript in @($I2eSetup, $I2eCleanup, $I2eContract, $I2eResumeContract, $I2eResume, $I2fSetup, $I2fCleanup, $I2fContract)) {
     Assert-I2eNoPidAssignment -Path $i2eScript
 }
 Write-Host 'I2E_PID_AUTOMATIC_VARIABLE_ASSIGNMENT_AUDIT=PASS'
@@ -1041,6 +1048,158 @@ Write-Host 'I2E_TOKEN_DELTA_EXACT_ONE_RIGHT=PASS'
 Write-Host 'I2E_EXACT_ROLLBACK_AND_PREEXISTING_RIGHT_PRESERVATION=PASS'
 Write-Host 'I2E_CLEANUP_BEFORE_SERVICE_SID_RESOLUTION=PASS'
 
+$i2fContractSource = Get-Content -LiteralPath $I2fContract -Raw
+$i2fSetupSource = Get-Content -LiteralPath $I2fSetup -Raw
+$i2fCleanupSource = Get-Content -LiteralPath $I2fCleanup -Raw
+$i2fRustSource = Get-Content -LiteralPath $WindowsSource -Raw
+$i2fExpectedArtifactSha256 = 'F272E2D5E74A1F8CC7EFABF01A64BFF1ACE4A244BF6199530D30F9F3F90ED10D'
+foreach ($requiredI2fContract in @(
+        'ResourceTimelineAmdSystemProfileEnableQualification',
+        'NT AUTHORITY\LOCAL SERVICE',
+        'S-1-5-19',
+        'SeSystemProfilePrivilege DISABLED -> ENABLED via AdjustTokenPrivileges',
+        'fixed_cli_arguments = $I2fFixedArguments',
+        'sampling = $false',
+        'exact_one_intentional_privilege_state_change',
+        'timechart',
+        '--list'
+    )) {
+    if ($i2fContractSource -notmatch [regex]::Escape($requiredI2fContract)) {
+        throw "I2F contract is missing: $requiredI2fContract"
+    }
+}
+if ($i2fSetupSource -match '(?i)-Verb\s+RunAs|\bStart-Process\b|\brunas(?:\.exe)?\b|\bPsExec\b|\bsecedit\b|\bntrights(?:\.exe)?\b') {
+    throw 'I2F setup must not self-elevate or use broad policy tooling.'
+}
+if ($i2fSetupSource -match '(?i)--event|--duration|--interval|--output-dir|raw_command|executable_path|registry_path|working_directory') {
+    throw 'I2F setup must not expose a sampling or arbitrary command surface.'
+}
+foreach ($requiredI2fSetupContract in @(
+        '\[switch\]\$ExecuteAuthorizedExperiment',
+        'I2F_PLAN_ONLY=true',
+        '--service-profile-enable-counter-service',
+        'I2F-AMD-CLI-PREFLIGHT.json',
+        'I2F-ROLLBACK.json',
+        'Add-I2eExactServiceProfileRight',
+        'Remove-I2eExactServiceProfileRight',
+        'SeSystemProfilePrivilege',
+        $i2fExpectedArtifactSha256
+    )) {
+    if ($i2fSetupSource -notmatch $requiredI2fSetupContract) {
+        throw "I2F setup is missing: $requiredI2fSetupContract"
+    }
+}
+foreach ($requiredI2fRustContract in @(
+        'I2F-TOKEN-BEFORE-ENABLE.json',
+        'I2F-ADJUST-TOKEN-PRIVILEGES.json',
+        'I2F-TOKEN-AFTER-ENABLE.json',
+        'I2F-TOKEN-ENABLE-DELTA.json',
+        'I2F-COUNTER-DISCOVERY',
+        'execute_counter_discovery_at_with_prefix',
+        'AdjustTokenPrivileges',
+        'ERROR_NOT_ALL_ASSIGNED',
+        'TOKEN_ADJUST_PRIVILEGES',
+        'LookupPrivilegeValueW',
+        'i2f_exact_single_privilege_enablement_delta'
+    )) {
+    if ($i2fRustSource -notmatch [regex]::Escape($requiredI2fRustContract)) {
+        throw "I2F Rust service is missing: $requiredI2fRustContract"
+    }
+}
+if ($i2fSetupSource -match '(?i)S-1-5-19[^\r\n]*(?:LsaAddAccountRights|Add-I2eExactServiceProfileRight)|S-1-5-32-544[^\r\n]*(?:LsaAddAccountRights|Add-I2eExactServiceProfileRight)') {
+    throw 'I2F must not mutate the global LocalService account or Administrators group.'
+}
+if ($i2fSetupSource -notmatch '\$identityCheck\s*=\s*Compare-I2fCurrentAmdIdentity' -or
+    $i2fSetupSource.IndexOf('$identityCheck = Compare-I2fCurrentAmdIdentity') -gt $i2fSetupSource.IndexOf('Add-I2eExactServiceProfileRight')) {
+    throw 'I2F AMD identity validation must precede the exact LSA assignment.'
+}
+if ($i2fSetupSource.IndexOf('I2F-TOKEN-BEFORE-ENABLE.json') -gt
+    $i2fSetupSource.IndexOf('Add-I2eExactServiceProfileRight')) {
+    throw 'I2F pre-enable token evidence must precede LSA assignment.'
+}
+foreach ($i2fScriptSource in @($i2fSetupSource, $i2fCleanupSource)) {
+    if ($i2fScriptSource -match '(?im)^\s*\$(?:pid|Pid|PID)\s*=') {
+        throw 'I2F scripts must not assign PowerShell automatic variable PID.'
+    }
+}
+if ($i2fCleanupSource -notmatch 'I2F-AMD-CLI-PREFLIGHT.json' -or
+    $i2fCleanupSource -notmatch 'Assert-I2fNoOwnedProcesses' -or
+    $i2fCleanupSource -match 'D:\\apps\\AMDuProf\\bin\\AMDuProfCLI\.exe' -or
+    $i2fCleanupSource -match 'AllRights\s*=\s*\$true') {
+    throw 'I2F cleanup must use pinned AMD identity and exact-right rollback.'
+}
+. $I2fContract
+$i2fBeforeFixture = [pscustomobject]@{
+    context_valid = $true
+    account_sid = 'S-1-5-19'
+    service_sid = 'S-1-5-80-i2f'
+    service_sid_present = $true
+    session_id = 0
+    process_architecture = 'x64'
+    enabled_privileges = @('SeChangeNotifyPrivilege', 'SeCreateGlobalPrivilege', 'SeImpersonatePrivilege')
+    disabled_privileges = @('SeSystemProfilePrivilege')
+    token_groups_relevant_to_access = @('S-1-5-6:ENABLED', 'S-1-5-80-i2f:ENABLED')
+}
+$i2fGate = Test-I2fPreEnableTokenGateFixture -Context $i2fBeforeFixture -ServiceSid 'S-1-5-80-i2f'
+if (-not $i2fGate.pass -or $i2fGate.se_system_profile_privilege_enabled) {
+    throw 'I2F pre-enable token gate fixture did not require present+disabled state.'
+}
+$i2fAfterFixture = [pscustomobject]@{
+    account_sid = 'S-1-5-19'
+    service_sid = 'S-1-5-80-i2f'
+    session_id = 0
+    process_architecture = 'x64'
+    enabled_privileges = @('SeChangeNotifyPrivilege', 'SeCreateGlobalPrivilege', 'SeImpersonatePrivilege', 'SeSystemProfilePrivilege')
+    disabled_privileges = @()
+    token_groups_relevant_to_access = @('S-1-5-6:ENABLED', 'S-1-5-80-i2f:ENABLED')
+}
+$i2fDelta = Compare-I2fTokenStateFixture -Before $i2fBeforeFixture -After $i2fAfterFixture
+if (-not $i2fDelta.pass -or -not $i2fDelta.exact_one_intentional_privilege_state_change) {
+    throw 'I2F exact token enablement delta fixture did not pass.'
+}
+$i2fWrongAfter = $i2fAfterFixture | Select-Object *
+$i2fWrongAfter.enabled_privileges = @($i2fAfterFixture.enabled_privileges + 'SeDebugPrivilege')
+$i2fWrongDelta = Compare-I2fTokenStateFixture -Before $i2fBeforeFixture -After $i2fWrongAfter
+if ($i2fWrongDelta.pass) { throw 'I2F accepted an unexplained privilege enablement.' }
+Write-Host 'I2F_PRE_ENABLE_TOKEN_GATE=PASS'
+Write-Host 'I2F_ADJUST_TOKEN_PRIVILEGES_FIXED_SINGLE_RIGHT=PASS'
+Write-Host 'I2F_ERROR_NOT_ALL_ASSIGNED_FAIL_CLOSED=PASS'
+Write-Host 'I2F_EXACT_TOKEN_DELTA=PASS'
+Write-Host 'I2F_AMD_AFTER_POST_ENABLE_GATE=PASS'
+Write-Host 'I2F_NO_ARBITRARY_PRIVILEGE_SURFACE=PASS'
+Write-Host 'I2F_ROLLBACK_EXACT_RIGHT=PASS'
+
+if (-not (Test-Path -LiteralPath $I2eFinalFixture -PathType Leaf)) {
+    throw 'I2E token-materialization final closure fixture is missing.'
+}
+$i2eFinal = Get-Content -LiteralPath $I2eFinalFixture -Raw | ConvertFrom-Json
+$requiredI2eFinalFields = @(
+    'experiment_id', 'control_result', 'lsa_right_added',
+    'lsa_dual_verification_pass', 'treatment_service_started',
+    'treatment_token_gate_executed', 'se_system_profile_privilege_present',
+    'se_system_profile_privilege_enabled', 'se_system_profile_privilege_disabled',
+    'amd_runtime_executed', 'counter_discovery_executed',
+    'policy_rollback_verified', 'effective_token_teardown_verified',
+    'full_rollback_verified', 'service_registration_removed', 'result'
+)
+foreach ($field in $requiredI2eFinalFields) {
+    if (-not ($i2eFinal.PSObject.Properties.Name -contains $field)) {
+        throw "I2E final closure fixture is missing field: $field"
+    }
+}
+if (-not [bool]$i2eFinal.example_fixture -or
+    [string]$i2eFinal.result -cne 'PASS_WITH_NEGATIVE_TOKEN_ENABLEMENT_RESULT' -or
+    [string]$i2eFinal.control_result -cne 'POWER_UNAVAILABLE' -or
+    -not [bool]$i2eFinal.se_system_profile_privilege_present -or
+    [bool]$i2eFinal.se_system_profile_privilege_enabled -or
+    -not [bool]$i2eFinal.se_system_profile_privilege_disabled -or
+    [bool]$i2eFinal.amd_runtime_executed -or
+    [bool]$i2eFinal.counter_discovery_executed -or
+    -not [bool]$i2eFinal.full_rollback_verified) {
+    throw 'I2E final closure fixture does not preserve the authoritative negative token-enable result.'
+}
+Write-Host 'I2E_NEGATIVE_TOKEN_ENABLEMENT_CLOSURE_FIXTURE=PASS'
+
 $windowsSourceText = Get-Content -LiteralPath $WindowsSource -Raw
 if ($windowsSourceText -match 'error\.code\(\)\.0\s+as\s+u32\s*==\s*ERROR_') {
     throw 'Windows error comparison still compares an HRESULT integer directly with a raw Win32 constant.'
@@ -1237,7 +1396,8 @@ if ($summary.mutation_assertions.real_amd_runtime_count_during_task -ne 0 -or
 
 foreach ($serviceName in @(
         'ResourceTimelineAmdPrivilegeQualification',
-        'ResourceTimelineAmdSystemCounterQualification'
+        'ResourceTimelineAmdSystemCounterQualification',
+        'ResourceTimelineAmdSystemProfileEnableQualification'
     )) {
     if (Get-Service -Name $serviceName -ErrorAction SilentlyContinue) {
         throw "Synthetic test refuses to run while the qualification service is registered: $serviceName"

@@ -32,8 +32,8 @@ use std::time::{Duration, Instant};
 use windows::core::{HRESULT, PCWSTR, PWSTR};
 use windows::Win32::Foundation::{
     CloseHandle, GetLastError, ERROR_BROKEN_PIPE, ERROR_IO_PENDING, ERROR_MORE_DATA,
-    ERROR_NOT_FOUND, ERROR_OPERATION_ABORTED, ERROR_PIPE_CONNECTED, HANDLE, HLOCAL, WAIT_FAILED,
-    WAIT_OBJECT_0, WIN32_ERROR,
+    ERROR_NOT_ALL_ASSIGNED, ERROR_NOT_FOUND, ERROR_OPERATION_ABORTED, ERROR_PIPE_CONNECTED, HANDLE,
+    HLOCAL, LUID, WAIT_FAILED, WAIT_OBJECT_0, WIN32_ERROR,
 };
 use windows::Win32::Security::Authorization::{
     ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1,
@@ -44,9 +44,10 @@ use windows::Win32::Security::WinTrust::{
     WTD_STATEACTION_IGNORE, WTD_UI_NONE,
 };
 use windows::Win32::Security::{
-    GetTokenInformation, LookupPrivilegeNameW, RevertToSelf, TokenElevation, TokenGroups,
-    TokenIntegrityLevel, TokenPrivileges, TokenSessionId, TokenUser, LUID_AND_ATTRIBUTES,
-    SE_PRIVILEGE_ENABLED, TOKEN_ELEVATION, TOKEN_GROUPS, TOKEN_INFORMATION_CLASS,
+    AdjustTokenPrivileges, GetTokenInformation, LookupPrivilegeNameW, LookupPrivilegeValueW,
+    RevertToSelf, TokenElevation, TokenGroups, TokenIntegrityLevel, TokenPrivileges,
+    TokenSessionId, TokenUser, LUID_AND_ATTRIBUTES, SE_PRIVILEGE_ENABLED, TOKEN_ACCESS_MASK,
+    TOKEN_ADJUST_PRIVILEGES, TOKEN_ELEVATION, TOKEN_GROUPS, TOKEN_INFORMATION_CLASS,
     TOKEN_MANDATORY_LABEL, TOKEN_PRIVILEGES, TOKEN_QUERY, TOKEN_USER,
 };
 use windows::Win32::Storage::FileSystem::{
@@ -96,6 +97,8 @@ static STOP_REQUESTED: AtomicBool = AtomicBool::new(false);
 static CONFIG: OnceLock<BrokerConfig> = OnceLock::new();
 static SYSTEM_COUNTER_CONFIG: OnceLock<SystemCounterConfig> = OnceLock::new();
 static SERVICE_PROFILE_COUNTER_CONFIG: OnceLock<ServiceProfileCounterConfig> = OnceLock::new();
+static SERVICE_PROFILE_ENABLE_COUNTER_CONFIG: OnceLock<ServiceProfileEnableCounterConfig> =
+    OnceLock::new();
 static STOP_EVENT: Mutex<Option<isize>> = Mutex::new(None);
 static STATUS_HANDLE: Mutex<Option<isize>> = Mutex::new(None);
 static SERVICE_ERROR_DETAILS: Mutex<Option<Value>> = Mutex::new(None);
@@ -217,6 +220,20 @@ struct ServiceProfileCounterConfig {
     expected_se_system_profile_privilege: bool,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+struct ServiceProfileEnableCounterConfig {
+    schema: String,
+    service_name: String,
+    service_account: String,
+    service_account_sid: String,
+    service_sid: String,
+    scope: String,
+    output_root: String,
+    expected_amd_cli_path: String,
+    expected_amd_cli_sha256: String,
+    expected_amd_cli_architecture: String,
+}
+
 #[derive(Clone)]
 struct BrokerState {
     config: BrokerConfig,
@@ -290,6 +307,33 @@ pub fn run_service_profile_counter_service() -> Result<(), String> {
         SERVICE_TABLE_ENTRYW {
             lpServiceName: PWSTR::from_raw(service_name.as_mut_ptr()),
             lpServiceProc: Some(service_profile_counter_service_main),
+        },
+        SERVICE_TABLE_ENTRYW {
+            lpServiceName: PWSTR::null(),
+            lpServiceProc: None,
+        },
+    ];
+    unsafe { StartServiceCtrlDispatcherW(table.as_ptr()) }
+        .map_err(|error| format!("StartServiceCtrlDispatcherW failed: {error}"))
+}
+
+/// Run the qualification-only I2F service.  The service must receive exactly one
+/// Service-SID-scoped SeSystemProfilePrivilege assignment before startup; this mode
+/// then enables that already-present privilege in its own token and performs only the
+/// fixed `timechart --list` counter-discovery operation.
+pub fn run_service_profile_enable_counter_service() -> Result<(), String> {
+    let config = load_service_profile_enable_counter_config()?;
+    SERVICE_PROFILE_ENABLE_COUNTER_CONFIG
+        .set(config)
+        .map_err(|_| {
+            "service-profile enable counter configuration was initialized twice".to_owned()
+        })?;
+    STOP_REQUESTED.store(false, Ordering::SeqCst);
+    let mut service_name = wide_null(crate::SERVICE_PROFILE_ENABLE_COUNTER_SERVICE_NAME);
+    let table = [
+        SERVICE_TABLE_ENTRYW {
+            lpServiceName: PWSTR::from_raw(service_name.as_mut_ptr()),
+            lpServiceProc: Some(service_profile_enable_counter_service_main),
         },
         SERVICE_TABLE_ENTRYW {
             lpServiceName: PWSTR::null(),
@@ -415,6 +459,51 @@ unsafe extern "system" fn service_profile_counter_service_main(_argc: u32, _argv
         Err(error) => {
             let _ = crate::write_json(
                 &root.join("SERVICE-PROFILE-SERVICE-HARNESS-ERROR.json"),
+                &service_error_evidence_for(&config.service_name, error),
+            );
+            let _ = set_service_status(status_handle, SERVICE_STOPPED, 1, 0, 0);
+        }
+    }
+    clear_status_handle(status_handle);
+}
+
+unsafe extern "system" fn service_profile_enable_counter_service_main(
+    _argc: u32,
+    _argv: *mut PWSTR,
+) {
+    let Some(config) = SERVICE_PROFILE_ENABLE_COUNTER_CONFIG.get().cloned() else {
+        return;
+    };
+    let root = PathBuf::from(&config.output_root);
+    let _ = fs::create_dir_all(&root);
+    let service_name = wide_null(&config.service_name);
+    let handler = unsafe {
+        RegisterServiceCtrlHandlerExW(
+            PCWSTR::from_raw(service_name.as_ptr()),
+            Some(service_handler),
+            None,
+        )
+    };
+    let Ok(status_handle) = handler else {
+        let _ = crate::write_json(
+            &root.join("I2F-SERVICE-HARNESS-ERROR.json"),
+            &service_error_evidence_for(
+                &config.service_name,
+                "RegisterServiceCtrlHandlerExW failed".to_owned(),
+            ),
+        );
+        return;
+    };
+
+    set_status_handle(status_handle);
+    let _ = set_service_status(status_handle, SERVICE_START_PENDING, 0, 1, 30_000);
+    match service_profile_enable_counter_service_entry(status_handle, &config) {
+        Ok(()) => {
+            let _ = set_service_status(status_handle, SERVICE_STOPPED, 0, 0, 0);
+        }
+        Err(error) => {
+            let _ = crate::write_json(
+                &root.join("I2F-SERVICE-HARNESS-ERROR.json"),
                 &service_error_evidence_for(&config.service_name, error),
             );
             let _ = set_service_status(status_handle, SERVICE_STOPPED, 1, 0, 0);
@@ -698,6 +787,344 @@ fn service_profile_counter_service_entry(
         }),
     )
     .map_err(|error| format!("writing SERVICE-PROFILE-COUNTER-SUMMARY.json failed: {error}"))?;
+    Ok(())
+}
+
+fn service_profile_enable_counter_service_entry(
+    status_handle: SERVICE_STATUS_HANDLE,
+    config: &ServiceProfileEnableCounterConfig,
+) -> Result<(), String> {
+    let context = collect_service_context_for(
+        &config.service_name,
+        &config.service_account,
+        &config.service_account_sid,
+        Some(config.service_sid.clone()),
+        "amd-i2f-service-context/v1",
+    )?;
+    let root = Path::new(&config.output_root);
+    crate::write_json(
+        &root.join("I2F-SERVICE-PROFILE-SERVICE-CONTEXT.json"),
+        &context,
+    )
+    .map_err(|error| format!("writing I2F-SERVICE-PROFILE-SERVICE-CONTEXT.json failed: {error}"))?;
+
+    let before_gate = service_profile_enable_token_gate(&context, config);
+    crate::write_json(
+        &root.join("I2F-TOKEN-BEFORE-ENABLE.json"),
+        &json!({
+            "schema": "amd-i2f-token-before-enable/v1",
+            "qualification_only": QUALIFICATION_ONLY,
+            "stage": "PRE_ENABLE",
+            "context": context,
+            "gate": before_gate,
+        }),
+    )
+    .map_err(|error| format!("writing I2F-TOKEN-BEFORE-ENABLE.json failed: {error}"))?;
+    if !before_gate
+        .get("gate_pass")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+    {
+        return Err(
+            "I2F pre-enable token gate failed; AdjustTokenPrivileges and AMD execution are forbidden"
+                .to_owned(),
+        );
+    }
+    if STOP_REQUESTED.load(Ordering::Acquire) {
+        return Ok(());
+    }
+
+    let (adjust_evidence, adjust_pass) = enable_service_profile_privilege();
+    crate::write_json(
+        &root.join("I2F-ADJUST-TOKEN-PRIVILEGES.json"),
+        &adjust_evidence,
+    )
+    .map_err(|error| format!("writing I2F-ADJUST-TOKEN-PRIVILEGES.json failed: {error}"))?;
+    if !adjust_pass {
+        return Err("I2F AdjustTokenPrivileges failed; AMD execution is forbidden".to_owned());
+    }
+
+    let after_context = collect_service_context_for(
+        &config.service_name,
+        &config.service_account,
+        &config.service_account_sid,
+        Some(config.service_sid.clone()),
+        "amd-i2f-service-context-after-enable/v1",
+    )?;
+    crate::write_json(&root.join("I2F-TOKEN-AFTER-ENABLE.json"), &after_context)
+        .map_err(|error| format!("writing I2F-TOKEN-AFTER-ENABLE.json failed: {error}"))?;
+    let delta = i2f_token_enable_delta(&context, &after_context, config);
+    crate::write_json(&root.join("I2F-TOKEN-ENABLE-DELTA.json"), &delta)
+        .map_err(|error| format!("writing I2F-TOKEN-ENABLE-DELTA.json failed: {error}"))?;
+    if !delta
+        .get("gate_pass")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+    {
+        return Err(
+            "I2F token delta was not exactly SeSystemProfilePrivilege DISABLED -> ENABLED; AMD execution is forbidden"
+                .to_owned(),
+        );
+    }
+
+    validate_i2f_amd_cli_identity(config, root)?;
+    if STOP_REQUESTED.load(Ordering::Acquire) {
+        return Ok(());
+    }
+
+    set_service_status(status_handle, SERVICE_RUNNING, 0, 0, 0)?;
+    let request_id = "i2f-counter-discovery";
+    let status =
+        execute_counter_discovery_at_with_prefix(root, root, request_id, "I2F-COUNTER-DISCOVERY")?;
+    crate::write_json(
+        &root.join("I2F-COUNTER-DISCOVERY-SUMMARY.json"),
+        &json!({
+            "schema": "amd-i2f-counter-discovery-summary/v1",
+            "qualification_only": QUALIFICATION_ONLY,
+            "service_name": config.service_name,
+            "service_account": config.service_account,
+            "service_account_sid": config.service_account_sid,
+            "service_sid": config.service_sid,
+            "session_id": 0,
+            "fixed_cli_arguments": fixed_counter_discovery_arguments(),
+            "sampling": false,
+            "availability": status.availability.as_str(),
+            "cli_exit_code": status.cli_exit_code,
+            "power_category_present": status.power_category_present,
+            "no_orphan_child": status.no_orphan_child,
+            "token_enable_gate_passed": true
+        }),
+    )
+    .map_err(|error| format!("writing I2F-COUNTER-DISCOVERY-SUMMARY.json failed: {error}"))?;
+    Ok(())
+}
+
+fn service_profile_enable_token_gate(
+    context: &ServiceContextEvidence,
+    config: &ServiceProfileEnableCounterConfig,
+) -> Value {
+    let profile_enabled = context
+        .enabled_privileges
+        .iter()
+        .any(|value| value.eq_ignore_ascii_case(crate::SERVICE_PROFILE_REQUIRED_PRIVILEGE));
+    let profile_disabled = context
+        .disabled_privileges
+        .iter()
+        .any(|value| value.eq_ignore_ascii_case(crate::SERVICE_PROFILE_REQUIRED_PRIVILEGE));
+    let administrators_sid_present = context
+        .token_groups_relevant_to_access
+        .iter()
+        .any(|value| token_group_sid(value).eq_ignore_ascii_case("S-1-5-32-544"));
+    let forbidden_enabled: Vec<String> = SERVICE_PROFILE_FORBIDDEN_PRIVILEGES
+        .iter()
+        .filter(|privilege| {
+            context
+                .enabled_privileges
+                .iter()
+                .any(|value| value.eq_ignore_ascii_case(privilege))
+        })
+        .map(|privilege| (*privilege).to_owned())
+        .collect();
+    let gate_pass = context.context_valid
+        && context
+            .account_sid
+            .eq_ignore_ascii_case(&config.service_account_sid)
+        && context.service_sid_present
+        && context.session_id == Some(0)
+        && context.process_architecture == "x64"
+        && context.service_sid_type == REQUIRED_SERVICE_SID_TYPE
+        && profile_disabled
+        && !profile_enabled
+        && !administrators_sid_present
+        && forbidden_enabled.is_empty();
+    json!({
+        "schema": "amd-i2f-token-gate/v1",
+        "qualification_only": QUALIFICATION_ONLY,
+        "stage": "PRE_ENABLE",
+        "service_name": config.service_name,
+        "service_sid": config.service_sid,
+        "account_sid": context.account_sid,
+        "session_id": context.session_id,
+        "process_architecture": context.process_architecture,
+        "context_valid": context.context_valid,
+        "se_system_profile_privilege_present": profile_enabled || profile_disabled,
+        "se_system_profile_privilege_enabled": profile_enabled,
+        "se_system_profile_privilege_disabled": profile_disabled,
+        "administrators_sid_present": administrators_sid_present,
+        "forbidden_enabled_privileges": forbidden_enabled,
+        "gate_pass": gate_pass
+    })
+}
+
+fn enable_service_profile_privilege() -> (Value, bool) {
+    let mut evidence = json!({
+        "schema": "amd-i2f-adjust-token-privileges/v1",
+        "qualification_only": QUALIFICATION_ONLY,
+        "target_privilege": crate::SERVICE_PROFILE_REQUIRED_PRIVILEGE,
+        "requested_state": "ENABLED",
+        "disable_all_privileges": false,
+    });
+    let token = match open_process_token_with_access(
+        unsafe { GetCurrentProcess() },
+        TOKEN_QUERY | TOKEN_ADJUST_PRIVILEGES,
+    ) {
+        Ok(token) => token,
+        Err(error) => {
+            evidence["status"] = json!("FAIL_TOKEN_OPEN");
+            evidence["error"] = json!(error);
+            return (evidence, false);
+        }
+    };
+    let privilege_name = wide_null(crate::SERVICE_PROFILE_REQUIRED_PRIVILEGE);
+    let mut luid = LUID::default();
+    if let Err(error) = unsafe {
+        LookupPrivilegeValueW(
+            PCWSTR::null(),
+            PCWSTR::from_raw(privilege_name.as_ptr()),
+            &mut luid,
+        )
+    } {
+        evidence["status"] = json!("FAIL_LOOKUP");
+        evidence["error"] = json!(error.to_string());
+        return (evidence, false);
+    }
+    let privileges = TOKEN_PRIVILEGES {
+        PrivilegeCount: 1,
+        Privileges: [LUID_AND_ATTRIBUTES {
+            Luid: luid,
+            Attributes: SE_PRIVILEGE_ENABLED,
+        }],
+    };
+    let result = unsafe {
+        AdjustTokenPrivileges(
+            token.raw(),
+            false,
+            Some(std::ptr::addr_of!(privileges)),
+            size_of::<TOKEN_PRIVILEGES>() as u32,
+            None,
+            None,
+        )
+    };
+    let last_error = unsafe { GetLastError().0 };
+    evidence["last_error"] = json!(last_error);
+    evidence["last_error_hex"] = json!(format!("0x{last_error:08X}"));
+    match result {
+        Err(error) => {
+            evidence["status"] = json!("FAIL_API");
+            evidence["error"] = json!(error.to_string());
+            (evidence, false)
+        }
+        Ok(()) if last_error == ERROR_NOT_ALL_ASSIGNED.0 => {
+            evidence["status"] = json!("FAIL_NOT_PRESENT_OR_NOT_ASSIGNABLE");
+            (evidence, false)
+        }
+        Ok(()) => {
+            evidence["status"] = json!("PASS");
+            (evidence, true)
+        }
+    }
+}
+
+fn i2f_token_enable_delta(
+    before: &ServiceContextEvidence,
+    after: &ServiceContextEvidence,
+    config: &ServiceProfileEnableCounterConfig,
+) -> Value {
+    let identity_unchanged = before.account_sid.eq_ignore_ascii_case(&after.account_sid)
+        && before
+            .service_sid
+            .as_deref()
+            .zip(after.service_sid.as_deref())
+            .is_some_and(|(left, right)| left.eq_ignore_ascii_case(right))
+        && before.session_id == after.session_id
+        && before.process_architecture == after.process_architecture
+        && before
+            .token_groups_relevant_to_access
+            .iter()
+            .map(|value| value.to_ascii_lowercase())
+            .eq(after
+                .token_groups_relevant_to_access
+                .iter()
+                .map(|value| value.to_ascii_lowercase()));
+    let exact_privilege_delta = crate::i2f_exact_single_privilege_enablement_delta(
+        &before.enabled_privileges,
+        &before.disabled_privileges,
+        &after.enabled_privileges,
+        &after.disabled_privileges,
+    );
+    let administrators_sid_present = after
+        .token_groups_relevant_to_access
+        .iter()
+        .any(|value| token_group_sid(value).eq_ignore_ascii_case("S-1-5-32-544"));
+    let forbidden_enabled = SERVICE_PROFILE_FORBIDDEN_PRIVILEGES
+        .iter()
+        .any(|privilege| {
+            after
+                .enabled_privileges
+                .iter()
+                .any(|value| value.eq_ignore_ascii_case(privilege))
+        });
+    let profile_enabled = after
+        .enabled_privileges
+        .iter()
+        .any(|value| value.eq_ignore_ascii_case(crate::SERVICE_PROFILE_REQUIRED_PRIVILEGE));
+    let gate_pass = identity_unchanged
+        && before.context_valid
+        && after.context_valid
+        && after
+            .account_sid
+            .eq_ignore_ascii_case(&config.service_account_sid)
+        && !administrators_sid_present
+        && !forbidden_enabled
+        && profile_enabled
+        && exact_privilege_delta;
+    json!({
+        "schema": "amd-i2f-token-enable-delta/v1",
+        "qualification_only": QUALIFICATION_ONLY,
+        "changed_privilege": crate::SERVICE_PROFILE_REQUIRED_PRIVILEGE,
+        "before": "DISABLED",
+        "after": "ENABLED",
+        "exact_one_intentional_privilege_state_change": exact_privilege_delta,
+        "identity_unchanged": identity_unchanged,
+        "administrators_sid_present": administrators_sid_present,
+        "forbidden_enabled_privileges": forbidden_enabled,
+        "gate_pass": gate_pass
+    })
+}
+
+fn validate_i2f_amd_cli_identity(
+    config: &ServiceProfileEnableCounterConfig,
+    root: &Path,
+) -> Result<(), String> {
+    let (path, identity) = discover_cli()?;
+    let path_match = path
+        .to_string_lossy()
+        .eq_ignore_ascii_case(&config.expected_amd_cli_path);
+    let sha256_match = identity
+        .sha256
+        .eq_ignore_ascii_case(&config.expected_amd_cli_sha256);
+    let architecture_match = identity
+        .architecture
+        .eq_ignore_ascii_case(&config.expected_amd_cli_architecture);
+    let pass = path_match && sha256_match && architecture_match && identity.identity_valid;
+    crate::write_json(
+        &root.join("I2F-AMD-CLI-RUNTIME-IDENTITY.json"),
+        &json!({
+            "schema": "amd-i2f-amd-cli-runtime-identity/v1",
+            "qualification_only": QUALIFICATION_ONLY,
+            "expected_path": config.expected_amd_cli_path,
+            "actual": identity,
+            "path_match": path_match,
+            "sha256_match": sha256_match,
+            "architecture_match": architecture_match,
+            "signature_valid": identity.signature_validation.starts_with("VALID:"),
+            "pass": pass
+        }),
+    )
+    .map_err(|error| format!("writing I2F-AMD-CLI-RUNTIME-IDENTITY.json failed: {error}"))?;
+    if !pass {
+        return Err("I2F AMD CLI identity no longer matches the pinned preflight".to_owned());
+    }
     Ok(())
 }
 
@@ -1414,6 +1841,20 @@ fn execute_counter_discovery_at(
     discovery_root: &Path,
     request_id: &str,
 ) -> Result<CounterDiscoveryStatus, String> {
+    execute_counter_discovery_at_with_prefix(
+        output_root,
+        discovery_root,
+        request_id,
+        "AMD-COUNTER-DISCOVERY",
+    )
+}
+
+fn execute_counter_discovery_at_with_prefix(
+    output_root: &Path,
+    discovery_root: &Path,
+    request_id: &str,
+    evidence_prefix: &str,
+) -> Result<CounterDiscoveryStatus, String> {
     let (cli_path, artifact) = discover_cli()?;
     let _ = crate::write_json(&output_root.join("CLI-ARTIFACT-IDENTITY.json"), &artifact);
     fs::create_dir_all(discovery_root)
@@ -1446,7 +1887,7 @@ fn execute_counter_discovery_at(
         ));
     }
     let _ = crate::write_json(
-        &discovery_root.join("AMD-COUNTER-DISCOVERY-LAUNCH.json"),
+        &discovery_root.join(format!("{evidence_prefix}-LAUNCH.json")),
         &json!({
             "schema": "amd-privilege-counter-discovery-launch/v1",
             "qualification_only": QUALIFICATION_ONLY,
@@ -1501,7 +1942,7 @@ fn execute_counter_discovery_at(
         .any(|line| line.trim().to_ascii_lowercase().contains("power"));
     let no_orphan_child = owned.child.try_wait().ok().flatten().is_some();
     let _ = crate::write_json(
-        &discovery_root.join("AMD-COUNTER-DISCOVERY-RESULT.json"),
+        &discovery_root.join(format!("{evidence_prefix}-RESULT.json")),
         &json!({
             "schema": "amd-privilege-counter-discovery-result/v1",
             "qualification_only": QUALIFICATION_ONLY,
@@ -3216,8 +3657,15 @@ fn open_thread_token() -> Result<OwnedHandle, String> {
 }
 
 fn open_process_token(process: HANDLE) -> Result<OwnedHandle, String> {
+    open_process_token_with_access(process, TOKEN_QUERY)
+}
+
+fn open_process_token_with_access(
+    process: HANDLE,
+    desired_access: TOKEN_ACCESS_MASK,
+) -> Result<OwnedHandle, String> {
     let mut token = HANDLE::default();
-    unsafe { OpenProcessToken(process, TOKEN_QUERY, &mut token) }
+    unsafe { OpenProcessToken(process, desired_access, &mut token) }
         .map_err(|error| format!("OpenProcessToken failed: {error}"))?;
     OwnedHandle::new(token, "OpenProcessToken")
 }
@@ -3488,6 +3936,42 @@ fn load_service_profile_counter_config() -> Result<ServiceProfileCounterConfig, 
     Ok(config)
 }
 
+fn load_service_profile_enable_counter_config() -> Result<ServiceProfileEnableCounterConfig, String>
+{
+    let path = service_profile_enable_counter_config_path();
+    let bytes =
+        fs::read(&path).map_err(|error| format!("reading I2F counter config failed: {error}"))?;
+    let config: ServiceProfileEnableCounterConfig = serde_json::from_slice(&bytes)
+        .map_err(|error| format!("I2F counter config is invalid: {error}"))?;
+    let expected_output_root = program_data_root()
+        .join(crate::SERVICE_PROFILE_ENABLE_COUNTER_OUTPUT_SUBDIRECTORY)
+        .join(&config.scope);
+    let output_root_matches = Path::new(&config.output_root)
+        .to_string_lossy()
+        .eq_ignore_ascii_case(&expected_output_root.to_string_lossy());
+    let cli_path_is_absolute = Path::new(&config.expected_amd_cli_path).is_absolute();
+    let sha256_is_hex = config.expected_amd_cli_sha256.len() == 64
+        && config
+            .expected_amd_cli_sha256
+            .chars()
+            .all(|character| character.is_ascii_hexdigit());
+    if config.schema != "amd-i2f-counter-config/v1"
+        || config.service_name != crate::SERVICE_PROFILE_ENABLE_COUNTER_SERVICE_NAME
+        || config.service_account != crate::SERVICE_PROFILE_ENABLE_COUNTER_SERVICE_ACCOUNT
+        || config.service_account_sid != crate::SERVICE_PROFILE_ENABLE_COUNTER_SERVICE_ACCOUNT_SID
+        || config.service_sid.is_empty()
+        || !config.service_sid.starts_with("S-1-5-80-")
+        || !output_root_matches
+        || crate::validate_scope(&config.scope).is_err()
+        || !cli_path_is_absolute
+        || !sha256_is_hex
+        || config.expected_amd_cli_architecture != "x64"
+    {
+        return Err("I2F counter config is outside the fixed qualification contract".to_owned());
+    }
+    Ok(config)
+}
+
 fn load_config() -> Result<BrokerConfig, String> {
     let path = config_path();
     let bytes =
@@ -3527,6 +4011,12 @@ pub fn service_profile_counter_config_path() -> PathBuf {
     program_data_root()
         .join(crate::SERVICE_PROFILE_COUNTER_OUTPUT_SUBDIRECTORY)
         .join("I2E-CONFIG.json")
+}
+
+pub fn service_profile_enable_counter_config_path() -> PathBuf {
+    program_data_root()
+        .join(crate::SERVICE_PROFILE_ENABLE_COUNTER_OUTPUT_SUBDIRECTORY)
+        .join("I2F-CONFIG.json")
 }
 
 pub fn program_data_root() -> PathBuf {
@@ -3602,6 +4092,60 @@ mod tests {
             fixed_counter_discovery_arguments(),
             vec!["timechart".to_owned(), "--list".to_owned()]
         );
+    }
+
+    #[test]
+    fn i2f_service_contract_is_localservice_and_non_sampling() {
+        assert_eq!(
+            crate::SERVICE_PROFILE_ENABLE_COUNTER_SERVICE_NAME,
+            "ResourceTimelineAmdSystemProfileEnableQualification"
+        );
+        assert_eq!(
+            crate::SERVICE_PROFILE_ENABLE_COUNTER_SERVICE_ACCOUNT,
+            "NT AUTHORITY\\LOCAL SERVICE"
+        );
+        assert_eq!(
+            crate::SERVICE_PROFILE_ENABLE_COUNTER_SERVICE_ACCOUNT_SID,
+            "S-1-5-19"
+        );
+        assert_eq!(
+            crate::SERVICE_PROFILE_ENABLE_COUNTER_OUTPUT_SUBDIRECTORY,
+            "ResourceTimeline\\qualification\\amd-system-profile-enable"
+        );
+        assert_eq!(
+            fixed_counter_discovery_arguments(),
+            vec!["timechart".to_owned(), "--list".to_owned()]
+        );
+        assert_eq!(
+            crate::SERVICE_PROFILE_REQUIRED_PRIVILEGE,
+            "SeSystemProfilePrivilege"
+        );
+    }
+
+    #[test]
+    fn i2f_token_delta_rejects_missing_or_extra_enablements() {
+        let before_enabled = vec!["SeChangeNotifyPrivilege".to_owned()];
+        let before_disabled = vec!["SeSystemProfilePrivilege".to_owned()];
+        let after_enabled = vec![
+            "SeChangeNotifyPrivilege".to_owned(),
+            "SeSystemProfilePrivilege".to_owned(),
+        ];
+        let after_disabled = Vec::new();
+        assert!(crate::i2f_exact_single_privilege_enablement_delta(
+            &before_enabled,
+            &before_disabled,
+            &after_enabled,
+            &after_disabled,
+        ));
+        assert!(!crate::i2f_exact_single_privilege_enablement_delta(
+            &before_enabled,
+            &before_disabled,
+            &[
+                "SeChangeNotifyPrivilege".to_owned(),
+                "SeDebugPrivilege".to_owned()
+            ],
+            &after_disabled,
+        ));
     }
 
     #[test]

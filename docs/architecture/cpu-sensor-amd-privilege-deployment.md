@@ -965,6 +965,63 @@ NEXT_TASK = AMD-PRIVILEGE-I2D
 NEXT_GATE = HUMAN_ELEVATED_READ_ONLY_I2D_EVIDENCE_COLLECTION
 ```
 
+## I2E real result and I2F self-enable preparation
+
+I2E is closed as a real token-materialization result, not as an AMD result.
+The exact dedicated Service SID assignment was present in the LocalService
+token, but `SeSystemProfilePrivilege` was disabled. The in-service token gate
+failed before AMD and the exact right, service, and process state were fully
+rolled back.
+
+```text
+I2E_RESULT = PASS_WITH_NEGATIVE_TOKEN_ENABLEMENT_RESULT
+I2E_CONTROL_RESULT = POWER_UNAVAILABLE
+I2E_TOKEN_PRIVILEGE = PRESENT_DISABLED
+I2E_TOKEN_GATE = REAL_FAIL_EXPECTED_PRIVILEGE_DISABLED
+I2E_AMD_RUNTIME = 0
+I2E_COUNTER_DISCOVERY = NOT_EXECUTED
+I2E_FULL_ROLLBACK = REAL_PASS
+I2E_SERVICE_REMOVED = true
+I2E_RESIDUAL_RIGHT = ABSENT
+I2E_RERUN = FORBIDDEN
+```
+
+The next minimum-variable preparation is I2F. It retains LocalService and a
+dedicated unrestricted Service SID, then explicitly enables only the already
+materialized `SeSystemProfilePrivilege` in the qualification service's own
+token with native `AdjustTokenPrivileges`. The service records before/after
+token evidence and requires exactly one semantic transition,
+`DISABLED -> ENABLED`, before launching only `timechart --list`. No arbitrary
+privilege name, IPC command, sampling argument, production collector path, or
+LocalSystem fallback exists.
+
+```text
+I2F_SERVICE = ResourceTimelineAmdSystemProfileEnableQualification
+I2F_ACCOUNT = NT AUTHORITY\LocalService
+I2F_ACCOUNT_SID = S-1-5-19
+I2F_INTENTIONAL_VARIABLE = SeSystemProfilePrivilege DISABLED -> ENABLED via AdjustTokenPrivileges
+I2F_COMMAND = timechart --list
+I2F_SAMPLING = false
+I2F_ARTIFACT_SHA256 = F272E2D5E74A1F8CC7EFABF01A64BFF1ACE4A244BF6199530D30F9F3F90ED10D
+I2F_ARTIFACT_ARCHITECTURE = x64
+I2F_STATUS = PREPARED / NOT_EXECUTED
+MINIMUM_REQUIRED_CAPABILITY = UNRESOLVED
+PRODUCTION_ACCOUNT = UNRESOLVED
+LOCAL_SYSTEM_PRODUCTION_SELECTION = NOT_AUTHORIZED
+NEXT_GATE = HUMAN_I2F_SELF_ENABLE_QUALIFICATION_REVIEW
+```
+
+I2F uses a fresh service/evidence identity so immutable I2E evidence remains
+untouched. Its rollback removes only the exact Service SID right, verifies both
+LSA directions, proves service/process absence, and deletes the qualification
+registration. No I2F service, LSA mutation, token adjustment, AMD runtime, or
+sampling was performed during preparation.
+
+The explicit offline closure contract is represented by
+`tools/amd-privilege-qualification/i2e-token-materialization-final.example.json`.
+It records the expected negative token-enablement shape without pretending to
+be historical machine evidence.
+
 The first forensic pass prioritizes `SeSystemProfilePrivilege` because it is
 reported enabled in SYSTEM and absent from the LocalService enabled set. A
 SYSTEM/Administrators group or AMD kernel device/object ACL remains a competing

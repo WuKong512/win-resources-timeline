@@ -1158,6 +1158,93 @@ I2_REAL_RUNTIME_GATE_CONSUMED = true
 NEXT_GATE = HUMAN_ELEVATED_READ_ONLY_I2D_EVIDENCE_COLLECTION
 ```
 
+## AMD-PRIVILEGE-I2E REAL CLOSURE / AMD-PRIVILEGE-I2F PREPARATION
+
+The dedicated Service-SID I2E treatment has answered the token-materialization
+question exactly once. The right was assigned and verified in both LSA
+directions, and the LocalService treatment token contained
+`SeSystemProfilePrivilege`, but Windows materialized it as disabled. The token
+gate therefore stopped before AMD; this is not an AMD counter failure.
+
+```text
+I2E_RESULT = PASS_WITH_NEGATIVE_TOKEN_ENABLEMENT_RESULT
+I2E_EXPERIMENT_ID = 3935ac9082954bcfb2b1f94c54cf95d7
+I2E_CONTROL_SCOPE = 07a511e169274def93da79f269792b71
+I2E_TREATMENT_SCOPE = e66bbcff49ff4aeaaf8bd2a75aa959c7
+I2E_SERVICE_NAME = ResourceTimelineAmdSystemProfileQualification
+I2E_SERVICE_ACCOUNT = NT AUTHORITY\LocalService
+I2E_SERVICE_ACCOUNT_SID = S-1-5-19
+I2E_SERVICE_SID = S-1-5-80-2365814672-2637389132-1660472602-1496836994-3411780124
+I2E_ARTIFACT_SHA256 = 871CD20D228BD9510606DE640F516F62C2983B9F4A83C1AA807BA35329C778B9
+I2E_CONTROL_RESULT = POWER_UNAVAILABLE
+I2E_CONTROL_RERUN = FORBIDDEN
+I2E_RIGHT = SeSystemProfilePrivilege
+I2E_RIGHT_WAS_PRESENT_BEFORE = false
+I2E_RIGHT_ADDED_BY_EXPERIMENT = true
+I2E_DIRECT_RIGHT_VERIFICATION = PASS
+I2E_ASSIGNMENT_VERIFICATION = PASS
+I2E_TOKEN_PRIVILEGE_PRESENT = true
+I2E_TOKEN_PRIVILEGE_ENABLED = false
+I2E_TOKEN_PRIVILEGE_DISABLED = true
+I2E_TOKEN_GATE = REAL_FAIL_EXPECTED_PRIVILEGE_DISABLED
+I2E_AMD_RUNTIME = 0
+I2E_COUNTER_DISCOVERY = NOT_EXECUTED
+I2E_FULL_ROLLBACK = REAL_PASS
+I2E_SERVICE_REMOVED = true
+I2E_RESIDUAL_RIGHT = ABSENT
+I2E_RERUN = FORBIDDEN
+```
+
+I2F is prepared, not executed. It uses a fresh qualification-only service
+identity so immutable I2E evidence is not reused; the controlled security model
+remains LocalService, Session 0, x64, and an unrestricted dedicated Service
+SID. The future service receives exactly `SeSystemProfilePrivilege`, verifies
+it as present/disabled in its own token, enables that one privilege with the
+fixed native `AdjustTokenPrivileges` path, requires the exact disabled-to-
+enabled delta, and only then runs bounded non-sampling `timechart --list`.
+`ERROR_NOT_ALL_ASSIGNED` fails closed. Token enablement dies with the service
+process, and cleanup removes only the exact Service SID right with dual LSA
+readback.
+
+```text
+I2F_TASK = PREPARED
+I2F_SERVICE_NAME = ResourceTimelineAmdSystemProfileEnableQualification
+I2F_SERVICE_ACCOUNT = NT AUTHORITY\LocalService
+I2F_SERVICE_ACCOUNT_SID = S-1-5-19
+I2F_SERVICE_SID = DERIVED_AT_FUTURE_SETUP
+I2F_INTENTIONAL_VARIABLE = SeSystemProfilePrivilege DISABLED -> ENABLED via AdjustTokenPrivileges
+I2F_COMMAND = timechart --list
+I2F_SAMPLING = false
+I2F_PRE_ENABLE_GATE = PREPARED
+I2F_ADJUST_TOKEN_PRIVILEGES = PREPARED
+I2F_POST_ENABLE_GATE = PREPARED
+I2F_EXACT_TOKEN_DELTA = PREPARED
+I2F_AMD_AFTER_TOKEN_GATE = PASS_STATIC
+I2F_ARTIFACT_SHA256 = F272E2D5E74A1F8CC7EFABF01A64BFF1ACE4A244BF6199530D30F9F3F90ED10D
+I2F_ARTIFACT_ARCHITECTURE = x64
+I2F_REAL_RUNTIME = 0
+I2F_REAL_LSA_MUTATION = 0
+I2F_REAL_SERVICE_RUNTIME = 0
+I2F_REAL_AMD_RUNTIME = 0
+LOCAL_SERVICE_POWER_COUNTER_ACCESS = UNRESOLVED_AFTER_TOKEN_ENABLEMENT_BOUNDARY_DISCOVERED
+SERVICE_SID_SYSTEM_PROFILE_ASSIGNMENT = REAL_TOKEN_PRESENCE_CONFIRMED
+SERVICE_SID_SYSTEM_PROFILE_AUTOMATIC_ENABLEMENT = REAL_NEGATIVE
+SE_SYSTEM_PROFILE_PRIVILEGE_HYPOTHESIS = STRONGLY_STRENGTHENED
+MINIMUM_REQUIRED_CAPABILITY = UNRESOLVED
+PRODUCTION_ACCOUNT = UNRESOLVED
+LOCAL_SYSTEM_PRODUCTION_SELECTION = NOT_AUTHORIZED
+NEXT_GATE = HUMAN_I2F_SELF_ENABLE_QUALIFICATION_REVIEW
+```
+
+No I2E rerun, I2F service, LSA mutation, token adjustment, AMD process, or
+sampling session was performed during this preparation.
+
+The repository also carries
+`tools/amd-privilege-qualification/i2e-token-materialization-final.example.json`
+as an explicit offline closure-contract fixture for the authoritative I2E
+negative token-enablement result. It is marked as an example and is not a copy
+of, or replacement for, the immutable real ProgramData evidence.
+
 ## PR22 AMD-I2E treatment pre-run review closure
 
 PR #22's two confirmed treatment blockers are closed offline. The immutable

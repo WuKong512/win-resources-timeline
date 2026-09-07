@@ -44,6 +44,14 @@ pub const SERVICE_PROFILE_COUNTER_OUTPUT_SUBDIRECTORY: &str =
 pub const SERVICE_PROFILE_REQUIRED_PRIVILEGE: &str = "SeSystemProfilePrivilege";
 pub const SERVICE_PROFILE_FORBIDDEN_PRIVILEGES: [&str; 2] =
     ["SeProfileSingleProcessPrivilege", "SeDebugPrivilege"];
+pub const SERVICE_PROFILE_ENABLE_COUNTER_SERVICE_NAME: &str =
+    "ResourceTimelineAmdSystemProfileEnableQualification";
+pub const SERVICE_PROFILE_ENABLE_COUNTER_SERVICE_SID_ACCOUNT: &str =
+    "NT SERVICE\\ResourceTimelineAmdSystemProfileEnableQualification";
+pub const SERVICE_PROFILE_ENABLE_COUNTER_SERVICE_ACCOUNT: &str = "NT AUTHORITY\\LOCAL SERVICE";
+pub const SERVICE_PROFILE_ENABLE_COUNTER_SERVICE_ACCOUNT_SID: &str = "S-1-5-19";
+pub const SERVICE_PROFILE_ENABLE_COUNTER_OUTPUT_SUBDIRECTORY: &str =
+    "ResourceTimeline\\qualification\\amd-system-profile-enable";
 pub const SYSTEM_SID: &str = "S-1-5-18";
 pub const PIPE_PREFIX: &str = r"\\.\pipe\ResourceTimeline-AmdPrivilegeQualification-";
 pub const OUTPUT_SUBDIRECTORY: &str = "ResourceTimeline\\qualification\\amd-privilege";
@@ -59,6 +67,41 @@ pub const CLIENT_DISCONNECT_POLICY: &str = "CANCEL_OWNED_SESSION";
 pub const COUNTER_DISCOVERY_REQUEST_TYPE: &str = "GetAmdCounterAvailability";
 pub const COUNTER_DISCOVERY_MAX_OUTPUT_BYTES: usize = 16 * 1024;
 pub const COUNTER_DISCOVERY_TIMEOUT_MS: u64 = 30_000;
+
+/// Returns whether a token transition changes exactly one privilege state: the fixed
+/// qualification privilege from disabled to enabled.  The Windows service adds the
+/// account-right assignment separately; this pure seam only validates the effective-token
+/// delta after `AdjustTokenPrivileges`.
+pub fn i2f_exact_single_privilege_enablement_delta(
+    before_enabled: &[String],
+    before_disabled: &[String],
+    after_enabled: &[String],
+    after_disabled: &[String],
+) -> bool {
+    let required = SERVICE_PROFILE_REQUIRED_PRIVILEGE;
+    let has = |values: &[String]| {
+        values
+            .iter()
+            .any(|value| value.eq_ignore_ascii_case(required))
+    };
+    let without_required = |values: &[String]| {
+        let mut normalized: Vec<String> = values
+            .iter()
+            .filter(|value| !value.eq_ignore_ascii_case(required))
+            .map(|value| value.to_ascii_lowercase())
+            .collect();
+        normalized.sort_unstable();
+        normalized.dedup();
+        normalized
+    };
+
+    !has(before_enabled)
+        && has(before_disabled)
+        && has(after_enabled)
+        && !has(after_disabled)
+        && without_required(before_enabled) == without_required(after_enabled)
+        && without_required(before_disabled) == without_required(after_disabled)
+}
 
 /// The only ConnectNamedPipe outcomes that establish a valid first accept contract.
 ///
@@ -1459,6 +1502,41 @@ mod tests {
         ));
         assert!(no_counters_available_diagnostic(
             "ERROR: There is no counters avialable"
+        ));
+    }
+
+    #[test]
+    fn i2f_token_delta_is_exactly_one_enablement() {
+        let before_enabled = vec![
+            "SeChangeNotifyPrivilege".to_owned(),
+            "SeCreateGlobalPrivilege".to_owned(),
+            "SeImpersonatePrivilege".to_owned(),
+        ];
+        let before_disabled = vec!["SeSystemProfilePrivilege".to_owned()];
+        let mut after_enabled = before_enabled.clone();
+        after_enabled.push("SeSystemProfilePrivilege".to_owned());
+        assert!(i2f_exact_single_privilege_enablement_delta(
+            &before_enabled,
+            &before_disabled,
+            &after_enabled,
+            &[]
+        ));
+    }
+
+    #[test]
+    fn i2f_token_delta_rejects_any_other_privilege_change() {
+        let before_enabled = vec!["SeChangeNotifyPrivilege".to_owned()];
+        let before_disabled = vec!["SeSystemProfilePrivilege".to_owned()];
+        let after_enabled = vec![
+            "SeChangeNotifyPrivilege".to_owned(),
+            "SeSystemProfilePrivilege".to_owned(),
+            "SeDebugPrivilege".to_owned(),
+        ];
+        assert!(!i2f_exact_single_privilege_enablement_delta(
+            &before_enabled,
+            &before_disabled,
+            &after_enabled,
+            &[]
         ));
     }
 

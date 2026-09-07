@@ -510,3 +510,63 @@ readable. It never invokes
 `Set-Acl`, or an LSA privilege-assignment API. Current classification is
 `MINIMUM_REQUIRED_CAPABILITY = UNRESOLVED`; the next gate is
 `HUMAN_ELEVATED_READ_ONLY_I2D_EVIDENCE_COLLECTION`.
+
+## AMD-PRIVILEGE-I2E real closure / I2F self-enable preparation
+
+The real I2E treatment answered the Windows token-materialization question once.
+The dedicated Service SID right assignment passed dual LSA verification and
+materialized `SeSystemProfilePrivilege` in the LocalService service token, but
+the privilege was `PRESENT + DISABLED`. The in-service token gate therefore
+failed before AMD; this is not a counter-backend result and I2E must not be
+rerun.
+
+```text
+I2E_RESULT = PASS_WITH_NEGATIVE_TOKEN_ENABLEMENT_RESULT
+I2E_CONTROL_RESULT = POWER_UNAVAILABLE
+I2E_TOKEN_PRIVILEGE = PRESENT_DISABLED
+I2E_AMD_RUNTIME = 0
+I2E_COUNTER_DISCOVERY = NOT_EXECUTED
+I2E_FULL_ROLLBACK = REAL_PASS
+I2E_SERVICE_REMOVED = true
+I2E_RESIDUAL_RIGHT = ABSENT
+I2E_RERUN = FORBIDDEN
+```
+
+I2F is the next human-authorized qualification gate. It uses the same
+LocalService security model with a fresh dedicated unrestricted Service SID.
+The only intentional runtime variable is native
+`AdjustTokenPrivileges(SeSystemProfilePrivilege)` from `DISABLED` to
+`ENABLED` in the qualification service's own process token. The service must
+capture `I2F-TOKEN-BEFORE-ENABLE.json`,
+`I2F-ADJUST-TOKEN-PRIVILEGES.json`, `I2F-TOKEN-AFTER-ENABLE.json`, and
+`I2F-TOKEN-ENABLE-DELTA.json`; `ERROR_NOT_ALL_ASSIGNED` or any unexplained
+delta fails closed before AMD.
+
+The fixed operation is non-sampling:
+
+```text
+I2F_COMMAND = timechart --list
+I2F_SAMPLING = false
+I2F_SERVICE = ResourceTimelineAmdSystemProfileEnableQualification
+I2F_ACCOUNT = NT AUTHORITY\LocalService
+I2F_ACCOUNT_SID = S-1-5-19
+I2F_ARTIFACT_SHA256 = F272E2D5E74A1F8CC7EFABF01A64BFF1ACE4A244BF6199530D30F9F3F90ED10D
+I2F_ARTIFACT_ARCHITECTURE = x64
+I2F_STATUS = PREPARED / NOT_EXECUTED
+NEXT_GATE = HUMAN_I2F_SELF_ENABLE_QUALIFICATION_REVIEW
+```
+
+The future wrapper is plan-only unless explicitly authorized:
+
+```powershell
+Set-Location 'F:\File\codex\codex-worktrees\ac74\resource-timeline'
+& '.\tools\amd-privilege-qualification\run-admin-amd-i2f-service-profile-experiment.ps1'
+```
+
+No I2F service, LSA mutation, token adjustment, AMD process, or sampling was
+performed while preparing this path. I2E evidence and its historical artifact
+(`871CD20D228BD9510606DE640F516F62C2983B9`) remain immutable.
+
+The offline I2E closure-contract fixture is
+`i2e-token-materialization-final.example.json`. It is explicitly marked as an
+example and is not historical ProgramData evidence.
