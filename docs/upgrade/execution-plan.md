@@ -1623,6 +1623,51 @@ The repository regression covers the known direct-root layout and rejects a
 nested-only `counter-discovery` fixture. The treatment-only command remains
 the sole next human gate.
 
+## PR22 I2F entrypoint scope-isolation incident closure
+
+The first human I2F invocation was a confirmed no-op before experiment entry.
+The I2F executable setup and standalone cleanup wrappers had each dot-sourced
+the executable I2E wrapper with `-LibraryOnly`. PowerShell parameter binding in
+that dot-sourced script overwrote the caller's `LibraryOnly` and authorization
+switches, so neither wrapper reached its intended entrypoint.
+
+```text
+I2F_HUMAN_INVOCATION_1 = CONFIRMED_NO_OP
+ROOT_CAUSE = DOTSOURCED_EXECUTABLE_WRAPPER_PARAMETER_BINDING_POLLUTES_CALLER_SCOPE
+I2F_ROOT_CREATED = false
+I2F_SCOPE_CREATED = false
+I2F_SERVICE_CREATED = false
+I2F_LSA_MUTATION = 0
+I2F_TOKEN_ADJUSTMENT = 0
+I2F_AMD_RUNTIME = 0
+I2F_GATE_CONSUMED = false
+I2F_DOTSOURCE_EXECUTABLE_I2E_WRAPPER = REMOVED
+SHARED_RUNTIME_LIBRARY = PASS
+I2F_PLAN_ONLY_REAL_ENTRYPOINT = PASS
+I2F_CLEANUP_PLAN_ONLY_REAL_ENTRYPOINT = PASS
+I2F_AUTHORIZED_PRE_MUTATION_SENTINELS = PASS
+SHARED_LIBRARY_LOAD_SIDE_EFFECTS = NONE
+I2F_ROLLBACK_SAFETY = PRESERVED
+I2F_RUST_SELF_ENABLE_SEMANTICS = UNCHANGED
+I2F_REAL_RUNTIME = 0
+I2F_REAL_LSA_MUTATION = 0
+I2F_REAL_SERVICE_RUNTIME = 0
+I2F_REAL_TOKEN_ADJUSTMENT = 0
+I2F_REAL_AMD_RUNTIME = 0
+I2F_ARTIFACT_SHA256 = F272E2D5E74A1F8CC7EFABF01A64BFF1ACE4A244BF6199530D30F9F3F90ED10D
+I2F_ARTIFACT_CHANGED = false
+PR22_STATE = DRAFT
+NEXT_GATE = HUMAN_I2F_SELF_ENABLE_QUALIFICATION_REVIEW
+```
+
+Reusable I2E/I2F helpers now load from the side-effect-free
+`i2e-runtime-library.ps1`; I2F setup and cleanup no longer dot-source an
+executable wrapper. Real child-process plan-only tests prove both entrypoints
+emit their plan markers without changing service, evidence-root, or process
+state. Isolated authorized-entry sentinel tests prove the authorization flags
+survive helper loading and stop before service creation, LSA mutation, token
+adjustment, or AMD execution. I2E remains closed and must not be rerun.
+
 ## HISTORICAL / SUPERSEDED — AMD-PRIVILEGE-I2D MINIMUM CAPABILITY ROOT-CAUSE FORENSICS
 
 I2D consumes the two immutable, human-authorized non-sampling counter-

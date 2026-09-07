@@ -399,8 +399,9 @@ function Add-I2fCleanupError {
 }
 
 function Get-I2fSafeServiceSnapshot {
+    param([Parameter(Mandatory = $true)][string]$ServiceName)
     try {
-        Get-I2eServiceSnapshot
+        Get-I2eServiceSnapshot -ServiceName $ServiceName
     } catch {
         [pscustomobject]@{
             present = $null
@@ -418,6 +419,8 @@ function Invoke-I2fCleanup {
         [Parameter(Mandatory = $true)][string]$OutputRoot,
         [Parameter(Mandatory = $true)][bool]$ServiceCreated,
         [Parameter(Mandatory = $true)][bool]$RightAdded,
+        [Parameter(Mandatory = $true)][string]$ServiceName,
+        [Parameter(Mandatory = $true)][string]$BrokerArtifactPath,
         [AllowNull()][string]$ServiceSid,
         [Parameter(Mandatory = $true)][string]$AmdCliPath,
         [AllowNull()][string]$PrimaryExperimentError
@@ -446,15 +449,15 @@ function Invoke-I2fCleanup {
     }
 
     $state.cleanup_phase = 'SERVICE_STOP'
-    $serviceSnapshot = Get-I2fSafeServiceSnapshot
+    $serviceSnapshot = Get-I2fSafeServiceSnapshot -ServiceName $ServiceName
     if ($ServiceCreated) {
         $state.service_stop_attempted = $true
         try {
-            $null = Stop-I2eService
+            $null = Stop-I2eService -ServiceName $ServiceName
         } catch {
             Add-I2fCleanupError -State $state -Message $_.Exception.Message
         }
-        $serviceSnapshot = Get-I2fSafeServiceSnapshot
+        $serviceSnapshot = Get-I2fSafeServiceSnapshot -ServiceName $ServiceName
     }
 
     if ($null -eq $serviceSnapshot.present) {
@@ -490,7 +493,7 @@ function Invoke-I2fCleanup {
     $state.cleanup_phase = 'PROCESS_CHECK'
     $state.owned_process_check_attempted = $true
     try {
-        $processEvidence = Get-I2fOwnedProcessEvidence -BrokerArtifactPath $ArtifactPath -AmdCliPath $AmdCliPath
+        $processEvidence = Get-I2fOwnedProcessEvidence -BrokerArtifactPath $BrokerArtifactPath -AmdCliPath $AmdCliPath
         $state.owned_broker_process_count_after_stop = [int64]$processEvidence.owned_broker_process_count
         $state.amd_cli_process_count_after_stop = [int64]$processEvidence.amd_cli_process_count
         $state.owned_process_check_verified = $true
@@ -617,8 +620,8 @@ function Invoke-I2fCleanup {
     if ($ServiceCreated) {
         $state.service_registration_remove_attempted = $true
         try {
-            Remove-I2eService
-            $afterDelete = Get-I2fSafeServiceSnapshot
+            Remove-I2eService -ServiceName $ServiceName
+            $afterDelete = Get-I2fSafeServiceSnapshot -ServiceName $ServiceName
             $state.service_registration_removed = $null -ne $afterDelete.present -and
                 -not $afterDelete.present
             if (-not $state.service_registration_removed) {

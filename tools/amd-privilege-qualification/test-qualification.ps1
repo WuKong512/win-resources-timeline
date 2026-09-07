@@ -15,6 +15,7 @@ $TokenIntegrityContract = Join-Path $ToolRoot 'token-integrity-contract.ps1'
 $CleanupStateContract = Join-Path $ToolRoot 'cleanup-state-contract.ps1'
 $I2dForensics = Join-Path $ToolRoot 'i2d-readonly-forensics.ps1'
 $I2eContract = Join-Path $ToolRoot 'i2e-service-profile-contract.ps1'
+$I2eRuntimeLibrary = Join-Path $ToolRoot 'i2e-runtime-library.ps1'
 $I2eSetup = Join-Path $ToolRoot 'run-admin-amd-i2e-service-profile-experiment.ps1'
 $I2eCleanup = Join-Path $ToolRoot 'cleanup-admin-amd-i2e-service-profile-experiment.ps1'
 $I2eResumeContract = Join-Path $ToolRoot 'i2e-treatment-resume-contract.ps1'
@@ -22,6 +23,7 @@ $I2eResume = Join-Path $ToolRoot 'resume-admin-amd-i2e-treatment.ps1'
 $I2fContract = Join-Path $ToolRoot 'i2f-service-profile-contract.ps1'
 $I2fSetup = Join-Path $ToolRoot 'run-admin-amd-i2f-service-profile-experiment.ps1'
 $I2fCleanup = Join-Path $ToolRoot 'cleanup-admin-amd-i2f-service-profile-experiment.ps1'
+$I2fEntrypointScopeTest = Join-Path $ToolRoot 'test-i2f-entrypoint-scope.ps1'
 $I2eFinalFixture = Join-Path $ToolRoot 'i2e-token-materialization-final.example.json'
 $WindowsSource = Join-Path $ToolRoot 'src\windows.rs'
 
@@ -30,6 +32,7 @@ foreach ($wrapper in @(
         $TokenIntegrityContract,
         $CleanupStateContract,
         $I2dForensics,
+        $I2eRuntimeLibrary,
         (Join-Path $ToolRoot 'run-admin-amd-privilege-qualification.ps1'),
         (Join-Path $ToolRoot 'run-admin-amd-system-counter-qualification.ps1'),
         (Join-Path $ToolRoot 'run-standard-user-amd-privilege-client.ps1'),
@@ -43,7 +46,8 @@ foreach ($wrapper in @(
         $I2eResume,
         $I2fContract,
         $I2fSetup,
-        $I2fCleanup
+        $I2fCleanup,
+        $I2fEntrypointScopeTest
     )) {
     $parseErrors = $null
     $tokens = $null
@@ -78,7 +82,7 @@ function Assert-I2eNoPidAssignment {
     }
 }
 
-foreach ($i2eScript in @($I2eSetup, $I2eCleanup, $I2eContract, $I2eResumeContract, $I2eResume, $I2fSetup, $I2fCleanup, $I2fContract)) {
+foreach ($i2eScript in @($I2eRuntimeLibrary, $I2eSetup, $I2eCleanup, $I2eContract, $I2eResumeContract, $I2eResume, $I2fSetup, $I2fCleanup, $I2fContract, $I2fEntrypointScopeTest)) {
     Assert-I2eNoPidAssignment -Path $i2eScript
 }
 Write-Host 'I2E_PID_AUTOMATIC_VARIABLE_ASSIGNMENT_AUDIT=PASS'
@@ -620,7 +624,7 @@ foreach ($requiredResumeContract in @(
     }
 }
 foreach ($requiredTreatmentResumeContract in @(
-        '-LibraryOnly',
+        'i2e-runtime-library.ps1',
         'CONTROL-RECOVERY.json',
         'SECURITY-MUTATION-APPLIED.json',
         'SECURITY-MUTATION-ROLLBACK.json',
@@ -1507,6 +1511,14 @@ foreach ($requiredTokenDifferentialContract in @(
     }
 }
 Write-Host 'TOKEN_DIFFERENTIAL_EVIDENCE_CONTRACT=PASS'
+
+$i2fEntrypointOutput = @(& powershell.exe -NoProfile -ExecutionPolicy Bypass -File $I2fEntrypointScopeTest `
+        -ToolRoot $ToolRoot 2>&1 | ForEach-Object { [string]$_ })
+if ($LASTEXITCODE -ne 0) {
+    throw "I2F entrypoint scope isolation tests failed: $($i2fEntrypointOutput -join [Environment]::NewLine)"
+}
+$i2fEntrypointOutput | ForEach-Object { Write-Host $_ }
+Write-Host 'I2F_ENTRYPOINT_SCOPE_ISOLATION=PASS'
 
 Remove-Item -LiteralPath $EvidenceRoot -Recurse -Force -ErrorAction SilentlyContinue
 New-Item -ItemType Directory -Force -Path $EvidenceRoot | Out-Null

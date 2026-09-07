@@ -1,11 +1,17 @@
 #requires -Version 5.1
 [CmdletBinding()]
-param([switch]$ExecuteAuthorizedCleanup, [switch]$LibraryOnly)
+param(
+    [switch]$ExecuteAuthorizedCleanup,
+    [switch]$LibraryOnly,
+    # Internal offline-test seam.  It is accepted only with the dedicated
+    # test environment marker and always returns before machine mutation.
+    [switch]$InternalTestOnlyPreMutationSentinel
+)
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-. (Join-Path $PSScriptRoot 'run-admin-amd-i2e-service-profile-experiment.ps1') -LibraryOnly
+. (Join-Path $PSScriptRoot 'i2e-runtime-library.ps1')
 . (Join-Path $PSScriptRoot 'i2f-service-profile-contract.ps1')
 
 $ServiceName = $I2fServiceName
@@ -28,8 +34,12 @@ function Get-I2fServiceSid {
 }
 
 if ($LibraryOnly) { return }
-
-$null = Assert-I2eAdministrator
+if ($InternalTestOnlyPreMutationSentinel -and $env:I2F_OFFLINE_TEST_SENTINEL -cne 'true') {
+    throw 'The I2F cleanup pre-mutation sentinel is restricted to the offline test environment.'
+}
+if ($InternalTestOnlyPreMutationSentinel -and -not $ExecuteAuthorizedCleanup) {
+    throw 'The I2F cleanup pre-mutation sentinel requires -ExecuteAuthorizedCleanup.'
+}
 $roots = Get-I2fCleanupRoots
 if (-not $ExecuteAuthorizedCleanup) {
     [ordered]@{
@@ -38,7 +48,7 @@ if (-not $ExecuteAuthorizedCleanup) {
         service_name = $I2fServiceName
         right = $I2fRequiredRight
         all_rights = $false
-        candidate_evidence_roots = @($roots.FullName)
+        candidate_evidence_roots = @($roots | ForEach-Object { $_.FullName })
         fixed_cli_arguments = $I2fFixedArguments
         sampling = $false
         cleanup_order = @(
@@ -56,6 +66,13 @@ if (-not $ExecuteAuthorizedCleanup) {
     Write-Host 'No service, LSA mutation, or AMD runtime was performed.'
     return
 }
+if ($InternalTestOnlyPreMutationSentinel) {
+    Write-Host 'I2F_CLEANUP_AUTHORIZED_PRE_MUTATION_SENTINEL=true'
+    Write-Host 'No service, LSA mutation, token adjustment, or AMD runtime was performed.'
+    return
+}
+
+$null = Assert-I2eAdministrator
 
 $root = $roots | Sort-Object LastWriteTime -Descending | Select-Object -First 1
 if ($null -eq $root) {
@@ -78,7 +95,7 @@ if (Test-Path -LiteralPath $configPath -PathType Leaf) {
     $config = Read-I2fJson -Path $configPath
     $serviceSid = [string](Get-I2ePropertyValue -Object $config -Name 'service_sid')
 }
-$service = Get-I2eServiceSnapshot
+$service = Get-I2eServiceSnapshot -ServiceName $ServiceName
 if ([string]::IsNullOrWhiteSpace($serviceSid) -and $service.present) {
     $serviceSid = Get-I2fServiceSid
 }
@@ -89,6 +106,7 @@ if ([string]::IsNullOrWhiteSpace($serviceSid) -and $service.present) {
 $rightAdded = Test-Path -LiteralPath (Join-Path $root.FullName 'I2F-LSA-AFTER-ADD.json') -PathType Leaf
 $cleanupResult = Invoke-I2fCleanup -OutputRoot $root.FullName `
     -ServiceCreated ([bool]$service.present) -RightAdded $rightAdded `
+    -ServiceName $ServiceName -BrokerArtifactPath $ArtifactPath `
     -ServiceSid $serviceSid -AmdCliPath $amdPath -PrimaryExperimentError $null
 
 $state = $cleanupResult.state

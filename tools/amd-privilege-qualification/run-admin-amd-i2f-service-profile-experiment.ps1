@@ -2,17 +2,19 @@
 [CmdletBinding()]
 param(
     [switch]$ExecuteAuthorizedExperiment,
-    [switch]$LibraryOnly
+    [switch]$LibraryOnly,
+    # Internal offline-test seam.  It is accepted only with the dedicated
+    # test environment marker and always returns before machine mutation.
+    [switch]$InternalTestOnlyPreMutationSentinel
 )
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-# Reuse the reviewed I2E administrative, SCM, AMD preflight, and exact-right helpers.  The
-# I2F globals below deliberately retarget those helpers to a new qualification-only service;
-# no I2E phase or I2E evidence root is reused.
-$I2eSetupPath = Join-Path $PSScriptRoot 'run-admin-amd-i2e-service-profile-experiment.ps1'
-. $I2eSetupPath -LibraryOnly
+# Reuse only the side-effect-free runtime library.  The executable I2E wrapper
+# is intentionally never dot-sourced here, so its parameter binder cannot
+# overwrite I2F entrypoint state.
+. (Join-Path $PSScriptRoot 'i2e-runtime-library.ps1')
 . (Join-Path $PSScriptRoot 'i2f-service-profile-contract.ps1')
 
 $ServiceName = $I2fServiceName
@@ -124,25 +126,13 @@ function Add-I2fCleanupError {
     }
 }
 
-function Get-I2fSafeServiceSnapshot {
-    try {
-        Get-I2eServiceSnapshot
-    } catch {
-        [pscustomobject]@{
-            present = $null
-            state = 'UNKNOWN'
-            process_id = $null
-            start_name = $null
-            error = $_.Exception.Message
-        }
-    }
-}
-
 function Invoke-I2fCleanup {
     param(
         [Parameter(Mandatory = $true)][string]$OutputRoot,
         [Parameter(Mandatory = $true)][bool]$ServiceCreated,
         [Parameter(Mandatory = $true)][bool]$RightAdded,
+        [Parameter(Mandatory = $true)][string]$ServiceName,
+        [Parameter(Mandatory = $true)][string]$BrokerArtifactPath,
         [AllowNull()][string]$ServiceSid,
         [Parameter(Mandatory = $true)][string]$AmdCliPath,
         [AllowNull()][string]$PrimaryExperimentError
@@ -171,11 +161,11 @@ function Invoke-I2fCleanup {
     }
 
     $state.cleanup_phase = 'SERVICE_STOP'
-    $serviceSnapshot = Get-I2fSafeServiceSnapshot
+    $serviceSnapshot = Get-I2fSafeServiceSnapshot -ServiceName $ServiceName
     if ($ServiceCreated) {
         $state.service_stop_attempted = $true
-        try { $null = Stop-I2eService } catch { Add-I2fCleanupError -State $state -Message $_.Exception.Message }
-        $serviceSnapshot = Get-I2fSafeServiceSnapshot
+        try { $null = Stop-I2eService -ServiceName $ServiceName } catch { Add-I2fCleanupError -State $state -Message $_.Exception.Message }
+        $serviceSnapshot = Get-I2fSafeServiceSnapshot -ServiceName $ServiceName
         if ($null -eq $serviceSnapshot.present) {
             $state.service_stop_verified = $false
             $state.service_state_after_stop = 'UNKNOWN'
@@ -208,7 +198,7 @@ function Invoke-I2fCleanup {
     $state.cleanup_phase = 'PROCESS_CHECK'
     $state.owned_process_check_attempted = $true
     try {
-        $processEvidence = Get-I2fOwnedProcessEvidence -BrokerArtifactPath $ArtifactPath -AmdCliPath $AmdCliPath
+        $processEvidence = Get-I2fOwnedProcessEvidence -BrokerArtifactPath $BrokerArtifactPath -AmdCliPath $AmdCliPath
         $state.owned_broker_process_count_after_stop = [int64]$processEvidence.owned_broker_process_count
         $state.amd_cli_process_count_after_stop = [int64]$processEvidence.amd_cli_process_count
         $state.owned_process_check_verified = $true
@@ -334,8 +324,8 @@ function Invoke-I2fCleanup {
     if ($ServiceCreated) {
         $state.service_registration_remove_attempted = $true
         try {
-            Remove-I2eService
-            $afterDelete = Get-I2fSafeServiceSnapshot
+            Remove-I2eService -ServiceName $ServiceName
+            $afterDelete = Get-I2fSafeServiceSnapshot -ServiceName $ServiceName
             $state.service_registration_removed = $null -ne $afterDelete.present -and
                 -not $afterDelete.present
             if (-not $state.service_registration_removed) {
@@ -387,17 +377,28 @@ function Wait-I2fServiceEvidence {
 }
 
 if ($LibraryOnly) { return }
-
-$null = Assert-I2eAdministrator
+if ($InternalTestOnlyPreMutationSentinel -and $env:I2F_OFFLINE_TEST_SENTINEL -cne 'true') {
+    throw 'The I2F pre-mutation sentinel is restricted to the offline test environment.'
+}
+if ($InternalTestOnlyPreMutationSentinel -and -not $ExecuteAuthorizedExperiment) {
+    throw 'The I2F pre-mutation sentinel requires -ExecuteAuthorizedExperiment.'
+}
 if (-not $ExecuteAuthorizedExperiment) {
     Get-I2fExperimentPlan -ArtifactSha256 $ExpectedArtifactSha256 | ConvertTo-Json -Depth 20
     Write-Host 'I2F_PLAN_ONLY=true'
     Write-Host 'No service, LSA mutation, token adjustment, or AMD runtime was performed.'
     return
 }
+if ($InternalTestOnlyPreMutationSentinel) {
+    Write-Host 'I2F_AUTHORIZED_PRE_MUTATION_SENTINEL=true'
+    Write-Host 'No service, LSA mutation, token adjustment, or AMD runtime was performed.'
+    return
+}
+
+$null = Assert-I2eAdministrator
 
 $artifactHash = Assert-I2fArtifact
-if ((Get-I2eServiceSnapshot).present) { throw "I2F service already exists: $ServiceName" }
+if ((Get-I2eServiceSnapshot -ServiceName $ServiceName).present) { throw "I2F service already exists: $ServiceName" }
 if (Test-Path -LiteralPath $ConfigPath -PathType Leaf) { throw "Stale I2F config exists: $ConfigPath" }
 $controlIdentity = Get-I2fControlAmdIdentity
 $identityCheck = Compare-I2fCurrentAmdIdentity -Control $controlIdentity
@@ -435,7 +436,7 @@ try {
         Invoke-I2eSc -Arguments $createArgs | Out-Null
         $serviceCreated = $true
         Invoke-I2eSc -Arguments @('sidtype', $ServiceName, 'unrestricted') | Out-Null
-        Assert-I2eServiceSidType
+        Assert-I2eServiceSidType -ServiceName $ServiceName
         $serviceSid = Get-I2fServiceSid
         Set-I2eDirectoryAcl -Path $QualificationRoot -ServiceSid $serviceSid
         Set-I2eDirectoryAcl -Path $outputRoot -ServiceSid $serviceSid
@@ -462,7 +463,8 @@ try {
 }
 finally {
     $cleanupResult = Invoke-I2fCleanup -OutputRoot $outputRoot -ServiceCreated $serviceCreated `
-        -RightAdded $rightAdded -ServiceSid $serviceSid -AmdCliPath $amdCliPath `
+        -RightAdded $rightAdded -ServiceName $ServiceName -BrokerArtifactPath $ArtifactPath `
+        -ServiceSid $serviceSid -AmdCliPath $amdCliPath `
         -PrimaryExperimentError $primaryExperimentError
 }
 

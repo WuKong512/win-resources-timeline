@@ -598,3 +598,35 @@ performed while preparing this path. I2E evidence and its historical artifact
 The offline I2E closure-contract fixture is
 `i2e-token-materialization-final.example.json`. It is explicitly marked as an
 example and is not historical ProgramData evidence.
+
+## PR22 I2F entrypoint scope isolation closure
+
+The first human I2F invocation was a confirmed no-op before experiment entry.
+The cause was structural PowerShell scope pollution: the I2F setup and cleanup
+wrappers had dot-sourced the executable I2E wrapper with `-LibraryOnly`, whose
+parameter binder overwrote the I2F caller's authorization and library switches.
+
+The wrappers now load reusable helpers directly from
+`i2e-runtime-library.ps1`, which has no executable parameters or entrypoint
+side effects. Real child-process checks cover both plan-only entrypoints, and
+offline authorized-entry sentinels prove that the authorization switches reach
+the pre-mutation boundary without creating a service, changing LSA policy,
+adjusting a token, or launching AMD uProf.
+
+```text
+I2F_HUMAN_INVOCATION_1 = CONFIRMED_NO_OP
+I2F_GATE_CONSUMED = false
+I2F_ROOT_CREATED = false
+I2F_SERVICE_CREATED = false
+I2F_LSA_MUTATION = 0
+I2F_TOKEN_ADJUSTMENT = 0
+I2F_AMD_RUNTIME = 0
+I2F_DOTSOURCE_EXECUTABLE_I2E_WRAPPER = REMOVED
+SHARED_RUNTIME_LIBRARY = PASS
+I2F_PLAN_ONLY_REAL_ENTRYPOINT = PASS
+I2F_CLEANUP_PLAN_ONLY_REAL_ENTRYPOINT = PASS
+I2F_ROLLBACK_SAFETY = PRESERVED
+I2F_RUST_SELF_ENABLE_SEMANTICS = UNCHANGED
+I2F_ARTIFACT_CHANGED = false
+NEXT_GATE = HUMAN_I2F_SELF_ENABLE_QUALIFICATION_REVIEW
+```

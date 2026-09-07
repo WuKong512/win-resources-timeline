@@ -6,8 +6,7 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
 $ResumeScriptRoot = $PSScriptRoot
-$SetupScriptPath = Join-Path $ResumeScriptRoot 'run-admin-amd-i2e-service-profile-experiment.ps1'
-. $SetupScriptPath -LibraryOnly
+. (Join-Path $ResumeScriptRoot 'i2e-runtime-library.ps1')
 . (Join-Path $ResumeScriptRoot 'i2e-treatment-resume-contract.ps1')
 
 $ExpectedExperimentId = '3935ac9082954bcfb2b1f94c54cf95d7'
@@ -84,8 +83,8 @@ function Assert-I2eTreatmentResumeServiceGate {
         $service.path_name -notmatch ('(?i)' + [regex]::Escape($ExpectedServiceStartMode))) {
         throw ('Treatment resume service image/mode mismatch: {0}' -f $service.path_name)
     }
-    Assert-I2eServiceSidType
-    $resolvedSid = Resolve-I2eServiceSid
+    Assert-I2eServiceSidType -ServiceName $ServiceName
+    $resolvedSid = Resolve-I2eServiceSid -ServiceSidAccount $ServiceSidAccount
     if ($resolvedSid -cne $ExpectedServiceSid) {
         throw ('Treatment resume Service SID mismatch; expected={0}, actual={1}' -f $ExpectedServiceSid, $resolvedSid)
     }
@@ -318,7 +317,7 @@ function Invoke-I2eTreatmentRollback {
     $stopResult = $null
     $stopError = $null
     try {
-        $stopResult = Stop-I2eService
+        $stopResult = Stop-I2eService -ServiceName $ServiceName
     } catch {
         $stopError = $_.Exception.Message
     }
@@ -411,7 +410,7 @@ function Invoke-I2eTreatmentRollback {
 
     if ($verification.full_rollback_verified -and $null -ne $service) {
         try {
-            Remove-I2eService
+            Remove-I2eService -ServiceName $ServiceName
             $serviceRemoved = $true
         } catch {
             $serviceRemovalError = $_.Exception.Message
