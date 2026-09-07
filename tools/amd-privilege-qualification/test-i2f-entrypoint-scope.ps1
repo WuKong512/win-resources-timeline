@@ -76,14 +76,20 @@ function Get-I2fMachineState {
 
     $rootEntries = @()
     if (Test-Path -LiteralPath $qualificationRoot -PathType Container) {
-        $rootEntries = @(
-            Get-ChildItem -LiteralPath $qualificationRoot -Force -ErrorAction Stop |
-                Sort-Object FullName |
-                ForEach-Object {
-                    $length = if ($_.PSIsContainer) { 0L } else { [int64]$_.Length }
-                    '{0}|{1}|{2}|{3}' -f $_.FullName, $_.PSIsContainer, $length, $_.LastWriteTimeUtc.Ticks
-                }
-        )
+        try {
+            $rootEntries = @(
+                Get-ChildItem -LiteralPath $qualificationRoot -Force -ErrorAction Stop |
+                    Sort-Object FullName |
+                    ForEach-Object {
+                        $length = if ($_.PSIsContainer) { 0L } else { [int64]$_.Length }
+                        '{0}|{1}|{2}|{3}' -f $_.FullName, $_.PSIsContainer, $length, $_.LastWriteTimeUtc.Ticks
+                    }
+            )
+        } catch {
+            # A protected historical evidence root is a stable read-only
+            # observation for this plan-only test, not permission to mutate it.
+            $rootEntries = @('UNREADABLE')
+        }
     }
 
     [pscustomobject]@{

@@ -1927,3 +1927,83 @@ AMD_DEVICE_IO_DURING_I2D = 0
 PRODUCTION_ACCOUNT_SWITCH = NOT_AUTHORIZED
 NEXT_GATE = HUMAN_ELEVATED_READ_ONLY_I2D_EVIDENCE_COLLECTION
 ```
+
+## PR22 I2F real closure / counter-discovery evidence repair
+
+The authoritative I2F run consumed the single real self-enable gate. It must
+not be rerun. The exact Service SID assignment, pre-enable gate, native
+`AdjustTokenPrivileges`, post-enable gate, exact token delta, AMD CLI identity,
+fixed non-sampling `timechart --list` launch, and full rollback all passed. The
+CLI nevertheless reported that Power counters were unavailable.
+
+```text
+I2F_RESULT = PASS_WITH_NEGATIVE_COUNTER_ACCESS_RESULT
+I2F_SCOPE = f68bf4d3d36547a0ba753cff489bb6eb
+I2F_GATE_CONSUMED = true
+I2F_RERUN = FORBIDDEN
+SERVICE_SID_RIGHT_ASSIGNMENT = REAL_PASS
+PRE_ENABLE_TOKEN_GATE = REAL_PASS
+ADJUST_TOKEN_PRIVILEGES = REAL_PASS
+POST_ENABLE_TOKEN_GATE = REAL_PASS
+EXACT_TOKEN_DELTA = REAL_PASS
+I2F_AMD_IDENTITY = REAL_PASS
+I2F_AMD_COUNTER_DISCOVERY = REAL_POWER_UNAVAILABLE
+I2F_AMD_CLI_EXIT_CODE = 0
+I2F_POWER_CATEGORY_PRESENT = false
+I2F_NO_COUNTERS_DIAGNOSTIC = true
+I2F_NO_ORPHAN_CHILD = true
+I2F_FULL_ROLLBACK = REAL_PASS
+SE_SYSTEM_PROFILE_PRIVILEGE_ALONE_SUFFICIENT = false
+SE_SYSTEM_PROFILE_PRIVILEGE_NECESSITY = UNRESOLVED
+I2F_HISTORICAL_ARTIFACT_SHA256 = F272E2D5E74A1F8CC7EFABF01A64BFF1ACE4A244BF6199530D30F9F3F90ED10D
+I2F_POST_REPAIR_ARTIFACT_SHA256 = 9A13111B02D5AAA2886B7E1EA059643EAABD5F30C3A2522589EE8B124B7B735C
+I2F_ARTIFACT_CHANGED_AFTER_REPAIR = true
+PRODUCTION_ACCOUNT = UNRESOLVED
+LOCAL_SYSTEM_PRODUCTION_SELECTION = NOT_AUTHORIZED
+PRODUCTION_ADMISSION = NOT_COMPLETE
+NEXT_GATE = REVIEW_RESIDUAL_DIFFERENTIAL_AND_SELECT_SINGLE_I2G_VARIABLE
+```
+
+The I2F chain tested LocalService, Session 0, x64, an unrestricted dedicated
+Service SID, the exact `SeSystemProfilePrivilege` assignment, and an explicit
+`DISABLED -> ENABLED` token transition. `POWER_UNAVAILABLE` therefore disproves
+only sufficiency of that single capability in this tested context. It does not
+prove the privilege unnecessary or irrelevant.
+
+The historical I2F launch/result evidence is immutable. It contains the known
+telemetry defect that `amd_runtime_executed=false` was emitted even though the
+counter-discovery CLI was spawned and completed. The field is retained as a
+legacy power-sampling indicator. New additive v1 evidence fields make the
+distinction explicit:
+
+```text
+counter_discovery_cli_executed = true after Command::spawn succeeds
+power_sampling_runtime_executed = false
+sampling = false
+```
+
+The new fields cover spawn success with either exit status; a failed spawn does
+not claim execution. Historical ProgramData JSON is not rewritten.
+
+The residual SYSTEM-versus-I2F matrix is maintained in
+[`docs/upgrade/amd-system-vs-i2f-residual-differential.md`](amd-system-vs-i2f-residual-differential.md):
+
+```text
+ACCOUNT_IDENTITY_DIFFERENTIAL = OPEN
+ADMINISTRATORS_MEMBERSHIP_DIFFERENTIAL = OPEN
+SE_SYSTEM_PROFILE_DIFFERENTIAL = CLOSED_AS_SINGLE_SUFFICIENCY_HYPOTHESIS
+SE_PROFILE_SINGLE_PROCESS_DIFFERENTIAL = OPEN
+SE_DEBUG_DIFFERENTIAL = OPEN
+OTHER_TOKEN_PRIVILEGE_DIFFERENTIAL = OPEN
+TOKEN_GROUP_DIFFERENTIAL = OPEN
+SERVICE_ACCOUNT_SID_DIFFERENTIAL = OPEN
+AMD_DRIVER_DEVICE_AUTHORIZATION_DIFFERENTIAL = OPEN
+SESSION_DIFFERENTIAL = CLOSED
+ARCHITECTURE_DIFFERENTIAL = CLOSED
+AMD_CLI_IDENTITY_DIFFERENTIAL = CLOSED
+I2G_VARIABLE = UNRESOLVED
+I2G_REAL_RUNTIME = 0
+```
+
+No I2G variable is selected, no SYSTEM/I2F rerun is authorized, and production
+account selection remains unresolved.

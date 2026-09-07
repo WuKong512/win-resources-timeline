@@ -611,6 +611,68 @@ I2F_ARTIFACT_CHANGED = false
 NEXT_GATE = HUMAN_I2F_SELF_ENABLE_QUALIFICATION_REVIEW
 ```
 
+## PR22 I2F real closure / residual differential preparation
+
+The authoritative I2F qualification consumed exactly one real self-enable
+gate. It is closed and must not be rerun. The dedicated LocalService Service
+SID received `SeSystemProfilePrivilege`, the service token materialized it as
+`PRESENT + DISABLED`, native `AdjustTokenPrivileges` enabled it, and the
+post-enable token showed exactly `DISABLED -> ENABLED`. The fixed
+non-sampling AMD CLI then executed and returned the known no-counters result.
+
+```text
+I2F_RESULT = PASS_WITH_NEGATIVE_COUNTER_ACCESS_RESULT
+I2F_SCOPE = f68bf4d3d36547a0ba753cff489bb6eb
+I2F_GATE_CONSUMED = true
+I2F_RERUN = FORBIDDEN
+SERVICE_SID_RIGHT_ASSIGNMENT = REAL_PASS
+PRE_ENABLE_TOKEN_GATE = REAL_PASS
+ADJUST_TOKEN_PRIVILEGES = REAL_PASS
+POST_ENABLE_TOKEN_GATE = REAL_PASS
+EXACT_TOKEN_DELTA = REAL_PASS
+I2F_AMD_IDENTITY = REAL_PASS
+I2F_AMD_COUNTER_DISCOVERY = REAL_POWER_UNAVAILABLE
+I2F_AMD_CLI_EXIT_CODE = 0
+I2F_POWER_CATEGORY_PRESENT = false
+I2F_NO_COUNTERS_DIAGNOSTIC = true
+I2F_NO_ORPHAN_CHILD = true
+I2F_FULL_ROLLBACK = REAL_PASS
+SE_SYSTEM_PROFILE_PRIVILEGE_ALONE_SUFFICIENT = false
+SE_SYSTEM_PROFILE_PRIVILEGE_NECESSITY = UNRESOLVED
+I2F_REAL_RUNTIME = 1
+I2F_POWER_SAMPLING_RUNTIME = 0
+I2F_HISTORICAL_ARTIFACT_SHA256 = F272E2D5E74A1F8CC7EFABF01A64BFF1ACE4A244BF6199530D30F9F3F90ED10D
+I2F_POST_REPAIR_ARTIFACT_SHA256 = 9A13111B02D5AAA2886B7E1EA059643EAABD5F30C3A2522589EE8B124B7B735C
+I2F_ARTIFACT_CHANGED_AFTER_REPAIR = true
+PRODUCTION_ACCOUNT = UNRESOLVED
+LOCAL_SYSTEM_PRODUCTION_SELECTION = NOT_AUTHORIZED
+PRODUCTION_ADMISSION = NOT_COMPLETE
+NEXT_GATE = REVIEW_RESIDUAL_DIFFERENTIAL_AND_SELECT_SINGLE_I2G_VARIABLE
+```
+
+`I2F_REAL_RUNTIME = 1` means one bounded counter-discovery CLI execution,
+not a power sampling session. The CLI was actually spawned and completed;
+`POWER_UNAVAILABLE` is the AMD result. The historical I2F launch/result JSON
+is immutable and retains the legacy `amd_runtime_executed=false` field. New
+counter-discovery evidence uses additive v1 fields:
+
+```text
+counter_discovery_cli_executed = true after Command::spawn succeeds
+power_sampling_runtime_executed = false
+sampling = false
+```
+
+This keeps the legacy sampling interpretation intact while making process
+execution explicit. Spawn failure does not claim execution, and a spawned CLI
+remains executed even with a nonzero exit code.
+
+The residual SYSTEM-versus-I2F comparison is recorded in
+`docs/upgrade/amd-system-vs-i2f-residual-differential.md`. Session 0, x64, and
+AMD CLI identity are closed differentials. Account identity, Administrators
+membership, other token privileges/groups, Service SID identity, and AMD
+driver/device/backend authorization remain open. `I2G_VARIABLE = UNRESOLVED`;
+no I2G runtime or production account selection is authorized.
+
 The behavioral test executes the actual Resume wrapper in a child PowerShell
 process, validates the canonical service and artifact identity in its plan, and
 proves the machine snapshot is unchanged. A guarded authorized-entry sentinel

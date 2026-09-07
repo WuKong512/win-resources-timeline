@@ -481,6 +481,29 @@ impl CounterDiscoveryAvailability {
     }
 }
 
+/// Execution evidence for the fixed, non-sampling `timechart --list` operation.
+///
+/// The legacy `amd_runtime_executed` field in counter-discovery evidence predates the
+/// distinction between CLI execution and power sampling and is retained for compatibility as
+/// the sampling-runtime indicator. These explicit fields are authoritative for the bounded
+/// counter-discovery process itself.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CounterDiscoveryExecutionEvidence {
+    pub counter_discovery_cli_executed: bool,
+    pub power_sampling_runtime_executed: bool,
+    pub sampling: bool,
+}
+
+impl CounterDiscoveryExecutionEvidence {
+    pub const fn from_spawn(spawn_succeeded: bool) -> Self {
+        Self {
+            counter_discovery_cli_executed: spawn_succeeded,
+            power_sampling_runtime_executed: false,
+            sampling: false,
+        }
+    }
+}
+
 /// Match only the bounded, known AMD uProf counter-backend diagnostic.  The historical typo
 /// `avialable` is intentionally accepted because it was emitted by the installed CLI, while the
 /// surrounding `no counters` phrase prevents arbitrary stderr from being treated as this result.
@@ -1503,6 +1526,21 @@ mod tests {
         assert!(no_counters_available_diagnostic(
             "ERROR: There is no counters avialable"
         ));
+    }
+
+    #[test]
+    fn counter_discovery_execution_evidence_distinguishes_spawn_from_sampling() {
+        let before_spawn = CounterDiscoveryExecutionEvidence::from_spawn(false);
+        assert!(!before_spawn.counter_discovery_cli_executed);
+        assert!(!before_spawn.power_sampling_runtime_executed);
+        assert!(!before_spawn.sampling);
+
+        let after_spawn_exit_zero = CounterDiscoveryExecutionEvidence::from_spawn(true);
+        let after_spawn_nonzero = CounterDiscoveryExecutionEvidence::from_spawn(true);
+        assert!(after_spawn_exit_zero.counter_discovery_cli_executed);
+        assert!(after_spawn_nonzero.counter_discovery_cli_executed);
+        assert!(!after_spawn_exit_zero.power_sampling_runtime_executed);
+        assert!(!after_spawn_nonzero.power_sampling_runtime_executed);
     }
 
     #[test]

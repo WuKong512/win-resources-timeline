@@ -6,13 +6,13 @@ use crate::{
     pending_accept_cancel_is_drained, pending_accept_release_is_safe,
     pending_accept_state_after_cancel, service_stop_contract_is_valid,
     win32_code_from_hresult_contract, BrokerReadinessState, BrokerResponse, ClientIdentity,
-    CounterDiscoveryAvailability, FirstAcceptState, IdentityContractObservation,
-    MessageFrameResult, MutationAssertions, PendingAcceptCompletion, PendingAcceptLifecycleState,
-    ProtocolError, ResponseStatus, SemanticRequest, SessionCoordinator, SessionError, SessionOwner,
-    SessionResultSummary, SessionState, SyntheticCheck, SyntheticQualificationSummary,
-    MAX_FRAME_BYTES, PROTOCOL_VERSION, SERVICE_ACCOUNT_SID, SYSTEM_COUNTER_FIXED_ARGUMENTS,
-    SYSTEM_COUNTER_SERVICE_ACCOUNT, SYSTEM_COUNTER_SERVICE_ACCOUNT_SID,
-    SYSTEM_COUNTER_SERVICE_NAME,
+    CounterDiscoveryAvailability, CounterDiscoveryExecutionEvidence, FirstAcceptState,
+    IdentityContractObservation, MessageFrameResult, MutationAssertions, PendingAcceptCompletion,
+    PendingAcceptLifecycleState, ProtocolError, ResponseStatus, SemanticRequest,
+    SessionCoordinator, SessionError, SessionOwner, SessionResultSummary, SessionState,
+    SyntheticCheck, SyntheticQualificationSummary, MAX_FRAME_BYTES, PROTOCOL_VERSION,
+    SERVICE_ACCOUNT_SID, SYSTEM_COUNTER_FIXED_ARGUMENTS, SYSTEM_COUNTER_SERVICE_ACCOUNT,
+    SYSTEM_COUNTER_SERVICE_ACCOUNT_SID, SYSTEM_COUNTER_SERVICE_NAME,
 };
 use serde_json::json;
 use std::process::{Child, Command};
@@ -65,6 +65,31 @@ pub fn run(
             "COUNTER_DISCOVERY_UNKNOWN_FAILURE",
             counter_discovery_unknown_failure(),
             "unrecognized counter-discovery output remains a discovery failure",
+        ),
+        check(
+            "COUNTER_DISCOVERY_EXECUTION_BEFORE_SPAWN",
+            counter_discovery_execution_before_spawn(),
+            "pre-spawn evidence does not claim the CLI executed",
+        ),
+        check(
+            "COUNTER_DISCOVERY_EXECUTION_AFTER_SPAWN_EXIT_ZERO",
+            counter_discovery_execution_after_spawn_exit_zero(),
+            "a spawned CLI remains recorded as executed after exit code zero",
+        ),
+        check(
+            "COUNTER_DISCOVERY_EXECUTION_AFTER_SPAWN_NONZERO",
+            counter_discovery_execution_after_spawn_nonzero(),
+            "a spawned CLI remains recorded as executed after a nonzero exit",
+        ),
+        check(
+            "COUNTER_DISCOVERY_EXECUTION_SPAWN_FAILURE",
+            counter_discovery_execution_spawn_failure(),
+            "a failed spawn does not claim CLI execution",
+        ),
+        check(
+            "COUNTER_DISCOVERY_EXECUTION_NON_SAMPLING",
+            counter_discovery_execution_is_non_sampling(),
+            "counter discovery execution is distinct from power sampling",
         ),
         check(
             "SYSTEM_COUNTER_SERVICE_CONTRACT",
@@ -689,6 +714,31 @@ fn counter_discovery_power_present() -> bool {
 fn counter_discovery_unknown_failure() -> bool {
     classify_counter_discovery(Some(1), "", "unexpected failure")
         == CounterDiscoveryAvailability::DiscoveryFailed
+}
+
+fn counter_discovery_execution_before_spawn() -> bool {
+    !CounterDiscoveryExecutionEvidence::from_spawn(false).counter_discovery_cli_executed
+}
+
+fn counter_discovery_execution_after_spawn_exit_zero() -> bool {
+    let evidence = CounterDiscoveryExecutionEvidence::from_spawn(true);
+    evidence.counter_discovery_cli_executed && !evidence.power_sampling_runtime_executed
+}
+
+fn counter_discovery_execution_after_spawn_nonzero() -> bool {
+    let evidence = CounterDiscoveryExecutionEvidence::from_spawn(true);
+    evidence.counter_discovery_cli_executed && !evidence.power_sampling_runtime_executed
+}
+
+fn counter_discovery_execution_spawn_failure() -> bool {
+    !CounterDiscoveryExecutionEvidence::from_spawn(false).counter_discovery_cli_executed
+}
+
+fn counter_discovery_execution_is_non_sampling() -> bool {
+    let evidence = CounterDiscoveryExecutionEvidence::from_spawn(true);
+    evidence.counter_discovery_cli_executed
+        && !evidence.power_sampling_runtime_executed
+        && !evidence.sampling
 }
 
 fn system_counter_service_contract_is_fixed() -> bool {

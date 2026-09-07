@@ -9,10 +9,11 @@ use crate::{
     authorize_client, build_pipe_dacl, classify_counter_discovery, decode_request,
     encode_json_frame, no_counters_available_diagnostic, request_id_from_json,
     response_for_protocol_error, response_for_session_error, BrokerConfig, BrokerResponse,
-    ClientIdentity, CounterDiscoveryAvailability, CounterDiscoveryStatus, ProviderStatus,
-    ResponseStatus, SemanticRequest, SessionCoordinator, SessionResultSummary, SessionState,
-    CLIENT_DISCONNECT_POLICY, COUNTER_DISCOVERY_MAX_OUTPUT_BYTES, COUNTER_DISCOVERY_TIMEOUT_MS,
-    FIXED_EVENT, OUTPUT_SUBDIRECTORY, QUALIFICATION_ONLY, SERVICE_ACCOUNT_SID, SERVICE_NAME,
+    ClientIdentity, CounterDiscoveryAvailability, CounterDiscoveryExecutionEvidence,
+    CounterDiscoveryStatus, ProviderStatus, ResponseStatus, SemanticRequest, SessionCoordinator,
+    SessionResultSummary, SessionState, CLIENT_DISCONNECT_POLICY,
+    COUNTER_DISCOVERY_MAX_OUTPUT_BYTES, COUNTER_DISCOVERY_TIMEOUT_MS, FIXED_EVENT,
+    OUTPUT_SUBDIRECTORY, QUALIFICATION_ONLY, SERVICE_ACCOUNT_SID, SERVICE_NAME,
     SERVICE_PROFILE_FORBIDDEN_PRIVILEGES, SERVICE_SID_ACCOUNT,
 };
 use serde::{Deserialize, Serialize};
@@ -1879,13 +1880,7 @@ fn execute_counter_discovery_at_with_prefix(
         .map_err(|error| format!("starting bounded counter discovery failed: {error}"))?;
     let target_pid = child.id();
     let target_process_start_time = process_start_time(HANDLE(child.as_raw_handle())).unwrap_or(0);
-    let mut owned = OwnedChild::new(child);
-    if let Err(error) = owned.assign_job() {
-        let no_orphan = owned.terminate_and_wait();
-        return Err(format!(
-            "counter discovery job assignment failed: {error}; no_orphan_child={no_orphan}"
-        ));
-    }
+    let execution_evidence = CounterDiscoveryExecutionEvidence::from_spawn(true);
     let _ = crate::write_json(
         &discovery_root.join(format!("{evidence_prefix}-LAUNCH.json")),
         &json!({
@@ -1893,8 +1888,10 @@ fn execute_counter_discovery_at_with_prefix(
             "qualification_only": QUALIFICATION_ONLY,
             "request_id": safe_request_file_component(request_id),
             "counter_discovery_only": true,
-            "sampling": false,
-            "amd_runtime_executed": false,
+            "sampling": execution_evidence.sampling,
+            "amd_runtime_executed": execution_evidence.power_sampling_runtime_executed,
+            "power_sampling_runtime_executed": execution_evidence.power_sampling_runtime_executed,
+            "counter_discovery_cli_executed": execution_evidence.counter_discovery_cli_executed,
             "cli_started_by_broker": true,
             "target_pid": target_pid,
             "target_process_start_time": target_process_start_time,
@@ -1906,7 +1903,13 @@ fn execute_counter_discovery_at_with_prefix(
             "timeout_ms": COUNTER_DISCOVERY_TIMEOUT_MS
         }),
     );
-
+    let mut owned = OwnedChild::new(child);
+    if let Err(error) = owned.assign_job() {
+        let no_orphan = owned.terminate_and_wait();
+        return Err(format!(
+            "counter discovery job assignment failed: {error}; no_orphan_child={no_orphan}"
+        ));
+    }
     let deadline = Instant::now() + Duration::from_millis(COUNTER_DISCOVERY_TIMEOUT_MS);
     loop {
         if STOP_REQUESTED.load(Ordering::Acquire) {
@@ -1948,7 +1951,10 @@ fn execute_counter_discovery_at_with_prefix(
             "qualification_only": QUALIFICATION_ONLY,
             "request_id": safe_request_file_component(request_id),
             "arguments": fixed_counter_discovery_arguments(),
-            "sampling": false,
+            "sampling": execution_evidence.sampling,
+            "amd_runtime_executed": execution_evidence.power_sampling_runtime_executed,
+            "power_sampling_runtime_executed": execution_evidence.power_sampling_runtime_executed,
+            "counter_discovery_cli_executed": execution_evidence.counter_discovery_cli_executed,
             "availability": availability.as_str(),
             "cli_exit_code": exit_code,
             "power_category_present": power_category_present,
@@ -1956,8 +1962,7 @@ fn execute_counter_discovery_at_with_prefix(
             "stdout_path": stdout_path,
             "stderr_path": stderr_path,
             "raw_output_bounded": true,
-            "no_orphan_child": no_orphan_child,
-            "amd_runtime_executed": false
+            "no_orphan_child": no_orphan_child
         }),
     );
     Ok(CounterDiscoveryStatus {

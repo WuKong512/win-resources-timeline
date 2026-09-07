@@ -27,6 +27,9 @@ $I2fCleanup = Join-Path $ToolRoot 'cleanup-admin-amd-i2f-service-profile-experim
 $I2fEntrypointScopeTest = Join-Path $ToolRoot 'test-i2f-entrypoint-scope.ps1'
 $I2eFinalFixture = Join-Path $ToolRoot 'i2e-token-materialization-final.example.json'
 $WindowsSource = Join-Path $ToolRoot 'src\windows.rs'
+$ExecutionPlan = Join-Path $ToolRoot '..\..\docs\upgrade\execution-plan.md'
+$QualificationReadme = Join-Path $ToolRoot 'README.md'
+$ResidualDifferential = Join-Path $ToolRoot '..\..\docs\upgrade\amd-system-vs-i2f-residual-differential.md'
 
 foreach ($wrapper in @(
         $ScArgumentContract,
@@ -1058,7 +1061,7 @@ $i2fContractSource = Get-Content -LiteralPath $I2fContract -Raw
 $i2fSetupSource = Get-Content -LiteralPath $I2fSetup -Raw
 $i2fCleanupSource = Get-Content -LiteralPath $I2fCleanup -Raw
 $i2fRustSource = Get-Content -LiteralPath $WindowsSource -Raw
-$i2fExpectedArtifactSha256 = 'F272E2D5E74A1F8CC7EFABF01A64BFF1ACE4A244BF6199530D30F9F3F90ED10D'
+$i2fExpectedArtifactSha256 = '9A13111B02D5AAA2886B7E1EA059643EAABD5F30C3A2522589EE8B124B7B735C'
 foreach ($requiredI2fContract in @(
         'ResourceTimelineAmdSystemProfileEnableQualification',
         'NT AUTHORITY\LOCAL SERVICE',
@@ -1530,6 +1533,49 @@ if ($LASTEXITCODE -ne 0) {
 $i2eResumeEntrypointOutput | ForEach-Object { Write-Host $_ }
 Write-Host 'I2E_RESUME_ENTRYPOINT_REGRESSION=PASS'
 
+$counterDiscoveryFunction = [regex]::Match(
+    $windowsSourceText,
+    '(?s)fn\s+execute_counter_discovery_at_with_prefix\(.*?\n}\n\nfn\s+start_session'
+).Value
+if ([string]::IsNullOrWhiteSpace($counterDiscoveryFunction) -or
+    $counterDiscoveryFunction -notmatch 'CounterDiscoveryExecutionEvidence::from_spawn\(true\)' -or
+    $counterDiscoveryFunction -notmatch 'counter_discovery_cli_executed' -or
+    $counterDiscoveryFunction -notmatch 'power_sampling_runtime_executed') {
+    throw 'Counter-discovery evidence does not expose explicit post-spawn execution semantics.'
+}
+Write-Host 'COUNTER_DISCOVERY_EXECUTION_EVIDENCE_CONTRACT=PASS'
+
+foreach ($documentationPath in @($ExecutionPlan, $QualificationReadme, $ResidualDifferential)) {
+    if (-not (Test-Path -LiteralPath $documentationPath -PathType Leaf)) {
+        throw "I2F real-closure documentation is missing: $documentationPath"
+    }
+}
+$i2fClosureDocumentation = @(
+    Get-Content -LiteralPath $ExecutionPlan -Raw
+    Get-Content -LiteralPath $QualificationReadme -Raw
+    Get-Content -LiteralPath $ResidualDifferential -Raw
+) -join [Environment]::NewLine
+foreach ($requiredI2fClosureText in @(
+        'I2F_RESULT = PASS_WITH_NEGATIVE_COUNTER_ACCESS_RESULT',
+        'I2F_SCOPE = f68bf4d3d36547a0ba753cff489bb6eb',
+        'I2F_GATE_CONSUMED = true',
+        'I2F_RERUN = FORBIDDEN',
+        'counter_discovery_cli_executed = true after Command::spawn succeeds',
+        'power_sampling_runtime_executed = false',
+        'I2G_VARIABLE = UNRESOLVED',
+        'PRODUCTION_ACCOUNT = UNRESOLVED',
+        'LOCAL_SYSTEM_PRODUCTION_SELECTION = NOT_AUTHORIZED'
+    )) {
+    if ($i2fClosureDocumentation.IndexOf($requiredI2fClosureText, [StringComparison]::Ordinal) -lt 0) {
+        throw "I2F real-closure documentation is missing: $requiredI2fClosureText"
+    }
+}
+if ($i2fClosureDocumentation.IndexOf('I2F_HISTORICAL_ARTIFACT_SHA256 = F272E2D5E74A1F8CC7EFABF01A64BFF1ACE4A244BF6199530D30F9F3F90ED10D', [StringComparison]::Ordinal) -lt 0 -or
+    $i2fClosureDocumentation.IndexOf('I2F_POST_REPAIR_ARTIFACT_SHA256 = 9A13111B02D5AAA2886B7E1EA059643EAABD5F30C3A2522589EE8B124B7B735C', [StringComparison]::Ordinal) -lt 0) {
+    throw 'I2F historical/post-repair artifact distinction is missing from the closure documentation.'
+}
+Write-Host 'I2F_REAL_CLOSURE_DOCUMENTATION=PASS'
+
 Remove-Item -LiteralPath $EvidenceRoot -Recurse -Force -ErrorAction SilentlyContinue
 New-Item -ItemType Directory -Force -Path $EvidenceRoot | Out-Null
 
@@ -1550,7 +1596,12 @@ foreach ($requiredSyntheticCheck in @(
         'COUNTER_DISCOVERY_FIXED_SEMANTIC_REQUEST',
         'COUNTER_DISCOVERY_NO_COUNTERS_EXIT_ZERO',
         'COUNTER_DISCOVERY_POWER_PRESENT',
-        'COUNTER_DISCOVERY_UNKNOWN_FAILURE'
+        'COUNTER_DISCOVERY_UNKNOWN_FAILURE',
+        'COUNTER_DISCOVERY_EXECUTION_BEFORE_SPAWN',
+        'COUNTER_DISCOVERY_EXECUTION_AFTER_SPAWN_EXIT_ZERO',
+        'COUNTER_DISCOVERY_EXECUTION_AFTER_SPAWN_NONZERO',
+        'COUNTER_DISCOVERY_EXECUTION_SPAWN_FAILURE',
+        'COUNTER_DISCOVERY_EXECUTION_NON_SAMPLING'
     )) {
     $check = @($summary.checks | Where-Object { $_.name -eq $requiredSyntheticCheck })
     if ($check.Count -ne 1 -or $check[0].status -ne 'PASS') {
