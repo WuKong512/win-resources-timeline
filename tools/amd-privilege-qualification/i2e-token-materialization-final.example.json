@@ -1,0 +1,22 @@
+{
+  "schema": "amd-i2e-token-materialization-final/v1",
+  "qualification_only": true,
+  "example_fixture": true,
+  "note": "Offline closure-contract fixture; not historical machine evidence.",
+  "experiment_id": "3935ac9082954bcfb2b1f94c54cf95d7",
+  "control_result": "POWER_UNAVAILABLE",
+  "lsa_right_added": true,
+  "lsa_dual_verification_pass": true,
+  "treatment_service_started": true,
+  "treatment_token_gate_executed": true,
+  "se_system_profile_privilege_present": true,
+  "se_system_profile_privilege_enabled": false,
+  "se_system_profile_privilege_disabled": true,
+  "amd_runtime_executed": false,
+  "counter_discovery_executed": false,
+  "policy_rollback_verified": true,
+  "effective_token_teardown_verified": true,
+  "full_rollback_verified": true,
+  "service_registration_removed": true,
+  "result": "PASS_WITH_NEGATIVE_TOKEN_ENABLEMENT_RESULT"
+}

@@ -6,7 +6,91 @@ application. It is an architecture, threat-model, and qualification plan. It
 does not install a service, register a scheduled task, request elevation, or
 run AMD profiling.
 
-## DECISION AND STATUS
+## AMD CURRENT STATE RECONCILIATION (AUTHORITATIVE)
+
+This is the single current AMD handoff. All older qualification snapshots and
+human command sequences below are historical records; they do not authorize a
+new runtime. Sections that conflict with this block are explicitly marked
+`HISTORICAL / SUPERSEDED`.
+
+```text
+AMD_SERVICE_CONTEXT_I1 = COMPLETED / PASS
+AMD_PRIVILEGE_I2 = COMPLETED
+I2E = CLOSED / RERUN_FORBIDDEN
+I2E_REAL_PAIRED_ENTRYPOINT = PERMANENTLY_FAIL_CLOSED
+I2E_REAL_TREATMENT_RESUME_ENTRYPOINT = PERMANENTLY_FAIL_CLOSED
+I2E_REAL_CLEANUP_ENTRYPOINT = PERMANENTLY_FAIL_CLOSED
+I2E_HISTORICAL_EVIDENCE = IMMUTABLE
+I2E_RERUN = FORBIDDEN
+I2E_CLEANUP_RERUN = FORBIDDEN
+I2F = REAL_COMPLETED / PASS_WITH_NEGATIVE_COUNTER_ACCESS_RESULT / RERUN_FORBIDDEN
+I2F_AUTHORITATIVE_SCOPE = f68bf4d3d36547a0ba753cff489bb6eb
+I2F_REAL_EXECUTION_ENTRYPOINT = PERMANENTLY_FAIL_CLOSED
+I2F_REAL_CLEANUP_ENTRYPOINT = PERMANENTLY_FAIL_CLOSED
+I2F_FULL_ROLLBACK = REAL_PASS
+I2_LEGACY_REAL_ENTRYPOINTS = RETIRED
+I2B_REAL_ENTRYPOINTS = RETIRED
+I2C_REAL_ENTRYPOINTS = RETIRED
+AMD_QUALIFICATION_EXECUTABLE_ENTRYPOINT_AUDIT = PASS_NO_UNRETIRED_HISTORICAL_REAL_GATE
+LOCAL_SERVICE_POWER_COUNTER_ACCESS = UNAVAILABLE
+SYSTEM_POWER_COUNTER_ACCESS = AVAILABLE / HISTORICAL REAL DIFFERENTIAL
+SECURITY_CONTEXT_DIFFERENTIAL = REAL_CONFIRMED
+SE_SYSTEM_PROFILE_PRIVILEGE_ALONE_SUFFICIENT = false
+SE_SYSTEM_PROFILE_PRIVILEGE_NECESSITY = UNRESOLVED
+MINIMUM_REQUIRED_CAPABILITY = UNRESOLVED
+I2G_VARIABLE = UNRESOLVED
+I2G_HARNESS = NOT_IMPLEMENTED
+PRODUCTION_ACCOUNT = UNRESOLVED
+LOCAL_SYSTEM_PRODUCTION_SELECTION = NOT_AUTHORIZED
+PRODUCTION_ADMISSION = NOT_COMPLETE
+NEXT_GATE = REVIEW_RESIDUAL_DIFFERENTIAL_AND_SELECT_SINGLE_I2G_VARIABLE
+NEXT_TASK = UNRESOLVED_PENDING_I2G_VARIABLE_SELECTION
+ARCHITECTURE_SINGLE_AUTHORITATIVE_CURRENT_STATE = PASS
+```
+
+`AMD-SERVICE-CONTEXT-I1` consumed the immutable LocalSystem/Session 0 evidence
+at `C:\\ProgramData\\ResourceTimeline\\qualification\\amd-service-context\\20260904T080323173Z`.
+This task must not modify that evidence and must not repeat its AMD runtime.
+`AMD-PRIVILEGE-I2` has now consumed exactly one bounded real LocalService
+qualification run. The broker, secure IPC, identity, CLI launch, and cleanup
+boundaries passed, but AMD uProf reported that no counters were available from
+the LocalService context. The I2B non-sampling `timechart --list` differential
+and I2C SYSTEM-only comparison are historical real evidence, and all of their
+legacy setup, client, and cleanup wrappers are now permanently retired. None
+selects LocalSystem, alters AMD permissions, or admits a provider.
+
+## HISTORICAL / SUPERSEDED I2E PRE-CONTROL INCIDENT
+
+The first human-authorized I2E invocation stopped at `sc.exe create` with exit
+code `1057`. The wrapper supplied the bare SCM account value `LocalService`,
+which is not the Windows predefined account spelling accepted by the Service
+Control Manager. The service was not created, no Service SID was resolved, and
+neither paired phase began.
+
+```text
+I2E_FIRST_REAL_ATTEMPT = PRE_SERVICE_CREATE_FAILURE
+SC_CREATE_EXIT = 1057
+ROOT_CAUSE = SCM_ACCOUNT_NAME_WAS_BARE_LocalService
+SCM_SERVICE_ACCOUNT = NT AUTHORITY\LocalService
+SERVICE_CREATED = false
+SERVICE_SID_RESOLVED = false
+CONTROL_EXECUTED = false
+TREATMENT_EXECUTED = false
+LSA_MUTATION = false
+AMD_RUNTIME = false
+PAIRED_EXPERIMENT_GATE = UNCONSUMED
+FAILED_ATTEMPT_POINTER_RECOVERY = PREPARED
+CURRENT_POINTER_FINALIZATION = PREPARED
+HISTORICAL_NEXT_GATE_AT_FIRST_INCIDENT = HUMAN_I2E_FAILED_ATTEMPT_CLEANUP
+```
+
+The repaired orchestration records explicit gate-consumption state and uses
+`NT AUTHORITY\LocalService` for the SCM `obj=` value. The cleanup instruction
+above was the historical next step for that pre-service incident; it is not the
+current gate after the later real CONTROL completion. The current control
+recovery and treatment-only resume state is documented below.
+
+## HISTORICAL / SUPERSEDED INITIAL DECISION AND STATUS
 
 ```text
 REPOSITORY = WuKong512/win-resources-timeline
@@ -133,7 +217,12 @@ INTERACTIVE_UAC_PER_SAMPLE = FORBIDDEN
 INTERACTIVE_UAC_PER_COLLECTION_SESSION = UNACCEPTABLE_FOR_ALL_DAY_MODE
 ```
 
-## CANDIDATE ARCHITECTURES
+## CANDIDATE ARCHITECTURES (HISTORICAL / SUPERSEDED ANALYSIS)
+
+> HISTORICAL / SUPERSEDED: the candidate comparison below preserves why the
+> Service Broker was initially deferred, why Session 0 was unknown, why the
+> Scheduled Task was not selected, and the original threat model. The current
+> state is the reconciliation block above and the I2 preparation record below.
 
 ### A. Windows Service Broker
 
@@ -392,7 +481,7 @@ health status, generation handling, cancellation, and retry/backoff. A future
 AMD adapter should translate broker outcomes into that vocabulary and leave
 healthy providers running.
 
-## SERVICE SESSION 0 GATE
+## SERVICE SESSION 0 GATE (HISTORICAL / SUPERSEDED BY AMD-SERVICE-CONTEXT-I1)
 
 The vendor control that succeeded ran in an elevated interactive user session.
 It did not qualify:
@@ -486,7 +575,7 @@ AMD CLI behavior under Session 0 and the selected least-privilege account. The
 task's key unknown is not installation; it is secure runtime control and live
 result/cancellation behavior.
 
-## ARCHITECTURE DECISION
+## ARCHITECTURE DECISION (HISTORICAL / SUPERSEDED)
 
 ```text
 AMD_PRIVILEGE_ARCHITECTURE = DEFER_INSUFFICIENT_EVIDENCE
@@ -509,7 +598,7 @@ This deferral is a product/security decision, not permission to prototype a
 service or task silently. The CLI provider remains provisional and not
 production-admitted.
 
-## NEXT RUNTIME QUALIFICATION
+## NEXT RUNTIME QUALIFICATION (HISTORICAL / SUPERSEDED)
 
 Choose exactly one future qualification family after the product selects a
 candidate deployment model:
@@ -564,7 +653,7 @@ responsiveness, restart/sleep/reboot behavior, version/update policy, legal
 and licensing review, and an additive package-power storage/DTO contract.
 Temperature and frequency remain deferred and are not part of this decision.
 
-## SERVICE-CONTEXT QUALIFICATION PREPARATION
+## SERVICE-CONTEXT QUALIFICATION PREPARATION (HISTORICAL / SUPERSEDED BY COMPLETED I1)
 
 The leading service-broker candidate now has a separate qualification-only
 SCM harness in
@@ -596,12 +685,402 @@ registering a service or launching an AMD executable. The exact future
 Administrator command is documented in
 [`cpu-sensor-amd-service-context-qualification.md`](../measurements/cpu-sensor-amd-service-context-qualification.md).
 
-## NOT DONE
+## HISTORICAL / SUPERSEDED PREPARATION STATUS
 
 - No production Windows Service was implemented or registered.
 - No Scheduled Task was registered.
-- No IPC endpoint, ACL, installer, elevation flow, or service account was
-  created.
+- No production installer, elevation flow, or service account was created.
 - No AMD executable, profiling command, sampling session, driver, registry,
   PATH, or system state was changed.
 - No production AMD provider was registered.
+
+## HISTORICAL / SUPERSEDED — AMD-PRIVILEGE-I2 COMPLETION SNAPSHOT
+
+`AMD-PRIVILEGE-I2` prepares an independent qualification-only broker and
+synthetic security harness. It is not a production broker and has no
+collector, database, UI, installer, autostart, or production persistence
+dependency.
+
+```text
+AMD_PRIVILEGE_I2 = real bounded LocalService IPC/AMD launch PASS; counter backend unavailable
+SERVICE_ACCOUNT_FIRST_QUALIFICATION_CANDIDATE = NT AUTHORITY\\LOCAL SERVICE
+SERVICE_ACCOUNT_FIRST_QUALIFICATION_SID = S-1-5-19
+SERVICE_SID_REQUIRED = true
+SERVICE_SID_TYPE_REQUIRED = UNRESTRICTED
+IPC = WINDOWS_NAMED_PIPE
+PIPE_ACL_POLICY = INSTALLING_USER_SID + SERVICE_SID + SYSTEM; NO_BROAD_USER_ACCESS
+NAMED_PIPE_SECURITY_QUALIFICATION = REAL_PASS
+SEMANTIC_IPC_ONLY = true
+SEMANTIC_IPC = REAL_PASS_FOR_PROVIDER_AND_SESSION_BOUNDARY
+ACTIVE_SESSIONS = 1
+SESSION_OWNERSHIP = REAL_PASS
+BUSY_ARBITRATION = synthetic PASS
+OWNER_CANCELLATION = synthetic PASS
+CANCELLATION = synthetic PASS
+CLIENT_DISCONNECT_POLICY = CANCEL_OWNED_SESSION
+NO_ORPHAN_CHILD = REAL_PASS
+REAL_AMD_RUNTIME_DURING_PREPARATION = 0
+REAL_AMD_RUNTIME_DURING_I2 = 1
+LOCAL_SERVICE_AMD_CLI_EXIT_CODE = 0
+PACKAGE_POWER_SAMPLING = NOT_RUN
+I2_REAL_RUNTIME_GATE_CONSUMED = true
+SERVICE_REGISTRATION_DURING_PREPARATION = 0
+PENDING_ACCEPT_LIFETIME_GUARD = CLOSED_OFFLINE
+PENDING_ACCEPT_CANCEL_AND_DRAIN = REQUIRED_BEFORE_RELEASE
+HRESULT_NORMALIZATION = CLOSED
+FIRST_ACCEPT_READINESS = REAL_PASS
+LIVE_SERVICE_STOP = REAL_PASS
+NEXT_GATE = HUMAN_COUNTER_DISCOVERY_DIFFERENTIAL
+NEXT_TASK = AMD-PRIVILEGE-I2B
+```
+
+The first candidate is a qualification hypothesis only. Even a future
+LocalService runtime PASS may narrow the observed path to LocalService or
+less; it cannot by itself prove the absolute minimum Windows privilege.
+
+## HISTORICAL / SUPERSEDED — AMD-PRIVILEGE-I2B COMPLETION SNAPSHOT
+
+```text
+RESULT = COUNTER_PRIVILEGE_DIFFERENTIAL_REQUIRED
+LOCAL_SERVICE_AMD_RUNTIME_LAUNCH = REAL_PASS
+LOCAL_SERVICE_POWER_COUNTER_ACCESS = FAILED_OR_UNAVAILABLE
+OUTPUT_DISCOVERY_DEFECT = NOT_ROOT_CAUSE
+COUNTER_DISCOVERY_DIAGNOSTIC_PREPARED = true
+LOCAL_SERVICE_LIST_CONTEXT_PREPARED = true
+SYSTEM_LIST_CONTEXT_PREPARED = true / HUMAN_AUTHORIZATION_REQUIRED / PLAN_ONLY
+TOKEN_DIFFERENTIAL_EVIDENCE_PREPARED = true
+AMD_BACKEND_READ_ONLY_FORENSICS = PASS_WITH_SERVICE_ENUMERATION_DENIED
+LOCAL_SERVICE_TO_SYSTEM_SWITCH = NOT_AUTHORIZED
+I2_REAL_RUNTIME_GATE_CONSUMED = true
+NEXT_GATE = HUMAN_COUNTER_DISCOVERY_DIFFERENTIAL
+PRODUCTION_ADMISSION = NOT_COMPLETE
+```
+
+## HISTORICAL / SUPERSEDED — AMD-PRIVILEGE-I2C CURRENT STATE AT PRE-RUN
+
+The LocalService counter-discovery side is complete real evidence at scope
+`4b30b3d64b7e469cbce7c8080c84b7d4`: the fixed non-sampling AMD uProf
+`timechart --list` operation reported `POWER_UNAVAILABLE` with the known
+no-counters diagnostic and exit code `0`. A duplicate cleanup invocation
+overwrote only the single cleanup summary; the discovery evidence remains
+authoritative and the LocalService run remains valid.
+
+```text
+LOCAL_SERVICE_COUNTER_DISCOVERY = REAL_POWER_UNAVAILABLE
+LOCAL_SERVICE_POWER_CATEGORY_PRESENT = false
+LOCAL_SERVICE_DIFFERENTIAL_SIDE = COMPLETE
+SYSTEM_DIFFERENTIAL_SIDE = PREPARED / NOT_EXECUTED
+SYSTEM_HARNESS_SERVICE = ResourceTimelineAmdSystemCounterQualification
+SYSTEM_SERVICE_ACCOUNT = NT AUTHORITY\SYSTEM
+SYSTEM_SERVICE_ACCOUNT_SID = S-1-5-18
+SYSTEM_SESSION = 0
+SYSTEM_FIXED_COMMAND = timechart --list
+SYSTEM_SAMPLING = false
+SYSTEM_HARNESS_MODE = DEDICATED_NON_IPC_SERVICE
+SYSTEM_SETUP_AND_DISCOVERY_ARE_COUPLED = true
+SYSTEM_TOKEN_DIFFERENTIAL_EVIDENCE_PREPARED = true
+SYSTEM_CLEANUP_DUPLICATE_SAFE = true
+LOCAL_SERVICE_REAL_ARTIFACT_SHA256 = C9973BAAA01AF3C2673D8C70D8C7E626C577642505E6DFF7BA3C6026DEA63FB1
+SYSTEM_PREPARATION_ARTIFACT_SHA256 = 9E5A012B0A95C84DD28CD607D99EF43C9BC4D700683F33890CDE6C2108794AC3
+PRODUCTION_ACCOUNT_SELECTION = UNRESOLVED
+LOCAL_SERVICE_TO_SYSTEM_SWITCH = NOT_AUTHORIZED
+NEXT_GATE = HUMAN_SYSTEM_COUNTER_DISCOVERY_EXECUTION
+```
+
+The dedicated SYSTEM service and its Administrator-only setup/cleanup wrappers
+are qualification-only and were not executed during preparation. They preserve
+the fixed AMD CLI identity and `timechart --list` command while adding no
+arbitrary command surface, IPC path, production installer integration, or
+account-selection decision.
+
+The old architecture decision and early Service/Session 0 unknowns above are
+historical/superseded records. They remain to explain why the broker candidate
+was originally deferred; the current evidence now supports the broker boundary
+while leaving the AMD power-counter capability differential unresolved.
+
+## HISTORICAL / SUPERSEDED — AMD-PRIVILEGE-I2E SERVICE-SID SYSTEM-PROFILE EXPERIMENT PREPARATION
+
+I2D established a real LocalService-versus-SYSTEM counter-availability
+differential, but did not isolate the minimum Windows capability. The
+read-only evidence shows that SYSTEM has SeSystemProfilePrivilege enabled
+while LocalService does not, and that a distinct service SID already has a
+direct assignment of that right. I2E therefore prepares a paired,
+minimum-variable experiment without granting the right to the global
+LocalService account and without adding Administrators membership.
+
+~~~text
+EXPERIMENT_ACCOUNT = NT AUTHORITY\\LOCAL SERVICE
+EXPERIMENT_ACCOUNT_SID = S-1-5-19
+DEDICATED_SERVICE_NAME = ResourceTimelineAmdSystemProfileQualification
+DEDICATED_SERVICE_SID = DERIVED_AT_FUTURE_SETUP
+SERVICE_SID_TYPE = UNRESTRICTED
+CONTROL = LocalService + same dedicated Service SID + SeSystemProfilePrivilege absent
+TREATMENT = LocalService + same dedicated Service SID + SeSystemProfilePrivilege only
+SERVICE_SID_SESYSTEMPROFILE_MUTATION = EXACT_ONE_RIGHT_ONLY
+LOCAL_SERVICE_ACCOUNT_WIDE_RIGHT_MUTATION = FORBIDDEN
+ADMINISTRATORS_MEMBERSHIP_MUTATION = FORBIDDEN
+SEPROFILE_SINGLE_PROCESS_MUTATION = FORBIDDEN
+SEDEBUG_MUTATION = FORBIDDEN
+TOKEN_MATERIALIZATION_GATE = PREPARED
+PAIRED_CONTROL_TREATMENT = PREPARED
+PREEXISTING_RIGHT_PRESERVATION = PREPARED
+EXACT_ROLLBACK = PREPARED
+STATUS_NO_MORE_ENTRIES = READ_EMPTY
+LSA_READ_POLICY_ACCESS = 0x00000801
+LSA_ADD_POLICY_ACCESS = 0x00000810
+LSA_REMOVE_POLICY_ACCESS = 0x00000800
+LSA_FIRST_ASSIGNMENT_POLICY_CREATE_ACCOUNT = SUPPORTED
+ACCOUNT_OBJECT_STATE_DIAGNOSTIC = PRESENT_OR_ABSENT_OR_UNKNOWN
+FIXED_COMMAND = timechart --list
+SAMPLING = false
+FROZEN_ARTIFACT = ONE_SHA_FOR_CONTROL_AND_TREATMENT
+FROZEN_EXPERIMENT_ARTIFACT_SHA256 = 871CD20D228BD9510606DE640F516F62C2983B9F4A83C1AA807BA35329C778B9
+REAL_AMD_RUNTIME_DURING_PREPARATION = 0
+REAL_SERVICE_RUNTIME_DURING_PREPARATION = 0
+REAL_LSA_MUTATION_DURING_PREPARATION = 0
+I2E = CONTROL_REAL_COMPLETE_TREATMENT_PENDING
+MINIMUM_REQUIRED_CAPABILITY = UNRESOLVED
+PRODUCTION_ACCOUNT = UNRESOLVED
+NEXT_TASK = AMD-PRIVILEGE-I2E
+NEXT_GATE = HUMAN_I2E_TREATMENT_ONLY_RESUME
+~~~
+
+The preparation is repository-native and qualification-only. The default
+administrator wrapper invocation is plan-only and performs no service,
+security-policy, or AMD operation. The future real gate requires explicit
+human authorization for the paired control/treatment execution, followed by
+the exact-right rollback and invocation-distinct cleanup. A treatment result
+can show sufficiency for the observed bounded path, but cannot by itself
+prove global minimum privilege or select the production account.
+
+The LSA mutation contract uses operation-specific minimum access: read-only
+enumeration uses `0x00000801`, first-assignment `LsaAddAccountRights` uses
+`0x00000810` so the dedicated Service SID account object may be created, and
+exact-right `LsaRemoveAccountRights` uses only `0x00000800`. No handle requests
+broader policy access, and account-object state is recorded as
+`PRESENT`, `ABSENT`, or `UNKNOWN` where the read-only status permits.
+
+## HISTORICAL / SUPERSEDED — AMD-PRIVILEGE-I2E CONTROL COMPLETE, TREATMENT PENDING
+
+The first corrected human I2E invocation completed CONTROL under the existing
+LocalService qualification service. Its authoritative result is
+`POWER_UNAVAILABLE` with a passing token gate, no orphan child, and no
+SeSystemProfilePrivilege assignment. The orchestration then failed while
+stopping the already-completed CONTROL service: PowerShell variable names are
+case-insensitive, so assigning local `$pid` collided with the read-only `$PID`
+automatic variable. The service is currently stopped with PID 0; this is a
+post-control harness incident, not CONTROL failure.
+
+```text
+I2E_SECOND_HUMAN_INVOCATION = CONTROL_REAL_EXECUTED_THEN_ORCHESTRATION_STOP_FAILURE
+CONTROL_REAL_EXECUTION = REAL_COMPLETE
+CONTROL_RESULT = POWER_UNAVAILABLE
+CONTROL_TOKEN_GATE = PASS
+CONTROL_NO_ORPHAN_CHILD = true
+TREATMENT_REAL_EXECUTION = 0
+LSA_MUTATION = 0
+ROOT_CAUSE = POWERSHELL_AUTOMATIC_VARIABLE_PID_COLLISION
+CURRENT_SERVICE = STOPPED / PID0 / LocalService
+PAIRED_GATE_CONSUMED = true
+CURRENT_POINTER_STATE = STALE_AFTER_POST_CONTROL_STOP_FAILURE
+CONTROL_RECOVERY = PREPARED
+CONTROL_RERUN = FORBIDDEN
+TREATMENT_ONLY_RESUME = PREPARED
+NEXT_REAL_AMD_OPERATION = TREATMENT_ONLY
+NEXT_GATE = HUMAN_I2E_TREATMENT_ONLY_RESUME
+REAL_SERVICE_RUNTIME_DURING_REPAIR = 0
+REAL_LSA_MUTATION_DURING_REPAIR = 0
+REAL_AMD_RUNTIME_DURING_REPAIR = 0
+```
+
+The recovery contract validates the exact experiment, control/treatment
+scopes, Service SID, frozen artifact, and immutable CONTROL evidence before it
+reconciles the stale pointer. The treatment-only wrapper has no CONTROL
+execution path: it rechecks the stopped existing service and absent right,
+adds exactly `SeSystemProfilePrivilege` to the existing Service SID only,
+enforces the treatment token gate before AMD, and performs exact rollback and
+cleanup. No recovery, cleanup, service, LSA mutation, or AMD runtime was run
+during this offline repair.
+
+## HISTORICAL / SUPERSEDED — AMD-PRIVILEGE-I2E HISTORICAL POINTER SCHEMA COMPATIBILITY CLOSURE
+
+The latest treatment-only attempt stopped before mutation because the
+historical CURRENT pointer was a `PSCustomObject` without the newer rollback
+fields and direct property assignment could not evolve its schema. Active I2E
+pointer updates now use a canonical set-or-add helper and persist the
+pre-mutation state before `LsaAddAccountRights` can run. The immutable CONTROL
+evidence remains authoritative and the treatment gate remains unconsumed.
+
+```text
+I2E_TREATMENT_ATTEMPT = PRE_MUTATION_ORCHESTRATION_FAILURE
+ROOT_CAUSE = HISTORICAL_PSCUSTOMOBJECT_SCHEMA_EVOLUTION_UNSAFE_DIRECT_PROPERTY_ASSIGNMENT
+CONTROL_RECOVERY = REAL_PERSISTED
+CONTROL_RESULT = POWER_UNAVAILABLE
+AMD_CLI_REVALIDATION = REAL_READ_ONLY_PASS
+LSA_MUTATION = 0
+SERVICE_START = 0
+TREATMENT_RUNTIME = 0
+AMD_RUNTIME = 0
+SET_OR_ADD_PROPERTY_HELPER = PASS
+HISTORICAL_JSON_POINTER_FIXTURE = PASS
+POINTER_PERSIST_BEFORE_LSA_ADD = PASS
+PRE_REMOVE_DUAL_READBACK = PASS
+POST_REMOVE_PRE_POINTER_CRASH_RECOVERY = PASS
+POLICY_STATE_DRIFT = FAIL_CLOSED
+NEXT_GATE = HUMAN_I2E_TREATMENT_ONLY_RESUME_REVIEW
+```
+
+Cleanup distinguishes policy rollback from effective token teardown and
+performs fresh dual LSA readback before an exact removal. If both directions
+already prove absence, it records `POLICY_ALREADY_ABSENT_ON_RECOVERY` and makes
+zero duplicate removal calls. No service, LSA mutation, or AMD runtime was
+executed during this offline closure.
+
+> HISTORICAL / SUPERSEDED CURRENT-STATE SNAPSHOT: AMD-PRIVILEGE-I2D
+
+## HISTORICAL / SUPERSEDED — AMD-PRIVILEGE-I2D MINIMUM CAPABILITY FORENSICS
+
+The dedicated SYSTEM comparison has now consumed its one authorized,
+non-sampling `timechart --list` run. The two results use the same signed x64
+AMD CLI (`D0812D64963DD98F7C339CAC72F650461F95FF84E757A99767C7981B4111FBAC`,
+version `5.3.521.0`) and establish a real security-context differential:
+
+```text
+LOCAL_SERVICE_SCOPE = 4b30b3d64b7e469cbce7c8080c84b7d4
+LOCAL_SERVICE_COUNTER_DISCOVERY = REAL_POWER_UNAVAILABLE
+LOCAL_SERVICE_POWER_CATEGORY_PRESENT = false
+LOCAL_SERVICE_NO_COUNTERS_DIAGNOSTIC = true
+LOCAL_SERVICE_ACCOUNT_SID = S-1-5-19
+LOCAL_SERVICE_SESSION_ID = 0
+COMMON_ENABLED_PRIVILEGES = SeChangeNotifyPrivilege, SeCreateGlobalPrivilege, SeImpersonatePrivilege
+LOCAL_SERVICE_ENABLED_ONLY = none
+SYSTEM_ENABLED_ONLY = SeAuditPrivilege, SeCreatePagefilePrivilege, SeCreatePermanentPrivilege, SeCreateSymbolicLinkPrivilege, SeDebugPrivilege, SeDelegateSessionUserImpersonatePrivilege, SeIncreaseBasePriorityPrivilege, SeIncreaseWorkingSetPrivilege, SeLockMemoryPrivilege, SeProfileSingleProcessPrivilege, SeSystemProfilePrivilege, SeTcbPrivilege, SeTimeZonePrivilege
+COMMON_DISABLED_PRIVILEGES = SeAssignPrimaryTokenPrivilege, SeIncreaseQuotaPrivilege, SeShutdownPrivilege, SeSystemtimePrivilege, SeUndockPrivilege
+LOCAL_SERVICE_DISABLED_ONLY = SeAuditPrivilege, SeIncreaseWorkingSetPrivilege, SeTimeZonePrivilege
+SYSTEM_DISABLED_ONLY = SeBackupPrivilege, SeLoadDriverPrivilege, SeManageVolumePrivilege, SeRestorePrivilege, SeSecurityPrivilege, SeSystemEnvironmentPrivilege, SeTakeOwnershipPrivilege
+COMMON_RELEVANT_GROUPS = S-1-5-32-545, S-1-5-6
+SYSTEM_RELEVANT_GROUPS_INCLUDE = S-1-5-32-544
+SERVICE_SID_DIFFERENCE = controlled secondary difference between distinct qualification services
+TOKEN_DIFFERENTIAL_SEMANTICS = ENABLED_DISABLED_ABSENT_AND_GROUP_FIELDS_NORMALIZED
+
+SYSTEM_SCOPE = 091a72e1d38341ca9eca0877b1625082
+SYSTEM_COUNTER_DISCOVERY = REAL_POWER_AVAILABLE
+SYSTEM_POWER_CATEGORY_PRESENT = true
+SYSTEM_ACCOUNT_SID = S-1-5-18
+SYSTEM_SESSION_ID = 0
+
+SECURITY_CONTEXT_DIFFERENTIAL = REAL_CONFIRMED
+MINIMUM_REQUIRED_CAPABILITY = UNRESOLVED
+PRODUCTION_ACCOUNT = UNRESOLVED
+NEXT_TASK = AMD-PRIVILEGE-I2D
+NEXT_GATE = HUMAN_ELEVATED_READ_ONLY_I2D_EVIDENCE_COLLECTION
+```
+
+## HISTORICAL / SUPERSEDED — I2E real result and I2F self-enable preparation
+
+I2E is closed as a real token-materialization result, not as an AMD result.
+The exact dedicated Service SID assignment was present in the LocalService
+token, but `SeSystemProfilePrivilege` was disabled. The in-service token gate
+failed before AMD and the exact right, service, and process state were fully
+rolled back.
+
+```text
+I2E_RESULT = PASS_WITH_NEGATIVE_TOKEN_ENABLEMENT_RESULT
+I2E_CONTROL_RESULT = POWER_UNAVAILABLE
+I2E_TOKEN_PRIVILEGE = PRESENT_DISABLED
+I2E_TOKEN_GATE = REAL_FAIL_EXPECTED_PRIVILEGE_DISABLED
+I2E_AMD_RUNTIME = 0
+I2E_COUNTER_DISCOVERY = NOT_EXECUTED
+I2E_FULL_ROLLBACK = REAL_PASS
+I2E_SERVICE_REMOVED = true
+I2E_RESIDUAL_RIGHT = ABSENT
+I2E_RERUN = FORBIDDEN
+```
+
+The next minimum-variable preparation is I2F. It retains LocalService and a
+dedicated unrestricted Service SID, then explicitly enables only the already
+materialized `SeSystemProfilePrivilege` in the qualification service's own
+token with native `AdjustTokenPrivileges`. The service records before/after
+token evidence and requires exactly one semantic transition,
+`DISABLED -> ENABLED`, before launching only `timechart --list`. No arbitrary
+privilege name, IPC command, sampling argument, production collector path, or
+LocalSystem fallback exists.
+
+```text
+I2F_SERVICE = ResourceTimelineAmdSystemProfileEnableQualification
+I2F_ACCOUNT = NT AUTHORITY\LocalService
+I2F_ACCOUNT_SID = S-1-5-19
+I2F_INTENTIONAL_VARIABLE = SeSystemProfilePrivilege DISABLED -> ENABLED via AdjustTokenPrivileges
+I2F_COMMAND = timechart --list
+I2F_SAMPLING = false
+I2F_ARTIFACT_SHA256 = F272E2D5E74A1F8CC7EFABF01A64BFF1ACE4A244BF6199530D30F9F3F90ED10D
+I2F_ARTIFACT_ARCHITECTURE = x64
+I2F_STATUS = PREPARED / NOT_EXECUTED
+MINIMUM_REQUIRED_CAPABILITY = UNRESOLVED
+PRODUCTION_ACCOUNT = UNRESOLVED
+LOCAL_SYSTEM_PRODUCTION_SELECTION = NOT_AUTHORIZED
+NEXT_GATE = HUMAN_I2F_SELF_ENABLE_QUALIFICATION_REVIEW
+
+## HISTORICAL / SUPERSEDED — I2F PRE-RUN ROLLBACK SAFETY
+
+I2F_ROLLBACK_STOP_FIRST = PASS_STATIC
+I2F_PROCESS_EVIDENCE_UNKNOWN_NOT_ZERO = PASS
+I2F_POLICY_REMOVE_AFTER_TOKEN_TEARDOWN_ONLY = PASS_STATIC
+I2F_ROLLBACK_PARTIAL_FAILURE_EVIDENCE = PASS
+I2F_STANDALONE_CLEANUP_IDEMPOTENT = PASS_STATIC
+I2F_RUST_PRE_ENABLE_TO_AMD_ORDER = PASS
+I2F_HUMAN_RUNTIME = NOT_EXECUTED
+I2F_ARTIFACT_SHA256 = F272E2D5E74A1F8CC7EFABF01A64BFF1ACE4A244BF6199530D30F9F3F90ED10D
+I2F_ARTIFACT_CHANGED = false
+PRODUCTION_ACCOUNT = UNRESOLVED
+LOCAL_SYSTEM_PRODUCTION_SELECTION = NOT_AUTHORIZED
+NEXT_GATE = HUMAN_I2F_SELF_ENABLE_QUALIFICATION_REVIEW
+```
+
+I2F uses a fresh service/evidence identity so immutable I2E evidence remains
+untouched. Its rollback removes only the exact Service SID right, verifies both
+LSA directions, proves service/process absence, and deletes the qualification
+registration. No I2F service, LSA mutation, token adjustment, AMD runtime, or
+sampling was performed during preparation.
+
+The explicit offline closure contract is represented by
+`tools/amd-privilege-qualification/i2e-token-materialization-final.example.json`.
+It records the expected negative token-enablement shape without pretending to
+be historical machine evidence.
+
+The first forensic pass prioritizes `SeSystemProfilePrivilege` because it is
+reported enabled in SYSTEM and absent from the LocalService enabled set. A
+SYSTEM/Administrators group or AMD kernel device/object ACL remains a competing
+hypothesis. Read-only service-object DACLs were identical across the inspected
+AMD components, and the CLI/registry/file path was already usable from
+LocalService; neither observation proves the missing capability. No AMD device
+interface or device-object security descriptor was identified by the bounded
+read-only pass, so that evidence is explicitly limited rather than treated as
+negative proof.
+
+User-right assignment enumeration for the prioritized rights was previously
+attempted with an incomplete `LsaOpenPolicy` mask and returned
+`0xC0000022 / STATUS_ACCESS_DENIED`; that result is not authoritative policy
+evidence. I2D-A changes the read-only mask to
+`POLICY_VIEW_LOCAL_INFORMATION | POLICY_LOOKUP_NAMES = 0x00000801`, records
+raw NTSTATUS plus `LsaNtStatusToWinError`, and cross-checks direct assignment
+for LocalService, SYSTEM, and Administrators with
+`LsaEnumerateAccountRights`. Token privilege presence, token enablement,
+direct user-right assignment, and group-derived rights remain separate fields.
+
+The I2D helper and synthetic parser contract are
+`tools/amd-privilege-qualification/i2d-readonly-forensics.ps1` and the existing
+offline qualification test. They perform no service, AMD, ACL, privilege,
+device, or production mutation. The prepared next step is a human review of a
+minimum-variable experiment, not a production account switch.
+
+```text
+REAL_AMD_RUNTIME_DURING_I2D = 0
+SERVICE_RUNTIME_DURING_I2D = 0
+SECURITY_MUTATIONS_DURING_I2D = 0
+SE_SYSTEM_PROFILE_REAL_EXPERIMENT = NOT_AUTHORIZED
+ADMINISTRATORS_EXPERIMENT = NOT_AUTHORIZED
+DEVICE_ACL_MUTATION_EXPERIMENT = NOT_AUTHORIZED
+PRODUCTION_ACCOUNT_SWITCH = NOT_AUTHORIZED
+NEXT_GATE = HUMAN_ELEVATED_READ_ONLY_I2D_EVIDENCE_COLLECTION
+```
