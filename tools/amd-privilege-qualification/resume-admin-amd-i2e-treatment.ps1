@@ -1,6 +1,11 @@
 #requires -Version 5.1
 [CmdletBinding()]
-param([switch]$ExecuteAuthorizedTreatmentOnly)
+param(
+    [switch]$ExecuteAuthorizedTreatmentOnly,
+    # Internal offline-test seam. It is accepted only with the dedicated
+    # test environment marker and always returns before machine mutation.
+    [switch]$InternalTestOnlyPreMutationSentinel
+)
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
@@ -9,12 +14,22 @@ $ResumeScriptRoot = $PSScriptRoot
 . (Join-Path $ResumeScriptRoot 'i2e-runtime-library.ps1')
 . (Join-Path $ResumeScriptRoot 'i2e-treatment-resume-contract.ps1')
 
+$ServiceName = $I2eServiceName
+$ServiceAccount = $I2eServiceAccount
+$ServiceAccountSid = $I2eServiceAccountSid
+$ServiceSidAccount = $I2eServiceSidAccount
+$ScServiceAccount = 'NT AUTHORITY\LocalService'
+$ArtifactPath = Join-Path $PSScriptRoot 'target\release\amd-privilege-qualification.exe'
+$QualificationRoot = Join-Path $env:ProgramData $I2eOutputSubdirectory
+
 $ExpectedExperimentId = '3935ac9082954bcfb2b1f94c54cf95d7'
 $ExpectedControlScope = '07a511e169274def93da79f269792b71'
 $ExpectedTreatmentScope = 'e66bbcff49ff4aeaaf8bd2a75aa959c7'
 $ExpectedServiceSid = 'S-1-5-80-2365814672-2637389132-1660472602-1496836994-3411780124'
 $ExpectedArtifactSha256 = '871CD20D228BD9510606DE640F516F62C2983B9F4A83C1AA807BA35329C778B9'
 $ExpectedServiceStartMode = '--service-profile-counter-service'
+$ConfigPath = Join-Path $QualificationRoot 'I2E-CONFIG.json'
+$PointerPath = Join-Path $QualificationRoot 'I2E-EXPERIMENT-CURRENT.json'
 
 function Get-I2eResumeServiceConfiguration {
     $service = Get-CimInstance -ClassName Win32_Service -Filter "Name='$ServiceName'" -ErrorAction Stop |
@@ -484,8 +499,8 @@ function Get-I2eTreatmentResumePlan {
         qualification_only = $true
         experiment_id = $ExpectedExperimentId
         service_name = $ServiceName
-        service_account = $I2eServiceAccount
-        service_account_sid = $I2eServiceAccountSid
+        service_account = $ServiceAccount
+        service_account_sid = $ServiceAccountSid
         service_sid = $ExpectedServiceSid
         control_scope = $ExpectedControlScope
         treatment_scope = $ExpectedTreatmentScope
@@ -499,10 +514,21 @@ function Get-I2eTreatmentResumePlan {
     }
 }
 
+if ($InternalTestOnlyPreMutationSentinel -and $env:I2E_RESUME_OFFLINE_TEST_SENTINEL -cne 'true') {
+    throw 'The I2E treatment-resume pre-mutation sentinel is restricted to the offline test environment.'
+}
+if ($InternalTestOnlyPreMutationSentinel -and -not $ExecuteAuthorizedTreatmentOnly) {
+    throw 'The I2E treatment-resume pre-mutation sentinel requires -ExecuteAuthorizedTreatmentOnly.'
+}
 if (-not $ExecuteAuthorizedTreatmentOnly) {
     Get-I2eTreatmentResumePlan | ConvertTo-Json -Depth 20
     Write-Host 'I2E_TREATMENT_RESUME_PLAN_ONLY=true'
     Write-Host 'No service, LSA mutation, or AMD runtime was performed.'
+    return
+}
+if ($InternalTestOnlyPreMutationSentinel) {
+    Write-Host 'I2E_TREATMENT_RESUME_AUTHORIZED_PRE_MUTATION_SENTINEL=true'
+    Write-Host 'No service, LSA mutation, token adjustment, or AMD runtime was performed.'
     return
 }
 

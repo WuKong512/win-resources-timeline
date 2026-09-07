@@ -20,6 +20,7 @@ $I2eSetup = Join-Path $ToolRoot 'run-admin-amd-i2e-service-profile-experiment.ps
 $I2eCleanup = Join-Path $ToolRoot 'cleanup-admin-amd-i2e-service-profile-experiment.ps1'
 $I2eResumeContract = Join-Path $ToolRoot 'i2e-treatment-resume-contract.ps1'
 $I2eResume = Join-Path $ToolRoot 'resume-admin-amd-i2e-treatment.ps1'
+$I2eResumeEntrypointTest = Join-Path $ToolRoot 'test-i2e-resume-entrypoint.ps1'
 $I2fContract = Join-Path $ToolRoot 'i2f-service-profile-contract.ps1'
 $I2fSetup = Join-Path $ToolRoot 'run-admin-amd-i2f-service-profile-experiment.ps1'
 $I2fCleanup = Join-Path $ToolRoot 'cleanup-admin-amd-i2f-service-profile-experiment.ps1'
@@ -44,6 +45,7 @@ foreach ($wrapper in @(
         $I2eCleanup,
         $I2eResumeContract,
         $I2eResume,
+        $I2eResumeEntrypointTest,
         $I2fContract,
         $I2fSetup,
         $I2fCleanup,
@@ -82,7 +84,7 @@ function Assert-I2eNoPidAssignment {
     }
 }
 
-foreach ($i2eScript in @($I2eRuntimeLibrary, $I2eSetup, $I2eCleanup, $I2eContract, $I2eResumeContract, $I2eResume, $I2fSetup, $I2fCleanup, $I2fContract, $I2fEntrypointScopeTest)) {
+foreach ($i2eScript in @($I2eRuntimeLibrary, $I2eSetup, $I2eCleanup, $I2eContract, $I2eResumeContract, $I2eResume, $I2eResumeEntrypointTest, $I2fSetup, $I2fCleanup, $I2fContract, $I2fEntrypointScopeTest)) {
     Assert-I2eNoPidAssignment -Path $i2eScript
 }
 Write-Host 'I2E_PID_AUTOMATIC_VARIABLE_ASSIGNMENT_AUDIT=PASS'
@@ -1519,6 +1521,14 @@ if ($LASTEXITCODE -ne 0) {
 }
 $i2fEntrypointOutput | ForEach-Object { Write-Host $_ }
 Write-Host 'I2F_ENTRYPOINT_SCOPE_ISOLATION=PASS'
+
+$i2eResumeEntrypointOutput = @(& powershell.exe -NoProfile -ExecutionPolicy Bypass -File $I2eResumeEntrypointTest `
+        -ToolRoot $ToolRoot 2>&1 | ForEach-Object { [string]$_ })
+if ($LASTEXITCODE -ne 0) {
+    throw "I2E treatment-resume entrypoint tests failed: $($i2eResumeEntrypointOutput -join [Environment]::NewLine)"
+}
+$i2eResumeEntrypointOutput | ForEach-Object { Write-Host $_ }
+Write-Host 'I2E_RESUME_ENTRYPOINT_REGRESSION=PASS'
 
 Remove-Item -LiteralPath $EvidenceRoot -Recurse -Force -ErrorAction SilentlyContinue
 New-Item -ItemType Directory -Force -Path $EvidenceRoot | Out-Null

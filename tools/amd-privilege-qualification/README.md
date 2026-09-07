@@ -584,6 +584,39 @@ LOCAL_SYSTEM_PRODUCTION_SELECTION = NOT_AUTHORIZED
 NEXT_GATE = HUMAN_I2F_SELF_ENABLE_QUALIFICATION_REVIEW
 ```
 
+## PR22 I2E Resume wrapper-global restoration closure
+
+The shared-library extraction exposed a deterministic StrictMode regression in
+the treatment-resume executable because its experiment-specific state was no
+longer inherited from the executable I2E wrapper. The Resume wrapper now owns
+its service/account/Service-SID identity, frozen artifact, qualification root,
+config path, and CURRENT-pointer path explicitly. It still loads only the
+side-effect-free `i2e-runtime-library.ps1` and the Resume contract.
+
+```text
+I2E_RESUME_WRAPPER_GLOBALS_EXPLICIT = PASS
+I2E_RESUME_DOTSOURCE_EXECUTABLE_I2E_WRAPPER = FORBIDDEN / ABSENT
+SHARED_RUNTIME_LIBRARY_WRAPPER_GLOBALS = ABSENT
+I2E_RESUME_PLAN_ONLY_REAL_ENTRYPOINT = PASS
+I2E_RESUME_PLAN_ONLY_OUTPUT = I2E_TREATMENT_RESUME_PLAN_ONLY=true
+I2E_RESUME_PLAN_ONLY_MACHINE_STATE = UNCHANGED
+I2E_RESUME_AUTHORIZED_FLAG_PRESERVATION = PASS
+SHARED_LIBRARY_CALLER_GLOBAL_AUDIT = PASS
+PREVIOUS_TEST_GAP = I2E_RESUME_WAS_PARSE_AND_CONTRACT_TESTED_BUT_NOT_REAL_ENTRYPOINT_EXECUTED
+I2E_RESUME_REAL_RUNTIME = 0
+I2E_RERUN = FORBIDDEN
+I2F_SCOPE_ISOLATION = PRESERVED
+I2F_GATE_CONSUMED = false
+I2F_ARTIFACT_CHANGED = false
+NEXT_GATE = HUMAN_I2F_SELF_ENABLE_QUALIFICATION_REVIEW
+```
+
+The behavioral test executes the actual Resume wrapper in a child PowerShell
+process, validates the canonical service and artifact identity in its plan, and
+proves the machine snapshot is unchanged. A guarded authorized-entry sentinel
+proves the treatment-only authorization switch survives helper loading without
+performing any service, LSA, token, or AMD operation.
+
 The future wrapper is plan-only unless explicitly authorized:
 
 ```powershell

@@ -1158,6 +1158,44 @@ I2_REAL_RUNTIME_GATE_CONSUMED = true
 NEXT_GATE = HUMAN_ELEVATED_READ_ONLY_I2D_EVIDENCE_COLLECTION
 ```
 
+## PR22 I2E Resume wrapper-global restoration closure
+
+The shared-library extraction exposed a deterministic StrictMode regression in
+the treatment-resume executable: unlike the old executable-wrapper
+dot-sourcing path, `i2e-runtime-library.ps1` does not define experiment-specific
+state. The Resume wrapper now explicitly owns its service, account, Service SID,
+artifact, qualification-root, config, and CURRENT-pointer values.
+
+```text
+BLOCKER = I2E_RESUME_WRAPPER_GLOBALS_LOST_DURING_LIBRARY_EXTRACTION
+BLOCKER_STATUS = CLOSED_OFFLINE
+I2E_RESUME_WRAPPER_GLOBALS_EXPLICIT = PASS
+I2E_RESUME_DOTSOURCE_EXECUTABLE_I2E_WRAPPER = FORBIDDEN / ABSENT
+SHARED_RUNTIME_LIBRARY_WRAPPER_GLOBALS = ABSENT
+I2E_RESUME_PLAN_ONLY_REAL_ENTRYPOINT = PASS
+I2E_RESUME_PLAN_ONLY_OUTPUT = I2E_TREATMENT_RESUME_PLAN_ONLY=true
+I2E_RESUME_PLAN_ONLY_MACHINE_STATE = UNCHANGED
+I2E_RESUME_AUTHORIZED_FLAG_PRESERVATION = PASS
+SHARED_LIBRARY_CALLER_GLOBAL_AUDIT = PASS
+PREVIOUS_TEST_GAP = I2E_RESUME_WAS_PARSE_AND_CONTRACT_TESTED_BUT_NOT_REAL_ENTRYPOINT_EXECUTED
+I2F_SCOPE_ISOLATION = PRESERVED
+I2F_REAL_RUNTIME = 0
+I2E_REAL_RUNTIME_DURING_REPAIR = 0
+I2E_RERUN = FORBIDDEN
+I2F_GATE_CONSUMED = false
+I2F_ARTIFACT_SHA256 = F272E2D5E74A1F8CC7EFABF01A64BFF1ACE4A244BF6199530D30F9F3F90ED10D
+I2F_ARTIFACT_CHANGED = false
+PR22_STATE = DRAFT
+NEXT_GATE = HUMAN_I2F_SELF_ENABLE_QUALIFICATION_REVIEW
+```
+
+The real child-process regression executes the Resume wrapper without the
+authorized switch, validates the authoritative service and frozen-artifact
+identity in its emitted plan, and snapshots service, evidence-root, and
+process state before and after execution. A guarded authorized pre-mutation
+sentinel also proves the authorization switch survives library loading without
+starting a service, changing LSA policy, adjusting a token, or launching AMD.
+
 ## AMD-PRIVILEGE-I2E REAL CLOSURE / AMD-PRIVILEGE-I2F PREPARATION
 
 The dedicated Service-SID I2E treatment has answered the token-materialization
