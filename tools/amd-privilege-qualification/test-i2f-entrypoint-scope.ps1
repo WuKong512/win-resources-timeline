@@ -78,6 +78,58 @@ function Assert-I2fRerunGuard {
     }
 }
 
+function Assert-I2fCleanupRerunGuard {
+    param([Parameter(Mandatory = $true)]$Result)
+
+    if ($Result.exit_code -eq 0 -or
+        $Result.text.IndexOf('I2F_CLEANUP_RERUN_FORBIDDEN', [StringComparison]::Ordinal) -lt 0 -or
+        $Result.text.IndexOf('f68bf4d3d36547a0ba753cff489bb6eb', [StringComparison]::Ordinal) -lt 0) {
+        throw "I2F cleanup retirement guard failed: exit=$($Result.exit_code)`n$($Result.text)"
+    }
+    foreach ($forbiddenEvidenceMarker in @(
+            'I2F_POLICY_REMOVE_ATTEMPTED=',
+            'I2F_LSA_REMOVE_CALLS=',
+            'I2F_FULL_ROLLBACK_VERIFIED=')) {
+        if ($Result.text.IndexOf($forbiddenEvidenceMarker, [StringComparison]::Ordinal) -ge 0) {
+            throw "I2F cleanup retirement guard entered the historical cleanup state machine: $forbiddenEvidenceMarker"
+        }
+    }
+}
+
+function Get-I2fHistoricalEvidenceContentSnapshot {
+    $root = 'C:\ProgramData\ResourceTimeline\qualification\amd-system-profile-enable\f68bf4d3d36547a0ba753cff489bb6eb'
+    $names = @(
+        'I2F-ROLLBACK.json',
+        'I2F-LSA-BEFORE.json',
+        'I2F-LSA-AFTER-ADD.json',
+        'I2F-TOKEN-BEFORE-ENABLE.json',
+        'I2F-ADJUST-TOKEN-PRIVILEGES.json',
+        'I2F-TOKEN-AFTER-ENABLE.json',
+        'I2F-TOKEN-ENABLE-DELTA.json',
+        'I2F-COUNTER-DISCOVERY-RESULT.json',
+        'I2F-COUNTER-DISCOVERY-SUMMARY.json'
+    )
+    $hashes = [ordered]@{}
+    $readable = $true
+    foreach ($name in $names) {
+        $path = Join-Path $root $name
+        try {
+            $hashes[$name] = (Get-FileHash -LiteralPath $path -Algorithm SHA256 -ErrorAction Stop).Hash.ToUpperInvariant()
+        } catch {
+            # The authoritative root is ACL-protected on some qualification
+            # hosts.  Preserve that observation instead of weakening the
+            # retired-entrypoint test or attempting any ACL workaround.
+            $readable = $false
+            $hashes[$name] = 'UNREADABLE'
+        }
+    }
+    [pscustomobject]@{
+        root = $root
+        readable = $readable
+        hashes = $hashes
+    }
+}
+
 function Get-I2fMachineState {
     $serviceState = $null
     try {
@@ -179,6 +231,26 @@ foreach ($requiredBeforeGuard in @(
 }
 Write-Host 'I2F_RERUN_GUARD_PRECEDES_ADMIN_GATE=PASS'
 
+$cleanupGuardIndex = $cleanupSource.IndexOf('I2F_CLEANUP_RERUN_FORBIDDEN', [StringComparison]::Ordinal)
+if ($cleanupGuardIndex -lt 0) {
+    throw 'I2F cleanup retirement guard is missing.'
+}
+foreach ($requiredBeforeCleanupGuard in @(
+        '$null = Assert-I2eAdministrator',
+        '$roots = Get-I2fCleanupRoots',
+        '$cleanupResult = Invoke-I2fCleanup',
+        'Get-I2eServiceSnapshot -ServiceName $ServiceName',
+        'Read-I2fJson -Path $preflightPath'
+    )) {
+    $requiredIndex = $cleanupSource.IndexOf($requiredBeforeCleanupGuard, [StringComparison]::Ordinal)
+    if ($requiredIndex -lt 0 -or $cleanupGuardIndex -ge $requiredIndex) {
+        throw "I2F cleanup retirement guard is not before: $requiredBeforeCleanupGuard"
+    }
+}
+Write-Host 'I2F_CLEANUP_RERUN_GUARD_PRECEDES_ADMIN_GATE=PASS'
+Write-Host 'I2F_CLEANUP_GUARD_PRECEDES_ROOT_ENUMERATION=PASS'
+Write-Host 'I2F_CLEANUP_GUARD_PRECEDES_STATE_MACHINE=PASS'
+
 $libraryErrors = $null
 $libraryTokens = $null
 $libraryAst = [System.Management.Automation.Language.Parser]::ParseFile(
@@ -230,13 +302,25 @@ Assert-I2fMachineStateUnchanged -Before $beforeRerunGuard -After $afterRerunGuar
 Write-Host 'I2F_REAL_RERUN_GUARD=PASS'
 Write-Host 'I2F_RERUN_GUARD_MACHINE_STATE_UNCHANGED=PASS'
 
+$beforeCleanupPlan = Get-I2fMachineState
 $cleanupPlan = Invoke-I2fChildFile -Path $cleanupPath -Arguments @()
 Assert-I2fChildMarker -Result $cleanupPlan -Marker 'I2F_CLEANUP_PLAN_ONLY=true' -Description 'I2F cleanup plan-only entrypoint'
+Assert-I2fChildMarker -Result $cleanupPlan -Marker 'I2F_GATE_CONSUMED=true' -Description 'I2F cleanup plan consumed-gate state'
+Assert-I2fChildMarker -Result $cleanupPlan -Marker 'I2F_CLEANUP_RERUN=FORBIDDEN' -Description 'I2F cleanup plan rerun state'
+Assert-I2fChildMarker -Result $cleanupPlan -Marker 'I2F_REAL_CLEANUP=FORBIDDEN' -Description 'I2F cleanup plan retirement state'
+Assert-I2fChildMarker -Result $cleanupPlan -Marker 'AUTHORITATIVE_SCOPE=f68bf4d3d36547a0ba753cff489bb6eb' -Description 'I2F cleanup plan authoritative scope'
+Assert-I2fChildMarker -Result $cleanupPlan -Marker 'AUTHORITATIVE_ROLLBACK=COMPLETE' -Description 'I2F cleanup plan rollback state'
 Assert-I2fChildMarker -Result $cleanupPlan -Marker 'No service, LSA mutation, or AMD runtime was performed.' -Description 'I2F cleanup plan-only safety output'
 $afterCleanupPlan = Get-I2fMachineState
-Assert-I2fMachineStateUnchanged -Before $afterSetupPlan -After $afterCleanupPlan -Description 'I2F cleanup plan-only entrypoint'
+Assert-I2fMachineStateUnchanged -Before $beforeCleanupPlan -After $afterCleanupPlan -Description 'I2F cleanup plan-only entrypoint'
 Write-Host 'I2F_CLEANUP_PLAN_ONLY_REAL_ENTRYPOINT=PASS'
 Write-Host 'I2F_CLEANUP_PLAN_ONLY_OUTPUT=I2F_CLEANUP_PLAN_ONLY=true'
+
+$cleanupLibraryOnlyResult = Invoke-I2fChildFile -Path $cleanupPath -Arguments @('-LibraryOnly')
+if ($cleanupLibraryOnlyResult.exit_code -ne 0) {
+    throw "I2F cleanup LibraryOnly entrypoint failed: $($cleanupLibraryOnlyResult.text)"
+}
+Write-Host 'I2F_CLEANUP_LIBRARY_ONLY_REAL_ENTRYPOINT=PASS'
 
 $libraryPathLiteral = $libraryPath.Replace("'", "''")
 $parameterProbe = @"
@@ -283,3 +367,24 @@ Write-Host 'AUTHORIZED_EXPERIMENT_FLAG_SURVIVES_HELPER_LOAD=PASS'
 Write-Host 'AUTHORIZED_CLEANUP_FLAG_SURVIVES_HELPER_LOAD=PASS'
 Write-Host 'AUTHORIZED_SETUP_PRE_MUTATION_SENTINEL=PASS'
 Write-Host 'AUTHORIZED_CLEANUP_PRE_MUTATION_SENTINEL=PASS'
+Write-Host 'I2F_CLEANUP_OFFLINE_AUTHORIZED_SENTINEL=PASS'
+
+$beforeCleanupRerunGuard = Get-I2fMachineState
+$beforeHistoricalEvidence = Get-I2fHistoricalEvidenceContentSnapshot
+$cleanupRerunGuard = Invoke-I2fChildFile -Path $cleanupPath -Arguments @('-ExecuteAuthorizedCleanup')
+Assert-I2fCleanupRerunGuard -Result $cleanupRerunGuard
+$afterCleanupRerunGuard = Get-I2fMachineState
+$afterHistoricalEvidence = Get-I2fHistoricalEvidenceContentSnapshot
+Assert-I2fMachineStateUnchanged -Before $beforeCleanupRerunGuard -After $afterCleanupRerunGuard -Description 'I2F cleanup consumed-gate retirement guard'
+if (($beforeHistoricalEvidence | ConvertTo-Json -Depth 10 -Compress) -cne
+    ($afterHistoricalEvidence | ConvertTo-Json -Depth 10 -Compress)) {
+    throw "I2F authoritative historical evidence content changed.`nBefore=$($beforeHistoricalEvidence | ConvertTo-Json -Depth 10 -Compress)`nAfter=$($afterHistoricalEvidence | ConvertTo-Json -Depth 10 -Compress)"
+}
+Write-Host 'I2F_CLEANUP_REAL_RERUN_GUARD=PASS'
+Write-Host 'I2F_CLEANUP_RERUN_MACHINE_STATE_UNCHANGED=PASS'
+Write-Host 'I2F_HISTORICAL_EVIDENCE_CONTENT_UNCHANGED=PASS'
+if ($beforeHistoricalEvidence.readable -and $afterHistoricalEvidence.readable) {
+    Write-Host 'I2F_HISTORICAL_EVIDENCE_CONTENT_HASH_CHECK=PASS'
+} else {
+    Write-Host 'I2F_HISTORICAL_EVIDENCE_CONTENT_HASH_CHECK=UNREADABLE_STABLE'
+}

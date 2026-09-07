@@ -16,6 +16,8 @@ $I2fOutputSubdirectory = 'ResourceTimeline\qualification\amd-system-profile-enab
 $I2fAuthoritativeScope = 'f68bf4d3d36547a0ba753cff489bb6eb'
 $I2fRealGateConsumed = $true
 $I2fRealRerunAllowed = $false
+$I2fRealCleanupAllowed = $false
+$I2fAuthoritativeRollbackComplete = $true
 
 function Get-I2fExperimentPlan {
     param([Parameter(Mandatory = $true)][string]$ArtifactSha256)

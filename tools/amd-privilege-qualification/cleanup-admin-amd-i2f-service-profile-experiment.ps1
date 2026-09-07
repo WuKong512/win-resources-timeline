@@ -40,7 +40,6 @@ if ($InternalTestOnlyPreMutationSentinel -and $env:I2F_OFFLINE_TEST_SENTINEL -cn
 if ($InternalTestOnlyPreMutationSentinel -and -not $ExecuteAuthorizedCleanup) {
     throw 'The I2F cleanup pre-mutation sentinel requires -ExecuteAuthorizedCleanup.'
 }
-$roots = Get-I2fCleanupRoots
 if (-not $ExecuteAuthorizedCleanup) {
     [ordered]@{
         schema = 'amd-i2f-cleanup-plan/v2'
@@ -48,7 +47,11 @@ if (-not $ExecuteAuthorizedCleanup) {
         service_name = $I2fServiceName
         right = $I2fRequiredRight
         all_rights = $false
-        candidate_evidence_roots = @($roots | ForEach-Object { $_.FullName })
+        authoritative_scope = $I2fAuthoritativeScope
+        gate_consumed = [bool]$I2fRealGateConsumed
+        real_cleanup = if ($I2fRealCleanupAllowed) { 'ALLOWED' } else { 'FORBIDDEN' }
+        authoritative_rollback = if ($I2fAuthoritativeRollbackComplete) { 'COMPLETE' } else { 'OPEN' }
+        candidate_evidence_roots = @()
         fixed_cli_arguments = $I2fFixedArguments
         sampling = $false
         cleanup_order = @(
@@ -63,6 +66,11 @@ if (-not $ExecuteAuthorizedCleanup) {
         )
     } | ConvertTo-Json -Depth 20
     Write-Host 'I2F_CLEANUP_PLAN_ONLY=true'
+    Write-Host "I2F_GATE_CONSUMED=$(if ($I2fRealGateConsumed) { 'true' } else { 'false' })"
+    Write-Host "I2F_CLEANUP_RERUN=$(if ($I2fRealCleanupAllowed) { 'ALLOWED' } else { 'FORBIDDEN' })"
+    Write-Host "I2F_REAL_CLEANUP=$(if ($I2fRealCleanupAllowed) { 'ALLOWED' } else { 'FORBIDDEN' })"
+    Write-Host "AUTHORITATIVE_SCOPE=$I2fAuthoritativeScope"
+    Write-Host "AUTHORITATIVE_ROLLBACK=$(if ($I2fAuthoritativeRollbackComplete) { 'COMPLETE' } else { 'OPEN' })"
     Write-Host 'No service, LSA mutation, or AMD runtime was performed.'
     return
 }
@@ -71,6 +79,12 @@ if ($InternalTestOnlyPreMutationSentinel) {
     Write-Host 'No service, LSA mutation, token adjustment, or AMD runtime was performed.'
     return
 }
+
+if ($I2fRealGateConsumed -or $I2fAuthoritativeRollbackComplete -or -not $I2fRealCleanupAllowed) {
+    throw ('I2F_CLEANUP_RERUN_FORBIDDEN: authoritative I2F scope {0} already completed full rollback. Historical I2F cleanup evidence is immutable; no further real cleanup is allowed.' -f $I2fAuthoritativeScope)
+}
+
+$roots = Get-I2fCleanupRoots
 
 $null = Assert-I2eAdministrator
 

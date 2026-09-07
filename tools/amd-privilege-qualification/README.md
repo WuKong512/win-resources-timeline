@@ -586,7 +586,57 @@ LOCAL_SYSTEM_PRODUCTION_SELECTION = NOT_AUTHORIZED
 NEXT_GATE = HUMAN_I2F_SELF_ENABLE_QUALIFICATION_REVIEW
 ```
 
-## PR22 I2E Resume wrapper-global restoration closure
+## PR22 I2F cleanup entrypoint retirement closure
+
+This is the current state and supersedes earlier I2F preparation and recovery
+instructions. The authoritative I2F experiment completed full rollback, so
+the standalone real cleanup entrypoint is retired. The historical I2F
+evidence, including the authoritative rollback event, is immutable and no
+cleanup is required for the completed scope. Future capability work requires a
+fresh task, fresh harness, fresh rollback boundary, and separate human
+authorization.
+
+```text
+I2F_AUTHORITATIVE_SCOPE = f68bf4d3d36547a0ba753cff489bb6eb
+I2F_GATE_CONSUMED = true
+I2F_RERUN = FORBIDDEN
+I2F_CLEANUP_RERUN = FORBIDDEN
+I2F_REAL_EXECUTION_ENTRYPOINT = PERMANENTLY_FAIL_CLOSED
+I2F_REAL_CLEANUP_ENTRYPOINT = PERMANENTLY_FAIL_CLOSED
+I2F_REAL_CLEANUP_ERROR = I2F_CLEANUP_RERUN_FORBIDDEN
+I2F_HISTORICAL_EVIDENCE = IMMUTABLE
+I2F_AUTHORITATIVE_ROLLBACK = REAL_PASS
+I2F_CLEANUP_REQUIRED = false
+I2F_CLEANUP_GUARD_PRECEDES_ADMIN = PASS
+I2F_CLEANUP_GUARD_PRECEDES_ROOT_ENUMERATION = PASS
+I2F_CLEANUP_GUARD_PRECEDES_STATE_MACHINE = PASS
+I2F_CLEANUP_PLAN_ONLY = PASS
+I2F_CLEANUP_LIBRARY_ONLY = PASS
+I2F_CLEANUP_OFFLINE_AUTHORIZED_SENTINEL = PASS
+I2F_HISTORICAL_EVIDENCE_CONTENT_UNCHANGED = PASS
+I2F_RESULT = PASS_WITH_NEGATIVE_COUNTER_ACCESS_RESULT
+I2F_FULL_ROLLBACK = REAL_PASS
+SE_SYSTEM_PROFILE_PRIVILEGE_ALONE_SUFFICIENT = false
+SE_SYSTEM_PROFILE_PRIVILEGE_NECESSITY = UNRESOLVED
+I2G_VARIABLE = UNRESOLVED
+I2G_HARNESS = NOT_IMPLEMENTED
+I2G_REAL_RUNTIME = 0
+PRODUCTION_ACCOUNT = UNRESOLVED
+LOCAL_SYSTEM_PRODUCTION_SELECTION = NOT_AUTHORIZED
+PRODUCTION_ADMISSION = NOT_COMPLETE
+NEXT_GATE = PR22_FINAL_MERGE_READINESS_REVIEW
+```
+
+The cleanup wrapper rejects every future real `-ExecuteAuthorizedCleanup`
+invocation with `I2F_CLEANUP_RERUN_FORBIDDEN` before administrator checks,
+historical scope enumeration, service/process access, LSA access, cleanup
+state-machine execution, or rollback-evidence writes. Plan-only, `LibraryOnly`,
+and the explicitly guarded offline cleanup sentinel remain available for
+repository validation. The offline child-process regression confirms the
+nonzero rejection, unchanged machine state, and unchanged historical evidence
+observation without modifying the protected ProgramData scope.
+
+## HISTORICAL / SUPERSEDED — PR22 I2E Resume wrapper-global restoration closure
 
 The shared-library extraction exposed a deterministic StrictMode regression in
 the treatment-resume executable because its experiment-specific state was no

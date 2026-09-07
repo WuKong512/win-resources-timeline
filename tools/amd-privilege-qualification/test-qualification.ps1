@@ -1561,6 +1561,11 @@ foreach ($requiredI2fClosureText in @(
         'I2F_GATE_CONSUMED = true',
         'I2F_RERUN = FORBIDDEN',
         'I2F_REAL_EXECUTION_ENTRYPOINT = PERMANENTLY_FAIL_CLOSED',
+        'I2F_REAL_CLEANUP_ENTRYPOINT = PERMANENTLY_FAIL_CLOSED',
+        'I2F_CLEANUP_RERUN = FORBIDDEN',
+        'I2F_HISTORICAL_EVIDENCE = IMMUTABLE',
+        'I2F_AUTHORITATIVE_ROLLBACK = REAL_PASS',
+        'I2F_CLEANUP_REQUIRED = false',
         'I2F_REAL_RERUN_ERROR = I2F_RERUN_FORBIDDEN',
         'I2F_REAL_RERUN_MACHINE_STATE = UNCHANGED',
         'counter_discovery_cli_executed = true after Command::spawn succeeds',
@@ -1591,6 +1596,18 @@ foreach ($requiredI2fConsumedGateContract in @(
     }
 }
 Write-Host 'I2F_CONSUMED_GATE_CONTRACT=PASS'
+
+foreach ($requiredI2fCleanupRetirementContract in @(
+        '$I2fRealCleanupAllowed = $false',
+        '$I2fAuthoritativeRollbackComplete = $true',
+        'I2F_CLEANUP_RERUN_FORBIDDEN'
+    )) {
+    if ($i2fContractSource.IndexOf($requiredI2fCleanupRetirementContract, [StringComparison]::Ordinal) -lt 0 -and
+        (Get-Content -LiteralPath $I2fCleanup -Raw).IndexOf($requiredI2fCleanupRetirementContract, [StringComparison]::Ordinal) -lt 0) {
+        throw "I2F cleanup-retirement contract is missing: $requiredI2fCleanupRetirementContract"
+    }
+}
+Write-Host 'I2F_CLEANUP_RETIREMENT_CONTRACT=PASS'
 
 Remove-Item -LiteralPath $EvidenceRoot -Recurse -Force -ErrorAction SilentlyContinue
 New-Item -ItemType Directory -Force -Path $EvidenceRoot | Out-Null

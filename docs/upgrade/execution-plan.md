@@ -1158,7 +1158,7 @@ I2_REAL_RUNTIME_GATE_CONSUMED = true
 NEXT_GATE = HUMAN_ELEVATED_READ_ONLY_I2D_EVIDENCE_COLLECTION
 ```
 
-## PR22 I2E Resume wrapper-global restoration closure
+## HISTORICAL / SUPERSEDED — PR22 I2E Resume wrapper-global restoration closure
 
 The shared-library extraction exposed a deterministic StrictMode regression in
 the treatment-resume executable: unlike the old executable-wrapper
@@ -1188,6 +1188,55 @@ I2F_ARTIFACT_CHANGED = false
 PR22_STATE = DRAFT
 NEXT_GATE = HUMAN_I2F_SELF_ENABLE_QUALIFICATION_REVIEW
 ```
+
+## PR22 I2F cleanup entrypoint retirement closure
+
+This is the current state and supersedes earlier I2F preparation and recovery
+instructions. The authoritative I2F experiment completed full rollback, so its
+standalone real cleanup entrypoint is retired as well. Historical rollback
+evidence remains immutable; no future cleanup is required for the completed
+scope. Any future capability experiment must use a fresh task, harness, and
+rollback boundary with separate human authorization.
+
+```text
+I2F_AUTHORITATIVE_SCOPE = f68bf4d3d36547a0ba753cff489bb6eb
+I2F_GATE_CONSUMED = true
+I2F_RERUN = FORBIDDEN
+I2F_CLEANUP_RERUN = FORBIDDEN
+I2F_REAL_EXECUTION_ENTRYPOINT = PERMANENTLY_FAIL_CLOSED
+I2F_REAL_CLEANUP_ENTRYPOINT = PERMANENTLY_FAIL_CLOSED
+I2F_REAL_CLEANUP_ERROR = I2F_CLEANUP_RERUN_FORBIDDEN
+I2F_HISTORICAL_EVIDENCE = IMMUTABLE
+I2F_AUTHORITATIVE_ROLLBACK = REAL_PASS
+I2F_CLEANUP_REQUIRED = false
+I2F_CLEANUP_GUARD_PRECEDES_ADMIN = PASS
+I2F_CLEANUP_GUARD_PRECEDES_ROOT_ENUMERATION = PASS
+I2F_CLEANUP_GUARD_PRECEDES_STATE_MACHINE = PASS
+I2F_CLEANUP_PLAN_ONLY = PASS
+I2F_CLEANUP_LIBRARY_ONLY = PASS
+I2F_CLEANUP_OFFLINE_AUTHORIZED_SENTINEL = PASS
+I2F_HISTORICAL_EVIDENCE_CONTENT_UNCHANGED = PASS
+I2F_RESULT = PASS_WITH_NEGATIVE_COUNTER_ACCESS_RESULT
+I2F_FULL_ROLLBACK = REAL_PASS
+SE_SYSTEM_PROFILE_PRIVILEGE_ALONE_SUFFICIENT = false
+SE_SYSTEM_PROFILE_PRIVILEGE_NECESSITY = UNRESOLVED
+I2G_VARIABLE = UNRESOLVED
+I2G_HARNESS = NOT_IMPLEMENTED
+I2G_REAL_RUNTIME = 0
+PRODUCTION_ACCOUNT = UNRESOLVED
+LOCAL_SYSTEM_PRODUCTION_SELECTION = NOT_AUTHORIZED
+PRODUCTION_ADMISSION = NOT_COMPLETE
+NEXT_GATE = PR22_FINAL_MERGE_READINESS_REVIEW
+```
+
+The retired cleanup wrapper emits `I2F_CLEANUP_RERUN_FORBIDDEN` before
+administrator checks, historical root enumeration, service/process access,
+LSA access, cleanup-state execution, or rollback-evidence writes. Plan-only,
+`LibraryOnly`, and the explicitly guarded offline cleanup sentinel remain
+available for validation. The offline regression invokes the real cleanup
+entrypoint, verifies the stable nonzero rejection, and compares machine state
+and the specified historical evidence content without modifying the protected
+ProgramData scope.
 
 The real child-process regression executes the Resume wrapper without the
 authorized switch, validates the authoritative service and frozen-artifact
