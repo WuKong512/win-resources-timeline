@@ -1,16 +1,52 @@
 #requires -Version 5.1
 [CmdletBinding()]
-param()
+param(
+    [switch]$ExecuteAuthorizedCleanup,
+    [switch]$LibraryOnly,
+    [switch]$InternalTestOnlyPreMutationSentinel
+)
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
+. (Join-Path $PSScriptRoot 'legacy-real-gate-contract.ps1')
 . (Join-Path $PSScriptRoot 'cleanup-state-contract.ps1')
 
 $ServiceName = 'ResourceTimelineAmdPrivilegeQualification'
 $ArtifactPath = Join-Path $PSScriptRoot 'target\release\amd-privilege-qualification.exe'
 $QualificationRoot = Join-Path $env:ProgramData 'ResourceTimeline\qualification\amd-privilege'
 $ConfigPath = Join-Path $QualificationRoot 'BROKER-CONFIG.json'
+
+if ($LibraryOnly) {
+    return
+}
+
+if ($InternalTestOnlyPreMutationSentinel) {
+    if (-not $ExecuteAuthorizedCleanup -or $env:AMD_LEGACY_OFFLINE_TEST_SENTINEL -cne 'true') {
+        throw 'The I2 legacy cleanup offline sentinel requires -ExecuteAuthorizedCleanup and AMD_LEGACY_OFFLINE_TEST_SENTINEL=true.'
+    }
+    Write-Host 'I2_LEGACY_CLEANUP_AUTHORIZED_PRE_MUTATION_SENTINEL=true'
+    return
+}
+
+if (-not $ExecuteAuthorizedCleanup) {
+    [ordered]@{
+        qualification_only = $true
+        historical_gate = 'I2_I2B_LEGACY_CLEANUP'
+        service_name = $ServiceName
+        real_gate_consumed = $I2LegacyRealGateConsumed
+        real_execution_allowed = $I2CleanupAllowed
+        status = $I2LegacyStatus
+    } | ConvertTo-Json -Depth 10
+    Write-Host 'I2_LEGACY_CLEANUP_PLAN_ONLY=true'
+    Write-Host 'I2_LEGACY_RERUN=FORBIDDEN'
+    Write-Host 'No service, process, LSA, AMD, or cleanup-evidence mutation was performed.'
+    return
+}
+
+if ($I2LegacyRealGateConsumed -or -not $I2CleanupAllowed) {
+    throw 'I2_LEGACY_CLEANUP_RERUN_FORBIDDEN: the historical I2/I2B cleanup gate is consumed. Historical cleanup evidence is immutable; use a fresh explicitly authorized experiment harness.'
+}
 
 $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
 $principal = [Security.Principal.WindowsPrincipal]::new($identity)

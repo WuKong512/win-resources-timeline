@@ -1,9 +1,15 @@
 #requires -Version 5.1
 [CmdletBinding()]
-param()
+param(
+    [switch]$ExecuteAuthorizedSetup,
+    [switch]$LibraryOnly,
+    [switch]$InternalTestOnlyPreMutationSentinel
+)
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+
+. (Join-Path $PSScriptRoot 'legacy-real-gate-contract.ps1')
 
 $ServiceName = 'ResourceTimelineAmdPrivilegeQualification'
 $ServiceAccount = 'NT AUTHORITY\LocalService'
@@ -12,6 +18,39 @@ $ArtifactPath = Join-Path $PSScriptRoot 'target\release\amd-privilege-qualificat
 $ExpectedArtifactSha256 = 'C9973BAAA01AF3C2673D8C70D8C7E626C577642505E6DFF7BA3C6026DEA63FB1'
 $QualificationRoot = Join-Path $env:ProgramData 'ResourceTimeline\qualification\amd-privilege'
 $ConfigPath = Join-Path $QualificationRoot 'BROKER-CONFIG.json'
+
+if ($LibraryOnly) {
+    return
+}
+
+if ($InternalTestOnlyPreMutationSentinel) {
+    if (-not $ExecuteAuthorizedSetup -or $env:AMD_LEGACY_OFFLINE_TEST_SENTINEL -cne 'true') {
+        throw 'The I2 broker setup offline sentinel requires -ExecuteAuthorizedSetup and AMD_LEGACY_OFFLINE_TEST_SENTINEL=true.'
+    }
+    Write-Host 'I2_BROKER_SETUP_AUTHORIZED_PRE_MUTATION_SENTINEL=true'
+    return
+}
+
+if (-not $ExecuteAuthorizedSetup) {
+    [ordered]@{
+        qualification_only = $true
+        historical_gate = 'I2'
+        service_name = $ServiceName
+        service_account = $ServiceAccount
+        real_gate_consumed = $I2LegacyRealGateConsumed
+        real_execution_allowed = $I2BrokerSetupAllowed
+        status = $I2LegacyStatus
+    } | ConvertTo-Json -Depth 10
+    Write-Host 'I2_BROKER_SETUP_PLAN_ONLY=true'
+    Write-Host 'I2_LEGACY_RERUN=FORBIDDEN'
+    Write-Host 'No service, ACL, AMD, or evidence mutation was performed.'
+    return
+}
+
+if ($I2LegacyRealGateConsumed -or -not $I2BrokerSetupAllowed) {
+    throw 'I2_BROKER_SETUP_RERUN_FORBIDDEN: the historical I2 LocalService broker setup gate is consumed. Use a fresh explicitly authorized experiment harness.'
+}
+
 . (Join-Path $PSScriptRoot 'sc-argument-contract.ps1')
 
 function Assert-Administrator {

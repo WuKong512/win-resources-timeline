@@ -1,9 +1,15 @@
 #requires -Version 5.1
 [CmdletBinding()]
-param()
+param(
+    [switch]$ExecuteAuthorizedComparison,
+    [switch]$LibraryOnly,
+    [switch]$InternalTestOnlyPreMutationSentinel
+)
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+
+. (Join-Path $PSScriptRoot 'legacy-real-gate-contract.ps1')
 
 $ServiceName = 'ResourceTimelineAmdSystemCounterQualification'
 $ServiceAccount = 'NT AUTHORITY\SYSTEM'
@@ -13,6 +19,43 @@ $ArtifactPath = Join-Path $PSScriptRoot 'target\release\amd-privilege-qualificat
 $ExpectedArtifactSha256 = '9E5A012B0A95C84DD28CD607D99EF43C9BC4D700683F33890CDE6C2108794AC3'
 $QualificationRoot = Join-Path $env:ProgramData 'ResourceTimeline\qualification\amd-system-counter'
 $ConfigPath = Join-Path $QualificationRoot 'SYSTEM-CONFIG.json'
+
+if ($LibraryOnly) {
+    return
+}
+
+if ($InternalTestOnlyPreMutationSentinel) {
+    if (-not $ExecuteAuthorizedComparison -or $env:AMD_LEGACY_OFFLINE_TEST_SENTINEL -cne 'true') {
+        throw 'The I2C SYSTEM comparison offline sentinel requires -ExecuteAuthorizedComparison and AMD_LEGACY_OFFLINE_TEST_SENTINEL=true.'
+    }
+    Write-Host 'I2C_SYSTEM_AUTHORIZED_PRE_MUTATION_SENTINEL=true'
+    return
+}
+
+if (-not $ExecuteAuthorizedComparison) {
+    [ordered]@{
+        qualification_only = $true
+        historical_gate = 'I2C_SYSTEM_COMPARISON'
+        service_name = $ServiceName
+        historical_result = $I2LegacyHistoricalSystemResult
+        real_gate_consumed = $I2LegacyRealGateConsumed
+        real_execution_allowed = $I2cSystemComparisonAllowed
+        production_account = 'UNRESOLVED'
+        local_system_production_selection = 'NOT_AUTHORIZED'
+        status = $I2LegacyStatus
+    } | ConvertTo-Json -Depth 10
+    Write-Host 'I2C_SYSTEM_PLAN_ONLY=true'
+    Write-Host 'I2C_RERUN=FORBIDDEN'
+    Write-Host 'SYSTEM_HISTORICAL_RESULT=AVAILABLE'
+    Write-Host 'PRODUCTION_LOCAL_SYSTEM=NOT_AUTHORIZED'
+    Write-Host 'No service, ACL, AMD, or evidence mutation was performed.'
+    return
+}
+
+if ($I2LegacyRealGateConsumed -or -not $I2cSystemComparisonAllowed) {
+    throw 'I2C_SYSTEM_COMPARISON_RERUN_FORBIDDEN: the historical I2C SYSTEM comparison gate is consumed. Use a fresh explicitly authorized experiment harness.'
+}
+
 . (Join-Path $PSScriptRoot 'sc-argument-contract.ps1')
 
 function Assert-Administrator {

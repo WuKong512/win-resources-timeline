@@ -1,13 +1,52 @@
 #requires -Version 5.1
 [CmdletBinding()]
-param()
+param(
+    [switch]$ExecuteAuthorizedClient,
+    [switch]$LibraryOnly,
+    [switch]$InternalTestOnlyPreRuntimeSentinel
+)
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
+. (Join-Path $PSScriptRoot 'legacy-real-gate-contract.ps1')
+
 $ArtifactPath = Join-Path $PSScriptRoot 'target\release\amd-privilege-qualification.exe'
 $ExpectedArtifactSha256 = 'C9973BAAA01AF3C2673D8C70D8C7E626C577642505E6DFF7BA3C6026DEA63FB1'
 $ConfigPath = Join-Path $env:ProgramData 'ResourceTimeline\qualification\amd-privilege\BROKER-CONFIG.json'
+
+if ($LibraryOnly) {
+    return
+}
+
+if ($InternalTestOnlyPreRuntimeSentinel) {
+    if (-not $ExecuteAuthorizedClient -or $env:AMD_LEGACY_OFFLINE_TEST_SENTINEL -cne 'true') {
+        throw 'The I2B counter-discovery offline sentinel requires -ExecuteAuthorizedClient and AMD_LEGACY_OFFLINE_TEST_SENTINEL=true.'
+    }
+    Write-Host 'I2B_COUNTER_CLIENT_AUTHORIZED_PRE_RUNTIME_SENTINEL=true'
+    return
+}
+
+if (-not $ExecuteAuthorizedClient) {
+    [ordered]@{
+        qualification_only = $true
+        historical_gate = 'I2B_COUNTER_DISCOVERY_CLIENT'
+        real_gate_consumed = $I2LegacyRealGateConsumed
+        real_execution_allowed = $I2CounterDiscoveryClientAllowed
+        status = $I2LegacyStatus
+        sampling = $false
+        fixed_operation = 'counter-discovery'
+    } | ConvertTo-Json -Depth 10
+    Write-Host 'I2B_COUNTER_CLIENT_PLAN_ONLY=true'
+    Write-Host 'I2B_LEGACY_RERUN=FORBIDDEN'
+    Write-Host 'No broker connection, counter-discovery client, or AMD runtime was performed.'
+    return
+}
+
+if ($I2LegacyRealGateConsumed -or -not $I2CounterDiscoveryClientAllowed) {
+    throw 'I2B_COUNTER_DISCOVERY_RERUN_FORBIDDEN: the historical I2B counter-discovery client gate is consumed. Use a fresh explicitly authorized experiment harness.'
+}
+
 . (Join-Path $PSScriptRoot 'token-integrity-contract.ps1')
 
 if (-not [Environment]::Is64BitProcess) {

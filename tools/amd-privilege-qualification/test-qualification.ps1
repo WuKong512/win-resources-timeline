@@ -22,6 +22,8 @@ $I2eResumeContract = Join-Path $ToolRoot 'i2e-treatment-resume-contract.ps1'
 $I2eResume = Join-Path $ToolRoot 'resume-admin-amd-i2e-treatment.ps1'
 $I2eResumeEntrypointTest = Join-Path $ToolRoot 'test-i2e-resume-entrypoint.ps1'
 $I2eRetirementEntrypointTest = Join-Path $ToolRoot 'test-i2e-retirement-entrypoints.ps1'
+$LegacyRealGateContract = Join-Path $ToolRoot 'legacy-real-gate-contract.ps1'
+$LegacyRetirementTest = Join-Path $ToolRoot 'test-legacy-real-gate-retirement.ps1'
 $I2fContract = Join-Path $ToolRoot 'i2f-service-profile-contract.ps1'
 $I2fSetup = Join-Path $ToolRoot 'run-admin-amd-i2f-service-profile-experiment.ps1'
 $I2fCleanup = Join-Path $ToolRoot 'cleanup-admin-amd-i2f-service-profile-experiment.ps1'
@@ -52,6 +54,14 @@ foreach ($wrapper in @(
         $I2eResume,
         $I2eResumeEntrypointTest,
         $I2eRetirementEntrypointTest,
+        $LegacyRealGateContract,
+        $LegacyRetirementTest,
+        (Join-Path $ToolRoot 'run-admin-amd-privilege-qualification.ps1'),
+        (Join-Path $ToolRoot 'run-standard-user-amd-privilege-client.ps1'),
+        (Join-Path $ToolRoot 'run-standard-user-amd-counter-discovery.ps1'),
+        (Join-Path $ToolRoot 'cleanup-admin-amd-privilege-qualification.ps1'),
+        (Join-Path $ToolRoot 'run-admin-amd-system-counter-qualification.ps1'),
+        (Join-Path $ToolRoot 'cleanup-admin-amd-system-counter-qualification.ps1'),
         $I2fContract,
         $I2fSetup,
         $I2fCleanup,
@@ -90,7 +100,7 @@ function Assert-I2eNoPidAssignment {
     }
 }
 
-foreach ($i2eScript in @($I2eRuntimeLibrary, $I2eSetup, $I2eCleanup, $I2eContract, $I2eResumeContract, $I2eResume, $I2eResumeEntrypointTest, $I2eRetirementEntrypointTest, $I2fSetup, $I2fCleanup, $I2fContract, $I2fEntrypointScopeTest)) {
+foreach ($i2eScript in @($I2eRuntimeLibrary, $I2eSetup, $I2eCleanup, $I2eContract, $I2eResumeContract, $I2eResume, $I2eResumeEntrypointTest, $I2eRetirementEntrypointTest, $LegacyRealGateContract, $LegacyRetirementTest, $I2fSetup, $I2fCleanup, $I2fContract, $I2fEntrypointScopeTest)) {
     Assert-I2eNoPidAssignment -Path $i2eScript
 }
 Write-Host 'I2E_PID_AUTOMATIC_VARIABLE_ASSIGNMENT_AUDIT=PASS'
@@ -1544,6 +1554,14 @@ if ($LASTEXITCODE -ne 0) {
 $i2eRetirementEntrypointOutput | ForEach-Object { Write-Host $_ }
 Write-Host 'I2E_RETIREMENT_ENTRYPOINT_REGRESSION=PASS'
 
+$legacyRetirementOutput = @(& powershell.exe -NoProfile -ExecutionPolicy Bypass -File $LegacyRetirementTest `
+        -ToolRoot $ToolRoot 2>&1 | ForEach-Object { [string]$_ })
+if ($LASTEXITCODE -ne 0) {
+    throw "Legacy I2/I2B/I2C real-gate retirement tests failed: $($legacyRetirementOutput -join [Environment]::NewLine)"
+}
+$legacyRetirementOutput | ForEach-Object { Write-Host $_ }
+Write-Host 'LEGACY_REAL_GATE_RETIREMENT_REGRESSION=PASS'
+
 $counterDiscoveryFunction = [regex]::Match(
     $windowsSourceText,
     '(?s)fn\s+execute_counter_discovery_at_with_prefix\(.*?\n}\n\nfn\s+start_session'
@@ -1574,6 +1592,10 @@ foreach ($requiredI2eCurrentStateText in @(
         'I2E_HISTORICAL_EVIDENCE = IMMUTABLE',
         'I2E_RERUN = FORBIDDEN',
         'I2E_CLEANUP_RERUN = FORBIDDEN',
+        'I2_LEGACY_REAL_ENTRYPOINTS = RETIRED',
+        'I2B_REAL_ENTRYPOINTS = RETIRED',
+        'I2C_REAL_ENTRYPOINTS = RETIRED',
+        'AMD_QUALIFICATION_EXECUTABLE_ENTRYPOINT_AUDIT = PASS_NO_UNRETIRED_HISTORICAL_REAL_GATE',
         'I2G_VARIABLE = UNRESOLVED',
         'NEXT_GATE = REVIEW_RESIDUAL_DIFFERENTIAL_AND_SELECT_SINGLE_I2G_VARIABLE',
         'NEXT_TASK = UNRESOLVED_PENDING_I2G_VARIABLE_SELECTION'
@@ -1585,6 +1607,28 @@ foreach ($requiredI2eCurrentStateText in @(
 Write-Host 'ARCHITECTURE_SINGLE_AUTHORITATIVE_CURRENT_STATE=PASS'
 Write-Host 'EXECUTION_PLAN_SINGLE_CURRENT_STATE=PASS'
 Write-Host 'README_CURRENT_STATE_RECONCILED=PASS'
+$legacyCurrentStateSource = @(
+    Get-Content -LiteralPath $ArchitectureDoc -Raw
+    Get-Content -LiteralPath $ExecutionPlan -Raw
+    Get-Content -LiteralPath $QualificationReadme -Raw
+) -join [Environment]::NewLine
+foreach ($requiredLegacyCurrentStateText in @(
+        'I2_BROKER_SETUP_REAL_ENTRYPOINT = PERMANENTLY_FAIL_CLOSED',
+        'I2_POWER_SAMPLING_CLIENT_REAL_ENTRYPOINT = PERMANENTLY_FAIL_CLOSED',
+        'I2B_COUNTER_DISCOVERY_REAL_ENTRYPOINT = PERMANENTLY_FAIL_CLOSED',
+        'I2_LEGACY_CLEANUP_REAL_ENTRYPOINT = PERMANENTLY_FAIL_CLOSED',
+        'I2C_SYSTEM_COMPARISON_REAL_ENTRYPOINT = PERMANENTLY_FAIL_CLOSED',
+        'I2C_SYSTEM_CLEANUP_REAL_ENTRYPOINT = PERMANENTLY_FAIL_CLOSED',
+        'I2_LEGACY_RERUN = FORBIDDEN',
+        'I2B_RERUN = FORBIDDEN',
+        'I2C_RERUN = FORBIDDEN',
+        'AMD_QUALIFICATION_EXECUTABLE_ENTRYPOINT_AUDIT = PASS_NO_UNRETIRED_HISTORICAL_REAL_GATE'
+    )) {
+    if ($legacyCurrentStateSource.IndexOf($requiredLegacyCurrentStateText, [StringComparison]::Ordinal) -lt 0) {
+        throw "Legacy I2/I2B/I2C current-state reconciliation is missing: $requiredLegacyCurrentStateText"
+    }
+}
+Write-Host 'LEGACY_REAL_GATE_CURRENT_STATE_RECONCILED=PASS'
 $i2fClosureDocumentation = @(
     Get-Content -LiteralPath $ExecutionPlan -Raw
     Get-Content -LiteralPath $QualificationReadme -Raw

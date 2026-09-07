@@ -26,6 +26,16 @@ I2F_REAL_CLEANUP_ENTRYPOINT = PERMANENTLY_FAIL_CLOSED
 I2F_RERUN = FORBIDDEN
 I2F_CLEANUP_RERUN = FORBIDDEN
 I2F_RESULT = PASS_WITH_NEGATIVE_COUNTER_ACCESS_RESULT
+I2_BROKER_SETUP_REAL_ENTRYPOINT = PERMANENTLY_FAIL_CLOSED
+I2_POWER_SAMPLING_CLIENT_REAL_ENTRYPOINT = PERMANENTLY_FAIL_CLOSED
+I2B_COUNTER_DISCOVERY_REAL_ENTRYPOINT = PERMANENTLY_FAIL_CLOSED
+I2_LEGACY_CLEANUP_REAL_ENTRYPOINT = PERMANENTLY_FAIL_CLOSED
+I2C_SYSTEM_COMPARISON_REAL_ENTRYPOINT = PERMANENTLY_FAIL_CLOSED
+I2C_SYSTEM_CLEANUP_REAL_ENTRYPOINT = PERMANENTLY_FAIL_CLOSED
+I2_LEGACY_RERUN = FORBIDDEN
+I2B_RERUN = FORBIDDEN
+I2C_RERUN = FORBIDDEN
+AMD_QUALIFICATION_EXECUTABLE_ENTRYPOINT_AUDIT = PASS_NO_UNRETIRED_HISTORICAL_REAL_GATE
 I2G_VARIABLE = UNRESOLVED
 I2G_HARNESS = NOT_IMPLEMENTED
 PRODUCTION_ACCOUNT = UNRESOLVED
@@ -83,8 +93,9 @@ command, working directory, environment, registry path, or output path.
 The broker derives the validated AMD CLI and executes exactly `timechart --list`
 with broker-owned stdout/stderr, a bounded timeout, and a kill-on-job-close job.
 It never accepts a command or argv from the client and never starts a power
-timechart. The prepared standard-user handoff is
-`run-standard-user-amd-counter-discovery.ps1`; it is not run by automated tests.
+timechart. The historical standard-user handoff is
+`run-standard-user-amd-counter-discovery.ps1`; its real wrapper is retired and
+is not run by automated tests.
 
 ## Synthetic qualification
 
@@ -97,11 +108,12 @@ pwsh -NoProfile -File .\tools\amd-privilege-qualification\test-qualification.ps1
 This command does not register a service, request elevation, access the AMD
 installation, or run AMD uProf.
 
-## Historical I2 power-sampling qualification path
+## HISTORICAL / CONSUMED / DO NOT RUN — I2 power-sampling qualification path
 
 The following path is retained as historical I2 qualification infrastructure.
 It consumed the one bounded real power-sampling gate and is not the I2B
-counter-discovery handoff:
+counter-discovery handoff. Its real setup, client, and cleanup wrappers now
+fail closed before machine access; do not run the historical commands below.
 
 `run-standard-user-amd-privilege-client.ps1` = **I2 POWER-SAMPLING CLIENT**
 **NOT THE I2B COUNTER-DISCOVERY HANDOFF**; **DO NOT RUN DURING I2B
@@ -123,20 +135,22 @@ DIFFERENTIAL**.
    binaries, drivers, registry installation state, and production data are not
    touched.
 
-The real run is at most one bounded `LocalService + Service SID + Session 0`
+The historical run was at most one bounded `LocalService + Service SID + Session 0`
 AMD package-power session. Cancellation is qualified synthetically and is not
 performed against a real AMD runtime.
 
 ## HISTORICAL / CONSUMED / DO NOT RUN — I2B human handoff: non-sampling counter discovery
 
-This is the only authorized LocalService client sequence for the I2B
+This is the historical LocalService client sequence for the I2B
 differential. It is **NON_SAMPLING**, sends only
 `GetAmdCounterAvailability`, and lets the broker derive the fixed
 `AMDuProfCLI.exe timechart --list` command. It does not request a power event,
 duration, interval, or CSV session.
 
-Run these commands manually, exactly once per stated shell, only after human
-authorization. They are not executed by this repair or by synthetic tests:
+The commands below are retained only as historical execution shape. Do not run
+them: the setup, counter client, and cleanup wrappers now reject real
+execution before configuration/evidence reads or machine access. They are not
+executed by this repair or by synthetic tests:
 
 ```powershell
 # Administrator x64 PowerShell — setup only; starts no AMD runtime itself

@@ -28,6 +28,10 @@ I2F_AUTHORITATIVE_SCOPE = f68bf4d3d36547a0ba753cff489bb6eb
 I2F_REAL_EXECUTION_ENTRYPOINT = PERMANENTLY_FAIL_CLOSED
 I2F_REAL_CLEANUP_ENTRYPOINT = PERMANENTLY_FAIL_CLOSED
 I2F_FULL_ROLLBACK = REAL_PASS
+I2_LEGACY_REAL_ENTRYPOINTS = RETIRED
+I2B_REAL_ENTRYPOINTS = RETIRED
+I2C_REAL_ENTRYPOINTS = RETIRED
+AMD_QUALIFICATION_EXECUTABLE_ENTRYPOINT_AUDIT = PASS_NO_UNRETIRED_HISTORICAL_REAL_GATE
 LOCAL_SERVICE_POWER_COUNTER_ACCESS = UNAVAILABLE
 SYSTEM_POWER_COUNTER_ACCESS = AVAILABLE / HISTORICAL REAL DIFFERENTIAL
 SECURITY_CONTEXT_DIFFERENTIAL = REAL_CONFIRMED
@@ -50,10 +54,10 @@ This task must not modify that evidence and must not repeat its AMD runtime.
 `AMD-PRIVILEGE-I2` has now consumed exactly one bounded real LocalService
 qualification run. The broker, secure IPC, identity, CLI launch, and cleanup
 boundaries passed, but AMD uProf reported that no counters were available from
-the LocalService context. `AMD-PRIVILEGE-I2B` prepared a non-sampling
-`timechart --list` differential, and `AMD-PRIVILEGE-I2C` now prepares a
-distinct SYSTEM-only comparison harness. Neither selects LocalSystem, alters
-AMD permissions, or admits a provider.
+the LocalService context. The I2B non-sampling `timechart --list` differential
+and I2C SYSTEM-only comparison are historical real evidence, and all of their
+legacy setup, client, and cleanup wrappers are now permanently retired. None
+selects LocalSystem, alters AMD permissions, or admits a provider.
 
 ## HISTORICAL / SUPERSEDED I2E PRE-CONTROL INCIDENT
 

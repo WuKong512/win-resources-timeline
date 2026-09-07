@@ -1,16 +1,53 @@
 #requires -Version 5.1
 [CmdletBinding()]
-param()
+param(
+    [switch]$ExecuteAuthorizedCleanup,
+    [switch]$LibraryOnly,
+    [switch]$InternalTestOnlyPreMutationSentinel
+)
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
+. (Join-Path $PSScriptRoot 'legacy-real-gate-contract.ps1')
 . (Join-Path $PSScriptRoot 'cleanup-state-contract.ps1')
 
 $ServiceName = 'ResourceTimelineAmdSystemCounterQualification'
 $ArtifactPath = Join-Path $PSScriptRoot 'target\release\amd-privilege-qualification.exe'
 $QualificationRoot = Join-Path $env:ProgramData 'ResourceTimeline\qualification\amd-system-counter'
 $ConfigPath = Join-Path $QualificationRoot 'SYSTEM-CONFIG.json'
+
+if ($LibraryOnly) {
+    return
+}
+
+if ($InternalTestOnlyPreMutationSentinel) {
+    if (-not $ExecuteAuthorizedCleanup -or $env:AMD_LEGACY_OFFLINE_TEST_SENTINEL -cne 'true') {
+        throw 'The I2C SYSTEM cleanup offline sentinel requires -ExecuteAuthorizedCleanup and AMD_LEGACY_OFFLINE_TEST_SENTINEL=true.'
+    }
+    Write-Host 'I2C_SYSTEM_CLEANUP_AUTHORIZED_PRE_MUTATION_SENTINEL=true'
+    return
+}
+
+if (-not $ExecuteAuthorizedCleanup) {
+    [ordered]@{
+        qualification_only = $true
+        historical_gate = 'I2C_SYSTEM_CLEANUP'
+        service_name = $ServiceName
+        real_gate_consumed = $I2LegacyRealGateConsumed
+        real_execution_allowed = $I2cSystemCleanupAllowed
+        historical_cleanup = 'IMMUTABLE'
+        status = $I2LegacyStatus
+    } | ConvertTo-Json -Depth 10
+    Write-Host 'I2C_SYSTEM_CLEANUP_PLAN_ONLY=true'
+    Write-Host 'I2C_RERUN=FORBIDDEN'
+    Write-Host 'No service, process, AMD, or cleanup-evidence mutation was performed.'
+    return
+}
+
+if ($I2LegacyRealGateConsumed -or -not $I2cSystemCleanupAllowed) {
+    throw 'I2C_SYSTEM_CLEANUP_RERUN_FORBIDDEN: the historical I2C SYSTEM cleanup gate is consumed. Historical cleanup evidence is immutable; use a fresh explicitly authorized experiment harness.'
+}
 
 $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
 $principal = [Security.Principal.WindowsPrincipal]::new($identity)
