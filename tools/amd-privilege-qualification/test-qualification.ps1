@@ -1079,7 +1079,6 @@ foreach ($requiredI2fSetupContract in @(
         'I2F_PLAN_ONLY=true',
         '--service-profile-enable-counter-service',
         'I2F-AMD-CLI-PREFLIGHT.json',
-        'I2F-ROLLBACK.json',
         'Add-I2eExactServiceProfileRight',
         'Remove-I2eExactServiceProfileRight',
         'SeSystemProfilePrivilege',
@@ -1088,6 +1087,9 @@ foreach ($requiredI2fSetupContract in @(
     if ($i2fSetupSource -notmatch $requiredI2fSetupContract) {
         throw "I2F setup is missing: $requiredI2fSetupContract"
     }
+}
+if ($i2fContractSource -notmatch 'I2F-ROLLBACK\.json') {
+    throw 'I2F shared cleanup contract must persist I2F-ROLLBACK.json.'
 }
 foreach ($requiredI2fRustContract in @(
         'I2F-TOKEN-BEFORE-ENABLE.json',
@@ -1113,20 +1115,42 @@ if ($i2fSetupSource -notmatch '\$identityCheck\s*=\s*Compare-I2fCurrentAmdIdenti
     $i2fSetupSource.IndexOf('$identityCheck = Compare-I2fCurrentAmdIdentity') -gt $i2fSetupSource.IndexOf('Add-I2eExactServiceProfileRight')) {
     throw 'I2F AMD identity validation must precede the exact LSA assignment.'
 }
-if ($i2fSetupSource.IndexOf('I2F-TOKEN-BEFORE-ENABLE.json') -gt
-    $i2fSetupSource.IndexOf('Add-I2eExactServiceProfileRight')) {
-    throw 'I2F pre-enable token evidence must precede LSA assignment.'
+$i2fRustOrdering = @(
+    $i2fRustSource.IndexOf('I2F-TOKEN-BEFORE-ENABLE.json'),
+    $i2fRustSource.IndexOf('enable_service_profile_privilege()'),
+    $i2fRustSource.IndexOf('I2F-TOKEN-AFTER-ENABLE.json'),
+    $i2fRustSource.IndexOf('I2F-TOKEN-ENABLE-DELTA.json'),
+    $i2fRustSource.IndexOf('validate_i2f_amd_cli_identity'),
+    $i2fRustSource.IndexOf('execute_counter_discovery_at_with_prefix')
+)
+if (@($i2fRustOrdering | Where-Object { $_ -lt 0 }).Count -ne 0 -or
+    -not (($i2fRustOrdering[0] -lt $i2fRustOrdering[1]) -and
+        ($i2fRustOrdering[1] -lt $i2fRustOrdering[2]) -and
+        ($i2fRustOrdering[2] -lt $i2fRustOrdering[3]) -and
+        ($i2fRustOrdering[3] -lt $i2fRustOrdering[4]) -and
+        ($i2fRustOrdering[4] -lt $i2fRustOrdering[5]))) {
+    throw 'I2F Rust pre-enable/adjust/post-enable/delta/identity/AMD ordering is invalid.'
 }
+Write-Host 'I2F_RUST_PRE_ENABLE_TO_AMD_ORDER=PASS'
 foreach ($i2fScriptSource in @($i2fSetupSource, $i2fCleanupSource)) {
     if ($i2fScriptSource -match '(?im)^\s*\$(?:pid|Pid|PID)\s*=') {
         throw 'I2F scripts must not assign PowerShell automatic variable PID.'
     }
 }
 if ($i2fCleanupSource -notmatch 'I2F-AMD-CLI-PREFLIGHT.json' -or
-    $i2fCleanupSource -notmatch 'Assert-I2fNoOwnedProcesses' -or
+    $i2fCleanupSource -notmatch 'Invoke-I2fCleanup' -or
+    $i2fContractSource -notmatch 'Get-I2fOwnedProcessEvidence' -or
     $i2fCleanupSource -match 'D:\\apps\\AMDuProf\\bin\\AMDuProfCLI\.exe' -or
     $i2fCleanupSource -match 'AllRights\s*=\s*\$true') {
     throw 'I2F cleanup must use pinned AMD identity and exact-right rollback.'
+}
+if ($i2fContractSource -match '(?im)owned_(?:broker|amd_cli)_process_count_after_stop\s*=\s*0') {
+    throw 'I2F cleanup state must not initialize unverified process evidence to zero.'
+}
+$teardownGateIndex = $i2fContractSource.IndexOf('$prePolicyDecision')
+$removeRightIndex = $i2fContractSource.IndexOf('Remove-I2eExactServiceProfileRight')
+if ($teardownGateIndex -lt 0 -or $removeRightIndex -lt 0 -or $removeRightIndex -le $teardownGateIndex) {
+    throw 'I2F exact-right removal is not statically after the effective token teardown gate.'
 }
 . $I2fContract
 $i2fBeforeFixture = [pscustomobject]@{
@@ -1168,6 +1192,132 @@ Write-Host 'I2F_EXACT_TOKEN_DELTA=PASS'
 Write-Host 'I2F_AMD_AFTER_POST_ENABLE_GATE=PASS'
 Write-Host 'I2F_NO_ARBITRARY_PRIVILEGE_SURFACE=PASS'
 Write-Host 'I2F_ROLLBACK_EXACT_RIGHT=PASS'
+
+function Get-I2fCleanupFixtureDecision {
+    param(
+        [Parameter(Mandatory = $true)][bool]$StopVerified,
+        [Parameter(Mandatory = $true)][bool]$ProcessCheckAttempted,
+        [Parameter(Mandatory = $true)][bool]$ProcessCheckVerified,
+        [AllowNull()][Nullable[Int64]]$BrokerCount,
+        [AllowNull()][Nullable[Int64]]$AmdCliCount,
+        [Parameter(Mandatory = $true)][bool]$RightDirectPresent,
+        [Parameter(Mandatory = $true)][bool]$RightAssignmentPresent,
+        [Parameter(Mandatory = $true)][bool]$RightReadbackVerified,
+        [Parameter(Mandatory = $true)][bool]$PolicyRollbackVerified,
+        [Parameter(Mandatory = $true)][bool]$ServiceRegistrationPresent,
+        [Parameter(Mandatory = $true)][bool]$PolicyRollbackPreviouslyVerified
+    )
+    Get-I2fCleanupDecision `
+        -ServicePresent $true -ServiceState 'Stopped' -ServiceProcessId 0 `
+        -StopAttempted $true -StopVerified $StopVerified `
+        -ProcessCheckAttempted $ProcessCheckAttempted -ProcessCheckVerified $ProcessCheckVerified `
+        -BrokerCount $BrokerCount -AmdCliCount $AmdCliCount `
+        -RightDirectPresent $RightDirectPresent -RightAssignmentPresent $RightAssignmentPresent `
+        -RightReadbackVerified $RightReadbackVerified -PolicyRollbackVerified $PolicyRollbackVerified `
+        -ServiceRegistrationPresent $ServiceRegistrationPresent `
+        -PolicyRollbackPreviouslyVerified $PolicyRollbackPreviouslyVerified
+}
+
+$i2fStopFailure = Get-I2fCleanupFixtureDecision -StopVerified $false -ProcessCheckAttempted $false `
+    -ProcessCheckVerified $false -BrokerCount $null -AmdCliCount $null `
+    -RightDirectPresent $true -RightAssignmentPresent $false -RightReadbackVerified $false `
+    -PolicyRollbackVerified $false -ServiceRegistrationPresent $true -PolicyRollbackPreviouslyVerified $false
+if ($i2fStopFailure.effective_token_teardown_verified -or $i2fStopFailure.policy_remove_allowed -or
+    $i2fStopFailure.service_delete_allowed) {
+    throw 'I2F stop-failure fixture did not fail closed before policy/service mutation.'
+}
+
+$i2fProcessCheckFailure = Get-I2fCleanupFixtureDecision -StopVerified $true -ProcessCheckAttempted $true `
+    -ProcessCheckVerified $false -BrokerCount $null -AmdCliCount $null `
+    -RightDirectPresent $true -RightAssignmentPresent $false -RightReadbackVerified $false `
+    -PolicyRollbackVerified $false -ServiceRegistrationPresent $true -PolicyRollbackPreviouslyVerified $false
+if ($i2fProcessCheckFailure.effective_token_teardown_verified -or $i2fProcessCheckFailure.policy_remove_allowed -or
+    $null -ne $i2fProcessCheckFailure.broker_count -or $null -ne $i2fProcessCheckFailure.amd_cli_count) {
+    throw 'I2F failed process-verification fixture converted unknown counts into verified absence.'
+}
+
+$i2fProcessPresent = Get-I2fCleanupFixtureDecision -StopVerified $true -ProcessCheckAttempted $true `
+    -ProcessCheckVerified $true -BrokerCount 1 -AmdCliCount 0 `
+    -RightDirectPresent $true -RightAssignmentPresent $false -RightReadbackVerified $true `
+    -PolicyRollbackVerified $false -ServiceRegistrationPresent $true -PolicyRollbackPreviouslyVerified $false
+if ($i2fProcessPresent.effective_token_teardown_verified -or $i2fProcessPresent.policy_remove_allowed) {
+    throw 'I2F process-present fixture allowed policy rollback.'
+}
+
+$i2fRightPresent = Get-I2fCleanupFixtureDecision -StopVerified $true -ProcessCheckAttempted $true `
+    -ProcessCheckVerified $true -BrokerCount 0 -AmdCliCount 0 `
+    -RightDirectPresent $true -RightAssignmentPresent $true -RightReadbackVerified $true `
+    -PolicyRollbackVerified $false -ServiceRegistrationPresent $true -PolicyRollbackPreviouslyVerified $false
+if (-not $i2fRightPresent.effective_token_teardown_verified -or
+    -not $i2fRightPresent.policy_remove_allowed -or -not $i2fRightPresent.policy_remove_required) {
+    throw 'I2F right-present fixture did not permit exactly one post-teardown removal.'
+}
+
+$i2fRightAbsent = Get-I2fCleanupFixtureDecision -StopVerified $true -ProcessCheckAttempted $true `
+    -ProcessCheckVerified $true -BrokerCount 0 -AmdCliCount 0 `
+    -RightDirectPresent $false -RightAssignmentPresent $false -RightReadbackVerified $true `
+    -PolicyRollbackVerified $true -ServiceRegistrationPresent $true -PolicyRollbackPreviouslyVerified $false
+if (-not $i2fRightAbsent.effective_token_teardown_verified -or
+    $i2fRightAbsent.policy_remove_required -or -not $i2fRightAbsent.service_delete_allowed) {
+    throw 'I2F already-absent-right fixture did not skip LSA removal safely.'
+}
+
+$i2fStateDrift = Get-I2fCleanupFixtureDecision -StopVerified $true -ProcessCheckAttempted $true `
+    -ProcessCheckVerified $true -BrokerCount 0 -AmdCliCount 0 `
+    -RightDirectPresent $true -RightAssignmentPresent $false -RightReadbackVerified $true `
+    -PolicyRollbackVerified $true -ServiceRegistrationPresent $true -PolicyRollbackPreviouslyVerified $true
+if (-not $i2fStateDrift.policy_state_drift -or $i2fStateDrift.policy_remove_allowed) {
+    throw 'I2F policy-state drift fixture did not fail closed.'
+}
+
+$i2fDeleteFailure = Get-I2fCleanupFixtureDecision -StopVerified $true -ProcessCheckAttempted $true `
+    -ProcessCheckVerified $true -BrokerCount 0 -AmdCliCount 0 `
+    -RightDirectPresent $false -RightAssignmentPresent $false -RightReadbackVerified $true `
+    -PolicyRollbackVerified $true -ServiceRegistrationPresent $true -PolicyRollbackPreviouslyVerified $false
+if (-not $i2fDeleteFailure.effective_token_teardown_verified -or
+    $i2fDeleteFailure.full_rollback_possible) {
+    throw 'I2F service-deletion failure fixture incorrectly reported full rollback.'
+}
+
+$i2fObservedZero = Get-I2fCleanupFixtureDecision -StopVerified $true -ProcessCheckAttempted $true `
+    -ProcessCheckVerified $true -BrokerCount 0 -AmdCliCount 0 `
+    -RightDirectPresent $false -RightAssignmentPresent $false -RightReadbackVerified $true `
+    -PolicyRollbackVerified $true -ServiceRegistrationPresent $false -PolicyRollbackPreviouslyVerified $false
+if (-not $i2fObservedZero.effective_token_teardown_verified -or
+    $i2fObservedZero.broker_count -ne 0 -or $i2fObservedZero.amd_cli_count -ne 0) {
+    throw 'I2F observed-zero process fixture did not remain verified zero.'
+}
+
+$i2fFixtureRoot = Join-Path $EvidenceRoot 'i2f-rollback-failure-fixtures'
+New-Item -ItemType Directory -Force -Path $i2fFixtureRoot | Out-Null
+$i2fErrorState = New-I2fCleanupState
+$i2fErrorState.cleanup_required = $true
+$i2fErrorState.cleanup_phase = 'POLICY_ROLLBACK'
+$i2fErrorState.policy_readback_error = 'synthetic LSA readback failure'
+$i2fErrorState.cleanup_error = 'synthetic cleanup failure'
+$i2fErrorState.full_rollback_verified = $false
+$i2fErrorState.rollback_verified = $false
+$i2fErrorOnlyRightState = [pscustomobject]@{ error = 'synthetic right-state failure' }
+$i2fEvidenceResult = Write-I2fRollbackEvidence -OutputRoot $i2fFixtureRoot `
+    -RightAddedByExperiment $true -State $i2fErrorState -RightState $i2fErrorOnlyRightState
+if (-not $i2fEvidenceResult.success -or -not (Test-Path -LiteralPath $i2fEvidenceResult.path -PathType Leaf)) {
+    throw 'I2F rollback evidence writer failed for an error-only right-state object.'
+}
+$i2fEvidenceRoundTrip = Get-Content -LiteralPath $i2fEvidenceResult.path -Raw | ConvertFrom-Json
+if ($null -ne $i2fEvidenceRoundTrip.direct_verification -or
+    $null -ne $i2fEvidenceRoundTrip.assignment_verification -or
+    $i2fEvidenceRoundTrip.owned_broker_process_count_after_stop -ne $null -or
+    $i2fEvidenceRoundTrip.lsa_remove_account_rights_calls -ne 0 -or
+    [bool]$i2fEvidenceRoundTrip.full_rollback_verified) {
+    throw 'I2F partial rollback evidence did not preserve nullable/failed state.'
+}
+Write-Host 'I2F_STOP_FIRST_ROLLBACK=PASS_STATIC'
+Write-Host 'I2F_PROCESS_EVIDENCE_UNKNOWN_NOT_ZERO=PASS'
+Write-Host 'I2F_POLICY_REMOVE_AFTER_TOKEN_TEARDOWN_ONLY=PASS_STATIC'
+Write-Host 'I2F_PARTIAL_FAILURE_ROLLBACK_EVIDENCE=PASS'
+Write-Host 'I2F_ERROR_ONLY_RIGHT_STATE_SERIALIZATION=PASS'
+Write-Host 'I2F_SERVICE_DELETE_AFTER_POLICY_AND_TOKEN_TEARDOWN_ONLY=PASS_STATIC'
+Write-Host 'I2F_STANDALONE_CLEANUP_IDEMPOTENT=PASS_STATIC'
 
 if (-not (Test-Path -LiteralPath $I2eFinalFixture -PathType Leaf)) {
     throw 'I2E token-materialization final closure fixture is missing.'

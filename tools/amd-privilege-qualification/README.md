@@ -554,6 +554,34 @@ I2F_ARTIFACT_SHA256 = F272E2D5E74A1F8CC7EFABF01A64BFF1ACE4A244BF6199530D30F9F3F9
 I2F_ARTIFACT_ARCHITECTURE = x64
 I2F_STATUS = PREPARED / NOT_EXECUTED
 NEXT_GATE = HUMAN_I2F_SELF_ENABLE_QUALIFICATION_REVIEW
+
+## I2F PRE-RUN ROLLBACK SAFETY REVIEW CLOSURE
+
+I2F_ROLLBACK_STOP_FIRST = PASS_STATIC
+I2F_PROCESS_EVIDENCE_UNKNOWN_NOT_ZERO = PASS
+I2F_POLICY_REMOVE_AFTER_TOKEN_TEARDOWN_ONLY = PASS_STATIC
+I2F_ROLLBACK_PARTIAL_FAILURE_EVIDENCE = PASS
+I2F_STANDALONE_CLEANUP_IDEMPOTENT = PASS_STATIC
+I2F_RUST_PRE_ENABLE_TO_AMD_ORDER = PASS
+I2F_HUMAN_RUNTIME = NOT_EXECUTED
+I2F_REAL_LSA_MUTATION = 0
+I2F_REAL_SERVICE_RUNTIME = 0
+I2F_REAL_TOKEN_ADJUSTMENT = 0
+I2F_REAL_AMD_RUNTIME = 0
+
+The I2F cleanup path stops the qualification service first, verifies Stopped/PID0
+and exact pinned owned-process absence, then performs pre-remove dual LSA
+readback. A failed stop or failed process enumeration leaves policy rollback
+closed and records nullable process counts; unknown is never represented as zero.
+The rollback evidence writer accepts partial/error-only state so cleanup failures
+remain durable. Service registration removal is allowed only after effective
+token teardown and exact policy rollback have both been verified.
+
+I2F_ARTIFACT_SHA256 = F272E2D5E74A1F8CC7EFABF01A64BFF1ACE4A244BF6199530D30F9F3F90ED10D
+I2F_ARTIFACT_CHANGED = false
+PRODUCTION_ACCOUNT = UNRESOLVED
+LOCAL_SYSTEM_PRODUCTION_SELECTION = NOT_AUTHORIZED
+NEXT_GATE = HUMAN_I2F_SELF_ENABLE_QUALIFICATION_REVIEW
 ```
 
 The future wrapper is plan-only unless explicitly authorized:

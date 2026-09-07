@@ -20,13 +20,20 @@ function Get-I2fCleanupRoots {
         Where-Object { $_.Name -match '^[0-9a-f]{32}$' })
 }
 
+function Get-I2fServiceSid {
+    $sid = ([Security.Principal.NTAccount]::new($ServiceSidAccount)).Translate(
+        [Security.Principal.SecurityIdentifier]).Value
+    if ($sid -notmatch '^S-1-5-80-') { throw "Unexpected I2F Service SID: $sid" }
+    $sid
+}
+
 if ($LibraryOnly) { return }
 
 $null = Assert-I2eAdministrator
 $roots = Get-I2fCleanupRoots
 if (-not $ExecuteAuthorizedCleanup) {
     [ordered]@{
-        schema = 'amd-i2f-cleanup-plan/v1'
+        schema = 'amd-i2f-cleanup-plan/v2'
         qualification_only = $true
         service_name = $I2fServiceName
         right = $I2fRequiredRight
@@ -34,81 +41,64 @@ if (-not $ExecuteAuthorizedCleanup) {
         candidate_evidence_roots = @($roots.FullName)
         fixed_cli_arguments = $I2fFixedArguments
         sampling = $false
+        cleanup_order = @(
+            'stop service',
+            'verify Stopped/PID0 or absence',
+            'verify pinned owned process absence',
+            'pre-remove dual LSA readback',
+            'remove exact right only when present',
+            'verify dual LSA absence',
+            'remove service registration',
+            'verify full rollback'
+        )
     } | ConvertTo-Json -Depth 20
     Write-Host 'I2F_CLEANUP_PLAN_ONLY=true'
     Write-Host 'No service, LSA mutation, or AMD runtime was performed.'
     return
 }
 
-$service = Get-I2eServiceSnapshot
-if ($service.present) {
-    if ($service.state -ne 'Stopped' -or $service.process_id -ne 0) {
-        $stopEvidence = Stop-I2eService
-    } else {
-        $stopEvidence = [pscustomobject]@{
-            stop_exit_code = 0
-            state = 'Stopped'
-            process_id = 0L
-            disposition = 'ALREADY_STOPPED_PID0'
-        }
-    }
-} else {
-    $stopEvidence = [pscustomobject]@{
-        stop_exit_code = 1062
-        state = 'ABSENT'
-        process_id = 0L
-        disposition = 'SERVICE_ABSENT'
-    }
+$root = $roots | Sort-Object LastWriteTime -Descending | Select-Object -First 1
+if ($null -eq $root) {
+    throw "No I2F evidence root exists under $QualificationRoot."
 }
 
-$root = $roots | Sort-Object LastWriteTime -Descending | Select-Object -First 1
-$serviceSid = $null
-$rightState = $null
-$policyRemoveAttempted = $false
-$policyRollbackVerified = $false
-$fullRollbackVerified = $false
-if ($null -ne $root) {
-    $configPath = Join-Path $root.FullName 'I2F-CONFIG.json'
-    if (Test-Path -LiteralPath $configPath -PathType Leaf) {
-        $config = Read-I2fJson -Path $configPath
-        $serviceSid = [string]$config.service_sid
-    }
+$preflightPath = Join-Path $root.FullName 'I2F-AMD-CLI-PREFLIGHT.json'
+if (-not (Test-Path -LiteralPath $preflightPath -PathType Leaf)) {
+    throw 'I2F cleanup refuses to infer AMD CLI ownership without pinned preflight evidence.'
 }
+$preflight = Read-I2fJson -Path $preflightPath
+$amdPath = [string](Get-I2ePropertyValue -Object $preflight.current_identity -Name 'path')
+if ([string]::IsNullOrWhiteSpace($amdPath)) {
+    throw 'I2F pinned AMD CLI preflight has no path.'
+}
+
+$configPath = Join-Path $root.FullName 'I2F-CONFIG.json'
+$serviceSid = $null
+if (Test-Path -LiteralPath $configPath -PathType Leaf) {
+    $config = Read-I2fJson -Path $configPath
+    $serviceSid = [string](Get-I2ePropertyValue -Object $config -Name 'service_sid')
+}
+$service = Get-I2eServiceSnapshot
 if ([string]::IsNullOrWhiteSpace($serviceSid) -and $service.present) {
     $serviceSid = Get-I2fServiceSid
 }
-if (-not [string]::IsNullOrWhiteSpace($serviceSid)) {
-    $rightState = Get-I2fRightState -ServiceSid $serviceSid
-    if ($rightState.direct_present -or $rightState.assignment_present) {
-        $policyRemoveAttempted = $true
-        Remove-I2eExactServiceProfileRight -ServiceSid $serviceSid
-    }
-    $rightState = Get-I2fRightState -ServiceSid $serviceSid
-    $policyRollbackVerified = -not $rightState.direct_present -and -not $rightState.assignment_present
+
+# I2F-LSA-AFTER-ADD is the immutable local evidence that the exact right was
+# assigned by the experiment. Its absence means cleanup must not invent a
+# policy mutation merely because this is the standalone cleanup entry point.
+$rightAdded = Test-Path -LiteralPath (Join-Path $root.FullName 'I2F-LSA-AFTER-ADD.json') -PathType Leaf
+$cleanupResult = Invoke-I2fCleanup -OutputRoot $root.FullName `
+    -ServiceCreated ([bool]$service.present) -RightAdded $rightAdded `
+    -ServiceSid $serviceSid -AmdCliPath $amdPath -PrimaryExperimentError $null
+
+$state = $cleanupResult.state
+Write-Host "I2F_POLICY_REMOVE_ATTEMPTED=$($state.policy_remove_attempted)"
+Write-Host "I2F_LSA_REMOVE_CALLS=$($state.lsa_remove_account_rights_calls)"
+Write-Host "I2F_EFFECTIVE_TOKEN_TEARDOWN_VERIFIED=$($state.effective_token_teardown_verified)"
+Write-Host "I2F_FULL_ROLLBACK_VERIFIED=$($state.full_rollback_verified)"
+if ($cleanupResult.evidence_write_error) {
+    throw "I2F rollback evidence write failed: $($cleanupResult.evidence_write_error)"
 }
-$preflightPath = if ($null -ne $root) { Join-Path $root.FullName 'I2F-AMD-CLI-PREFLIGHT.json' } else { $null }
-$amdPath = if ($null -ne $preflightPath -and (Test-Path -LiteralPath $preflightPath -PathType Leaf)) {
-    [string](Read-I2fJson -Path $preflightPath).current_identity.path
-} else {
-    throw 'I2F cleanup refuses to infer AMD CLI ownership without pinned preflight evidence.'
-}
-$processEvidence = Assert-I2fNoOwnedProcesses -AmdCliPath $amdPath
-$registrationRemoved = $false
-if ((Get-I2eServiceSnapshot).present) {
-    Remove-I2eService
-}
-$registrationRemoved = -not (Get-I2eServiceSnapshot).present
-$effectiveTeardown = ($stopEvidence.state -eq 'Stopped' -and $stopEvidence.process_id -eq 0 -and
-    $processEvidence.owned_broker_process_count -eq 0 -and $processEvidence.amd_cli_process_count -eq 0)
-if ($null -ne $root -and $null -ne $rightState) {
-    $fullRollbackVerified = Write-I2fRollbackEvidence -OutputRoot $root.FullName -RightAdded $true `
-        -PolicyRollbackVerified $policyRollbackVerified `
-        -EffectiveTokenTeardownVerified $effectiveTeardown `
-        -ServiceRegistrationRemoved $registrationRemoved `
-        -StopEvidence $stopEvidence -ProcessEvidence $processEvidence -RightState $rightState
-    Write-Host "I2F_POLICY_REMOVE_ATTEMPTED=$policyRemoveAttempted"
-    Write-Host "I2F_FULL_ROLLBACK_VERIFIED=$fullRollbackVerified"
-}
-if (-not $fullRollbackVerified) {
+if ($state.cleanup_required -and -not $state.full_rollback_verified) {
     throw 'I2F cleanup did not establish full rollback; evidence remains open for human recovery.'
 }

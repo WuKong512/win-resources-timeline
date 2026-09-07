@@ -1282,6 +1282,35 @@ REAL_AMD_RUNTIME_DURING_REPAIR = 0
 FROZEN_QUALIFICATION_ARTIFACT_SHA256 = 871CD20D228BD9510606DE640F516F62C2983B9F4A83C1AA807BA35329C778B9
 ARTIFACT_CHANGED = false
 NEXT_GATE = HUMAN_I2E_TREATMENT_ONLY_RESUME_REVIEW
+
+## AMD-PRIVILEGE-I2F PRE-RUN REVIEW CLOSURE
+
+I2F_ROLLBACK_STOP_FIRST = PASS_STATIC
+I2F_PROCESS_EVIDENCE_UNKNOWN_NOT_ZERO = PASS
+I2F_POLICY_REMOVE_AFTER_TOKEN_TEARDOWN_ONLY = PASS_STATIC
+I2F_ROLLBACK_PARTIAL_FAILURE_EVIDENCE = PASS
+I2F_STANDALONE_CLEANUP_IDEMPOTENT = PASS_STATIC
+I2F_RUST_PRE_ENABLE_TO_AMD_ORDER = PASS
+I2F_HUMAN_RUNTIME = NOT_EXECUTED
+I2F_REAL_LSA_MUTATION = 0
+I2F_REAL_SERVICE_RUNTIME = 0
+I2F_REAL_TOKEN_ADJUSTMENT = 0
+I2F_REAL_AMD_RUNTIME = 0
+I2F_ARTIFACT_SHA256 = F272E2D5E74A1F8CC7EFABF01A64BFF1ACE4A244BF6199530D30F9F3F90ED10D
+I2F_ARTIFACT_CHANGED = false
+PRODUCTION_ACCOUNT = UNRESOLVED
+LOCAL_SYSTEM_PRODUCTION_SELECTION = NOT_AUTHORIZED
+
+The I2F rollback contract is stop-first: service teardown and exact pinned
+owned-process absence must be verified before any SeSystemProfilePrivilege
+policy removal. Failed process verification records null counts, never fake zero
+counts. Partial/error-only cleanup state is serializable, exact policy removal
+uses pre-remove and post-remove dual readback, and service deletion waits for
+effective token teardown plus policy rollback. The Rust pre-enable/adjust/
+post-enable/delta/identity/counter-discovery order is audited against
+`src/windows.rs`, not inferred from the PowerShell wrapper.
+
+NEXT_GATE = HUMAN_I2F_SELF_ENABLE_QUALIFICATION_REVIEW
 ```
 
 Before any future treatment mutation, both the treatment-only resume and the

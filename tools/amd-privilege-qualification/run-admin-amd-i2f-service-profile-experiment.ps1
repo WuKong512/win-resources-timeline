@@ -83,15 +83,11 @@ function Get-I2fServiceSid {
 
 function Assert-I2fNoOwnedProcesses {
     param([Parameter(Mandatory = $true)][string]$AmdCliPath)
-    $brokerCount = @(Get-I2eOwnedBrokerProcesses).Count
-    $amdCount = @(Get-I2eOwnedAmdProcesses -ExpectedAmdCliPath $AmdCliPath).Count
-    if ($brokerCount -ne 0 -or $amdCount -ne 0) {
-        throw "I2F owned-process gate failed; broker=$brokerCount amd_cli=$amdCount"
+    $evidence = Get-I2fOwnedProcessEvidence -BrokerArtifactPath $ArtifactPath -AmdCliPath $AmdCliPath
+    if ($evidence.owned_broker_process_count -ne 0 -or $evidence.amd_cli_process_count -ne 0) {
+        throw "I2F owned-process gate failed; broker=$($evidence.owned_broker_process_count) amd_cli=$($evidence.amd_cli_process_count)"
     }
-    [pscustomobject]@{
-        owned_broker_process_count = $brokerCount
-        amd_cli_process_count = $amdCount
-    }
+    $evidence
 }
 
 function Get-I2fRightState {
@@ -118,6 +114,259 @@ function Assert-I2fRightAbsent {
     $state
 }
 
+function Add-I2fCleanupError {
+    param([Parameter(Mandatory = $true)]$State, [Parameter(Mandatory = $true)][string]$Message)
+    $existing = [string](Get-I2fPropertyValue -Object $State -Name 'cleanup_error' -Default '')
+    $State.cleanup_error = if ([string]::IsNullOrWhiteSpace($existing)) {
+        $Message
+    } else {
+        "{0}`n{1}" -f $existing, $Message
+    }
+}
+
+function Get-I2fSafeServiceSnapshot {
+    try {
+        Get-I2eServiceSnapshot
+    } catch {
+        [pscustomobject]@{
+            present = $null
+            state = 'UNKNOWN'
+            process_id = $null
+            start_name = $null
+            error = $_.Exception.Message
+        }
+    }
+}
+
+function Invoke-I2fCleanup {
+    param(
+        [Parameter(Mandatory = $true)][string]$OutputRoot,
+        [Parameter(Mandatory = $true)][bool]$ServiceCreated,
+        [Parameter(Mandatory = $true)][bool]$RightAdded,
+        [AllowNull()][string]$ServiceSid,
+        [Parameter(Mandatory = $true)][string]$AmdCliPath,
+        [AllowNull()][string]$PrimaryExperimentError
+    )
+
+    $state = New-I2fCleanupState
+    $state.cleanup_required = $ServiceCreated -or $RightAdded
+    $state.primary_experiment_error = $PrimaryExperimentError
+    $rightState = $null
+
+    if (-not $state.cleanup_required) {
+        $state.cleanup_phase = 'NO_MUTATION_REQUIRED'
+        $state.policy_rollback_verified = $true
+        $state.policy_rollback_state_source = 'NO_RIGHT_ADDED'
+        $state.service_registration_removed = $true
+        $state.full_rollback_verified = $false
+        $state.rollback_verified = $false
+        $evidence = Write-I2fRollbackEvidence -OutputRoot $OutputRoot `
+            -RightAddedByExperiment $RightAdded -State $state -RightState $rightState
+        return [pscustomobject]@{
+            state = $state
+            right_state = $rightState
+            evidence = $evidence
+            evidence_write_error = if ($evidence.success) { $null } else { $evidence.error }
+        }
+    }
+
+    $state.cleanup_phase = 'SERVICE_STOP'
+    $serviceSnapshot = Get-I2fSafeServiceSnapshot
+    if ($ServiceCreated) {
+        $state.service_stop_attempted = $true
+        try { $null = Stop-I2eService } catch { Add-I2fCleanupError -State $state -Message $_.Exception.Message }
+        $serviceSnapshot = Get-I2fSafeServiceSnapshot
+        if ($null -eq $serviceSnapshot.present) {
+            $state.service_stop_verified = $false
+            $state.service_state_after_stop = 'UNKNOWN'
+            $state.service_pid_after_stop = $null
+        } else {
+            $state.service_state_after_stop = if ($serviceSnapshot.present) { [string]$serviceSnapshot.state } else { 'ABSENT' }
+            $state.service_pid_after_stop = if ($serviceSnapshot.present) { [int64]$serviceSnapshot.process_id } else { 0L }
+            $state.service_stop_verified = (-not $serviceSnapshot.present) -or
+                ($serviceSnapshot.state -eq 'Stopped' -and $serviceSnapshot.process_id -eq 0)
+        }
+        if (-not $state.service_stop_verified) {
+            if ([string]::IsNullOrWhiteSpace([string]$state.cleanup_error)) {
+                Add-I2fCleanupError -State $state -Message 'Service stop was not verified as Stopped/PID0.'
+            }
+            $state.cleanup_phase = 'SERVICE_STOP'
+            $evidence = Write-I2fRollbackEvidence -OutputRoot $OutputRoot `
+                -RightAddedByExperiment $RightAdded -State $state -RightState $rightState
+            return [pscustomobject]@{
+                state = $state
+                right_state = $rightState
+                evidence = $evidence
+                evidence_write_error = if ($evidence.success) { $null } else { $evidence.error }
+            }
+        }
+    } else {
+        $state.service_state_after_stop = if ($null -eq $serviceSnapshot.present) { 'UNKNOWN' } elseif ($serviceSnapshot.present) { [string]$serviceSnapshot.state } else { 'ABSENT' }
+        $state.service_pid_after_stop = if ($null -eq $serviceSnapshot.present) { $null } elseif ($serviceSnapshot.present) { [int64]$serviceSnapshot.process_id } else { 0L }
+    }
+
+    $state.cleanup_phase = 'PROCESS_CHECK'
+    $state.owned_process_check_attempted = $true
+    try {
+        $processEvidence = Get-I2fOwnedProcessEvidence -BrokerArtifactPath $ArtifactPath -AmdCliPath $AmdCliPath
+        $state.owned_broker_process_count_after_stop = [int64]$processEvidence.owned_broker_process_count
+        $state.amd_cli_process_count_after_stop = [int64]$processEvidence.amd_cli_process_count
+        $state.owned_process_check_verified = $true
+    } catch {
+        $state.owned_process_check_verified = $false
+        $state.owned_broker_process_count_after_stop = $null
+        $state.amd_cli_process_count_after_stop = $null
+        Add-I2fCleanupError -State $state -Message $_.Exception.Message
+    }
+    $prePolicyDecision = Get-I2fCleanupDecision `
+        -ServicePresent ([bool]$serviceSnapshot.present) `
+        -ServiceState ([string]$state.service_state_after_stop) `
+        -ServiceProcessId $state.service_pid_after_stop `
+        -StopAttempted $state.service_stop_attempted `
+        -StopVerified $state.service_stop_verified `
+        -ProcessCheckAttempted $state.owned_process_check_attempted `
+        -ProcessCheckVerified $state.owned_process_check_verified `
+        -BrokerCount $state.owned_broker_process_count_after_stop `
+        -AmdCliCount $state.amd_cli_process_count_after_stop `
+        -RightDirectPresent $false `
+        -RightAssignmentPresent $false `
+        -RightReadbackVerified $false `
+        -PolicyRollbackVerified $false `
+        -ServiceRegistrationPresent ([bool]$serviceSnapshot.present) `
+        -PolicyRollbackPreviouslyVerified $false
+    $state.effective_token_teardown_verified = $prePolicyDecision.effective_token_teardown_verified
+    if (-not $state.effective_token_teardown_verified) {
+        if ($state.owned_process_check_verified -and
+            (($state.owned_broker_process_count_after_stop -gt 0) -or
+                ($state.amd_cli_process_count_after_stop -gt 0))) {
+            Add-I2fCleanupError -State $state -Message 'Owned qualification or AMD CLI process remains; policy rollback is forbidden.'
+        } elseif ([string]::IsNullOrWhiteSpace([string]$state.cleanup_error)) {
+            Add-I2fCleanupError -State $state -Message 'Effective token teardown could not be verified.'
+        }
+        $state.cleanup_phase = 'PROCESS_CHECK'
+        $evidence = Write-I2fRollbackEvidence -OutputRoot $OutputRoot `
+            -RightAddedByExperiment $RightAdded -State $state -RightState $rightState
+        return [pscustomobject]@{
+            state = $state
+            right_state = $rightState
+            evidence = $evidence
+            evidence_write_error = if ($evidence.success) { $null } else { $evidence.error }
+        }
+    }
+
+    $state.cleanup_phase = 'POLICY_READBACK'
+    if (-not $RightAdded) {
+        $state.policy_rollback_verified = $true
+        $state.policy_rollback_state_source = 'NO_RIGHT_ADDED'
+        $state.policy_remove_skipped_reason = 'NO_RIGHT_ADDED'
+    } elseif ([string]::IsNullOrWhiteSpace($ServiceSid)) {
+        Add-I2fCleanupError -State $state -Message 'Exact Service SID is unavailable; policy rollback is forbidden.'
+    } else {
+        try {
+            $rightState = Get-I2fRightState -ServiceSid $ServiceSid
+            $state.direct_verification = $rightState.direct
+            $state.assignment_verification = $rightState.assigned
+            $state.policy_pre_remove_readback_verified = $true
+            $policyDecision = Get-I2fCleanupDecision `
+                -ServicePresent ([bool]$serviceSnapshot.present) `
+                -ServiceState ([string]$state.service_state_after_stop) `
+                -ServiceProcessId $state.service_pid_after_stop `
+                -StopAttempted $state.service_stop_attempted `
+                -StopVerified $state.service_stop_verified `
+                -ProcessCheckAttempted $state.owned_process_check_attempted `
+                -ProcessCheckVerified $state.owned_process_check_verified `
+                -BrokerCount $state.owned_broker_process_count_after_stop `
+                -AmdCliCount $state.amd_cli_process_count_after_stop `
+                -RightDirectPresent ([bool]$rightState.direct_present) `
+                -RightAssignmentPresent ([bool]$rightState.assignment_present) `
+                -RightReadbackVerified $true `
+                -PolicyRollbackVerified $false `
+                -ServiceRegistrationPresent ([bool]$serviceSnapshot.present) `
+                -PolicyRollbackPreviouslyVerified $false
+            if (-not $policyDecision.policy_remove_required) {
+                $state.policy_remove_skipped_reason = 'ALREADY_ABSENT'
+                $state.policy_rollback_state_source = 'FRESH_DUAL_READBACK'
+                $state.policy_rollback_verified = $true
+            } else {
+                $state.policy_remove_attempted = $true
+                $state.lsa_remove_account_rights_calls = [int64]$state.lsa_remove_account_rights_calls + 1
+                try {
+                    Remove-I2eExactServiceProfileRight -ServiceSid $ServiceSid
+                    $state.policy_right_removed = $true
+                } catch {
+                    Add-I2fCleanupError -State $state -Message $_.Exception.Message
+                }
+                if ($state.policy_remove_attempted -and $state.policy_right_removed) {
+                    try {
+                        $rightState = Get-I2fRightState -ServiceSid $ServiceSid
+                        $state.direct_verification = $rightState.direct
+                        $state.assignment_verification = $rightState.assigned
+                        $state.policy_rollback_state_source = 'POST_REMOVE_DUAL_READBACK'
+                        $state.policy_rollback_verified = -not $rightState.direct_present -and
+                            -not $rightState.assignment_present
+                        if (-not $state.policy_rollback_verified) {
+                            Add-I2fCleanupError -State $state -Message 'Exact right remained after removal readback.'
+                        }
+                    } catch {
+                        Add-I2fCleanupError -State $state -Message $_.Exception.Message
+                    }
+                }
+            }
+        } catch {
+            $state.policy_pre_remove_readback_verified = $false
+            $state.policy_readback_error = $_.Exception.Message
+            Add-I2fCleanupError -State $state -Message $_.Exception.Message
+        }
+    }
+    if (-not $state.policy_rollback_verified) {
+        $state.cleanup_phase = 'POLICY_ROLLBACK'
+        $evidence = Write-I2fRollbackEvidence -OutputRoot $OutputRoot `
+            -RightAddedByExperiment $RightAdded -State $state -RightState $rightState
+        return [pscustomobject]@{
+            state = $state
+            right_state = $rightState
+            evidence = $evidence
+            evidence_write_error = if ($evidence.success) { $null } else { $evidence.error }
+        }
+    }
+
+    $state.cleanup_phase = 'SERVICE_REGISTRATION'
+    if ($ServiceCreated) {
+        $state.service_registration_remove_attempted = $true
+        try {
+            Remove-I2eService
+            $afterDelete = Get-I2fSafeServiceSnapshot
+            $state.service_registration_removed = $null -ne $afterDelete.present -and
+                -not $afterDelete.present
+            if (-not $state.service_registration_removed) {
+                Add-I2fCleanupError -State $state -Message 'I2F service registration remained after delete.'
+            }
+        } catch {
+            Add-I2fCleanupError -State $state -Message $_.Exception.Message
+            $state.service_registration_removed = $false
+        }
+    } else {
+        $state.service_registration_removed = $true
+    }
+    $state.full_rollback_verified = $state.service_stop_verified -and
+        $state.owned_process_check_verified -and
+        $state.owned_broker_process_count_after_stop -eq 0 -and
+        $state.amd_cli_process_count_after_stop -eq 0 -and
+        $state.effective_token_teardown_verified -and
+        $state.policy_rollback_verified -and
+        $state.service_registration_removed
+    $state.rollback_verified = $state.full_rollback_verified
+    $state.cleanup_phase = if ($state.full_rollback_verified) { 'COMPLETE' } else { 'SERVICE_REGISTRATION' }
+    $evidence = Write-I2fRollbackEvidence -OutputRoot $OutputRoot `
+        -RightAddedByExperiment $RightAdded -State $state -RightState $rightState
+    [pscustomobject]@{
+        state = $state
+        right_state = $rightState
+        evidence = $evidence
+        evidence_write_error = if ($evidence.success) { $null } else { $evidence.error }
+    }
+}
+
 function Wait-I2fServiceEvidence {
     param([Parameter(Mandatory = $true)][string]$OutputRoot)
     $resultPath = Join-Path $OutputRoot 'I2F-COUNTER-DISCOVERY-RESULT.json'
@@ -135,44 +384,6 @@ function Wait-I2fServiceEvidence {
         throw 'I2F did not produce a bounded counter-discovery result.'
     }
     Read-I2fJson -Path $resultPath
-}
-
-function Write-I2fRollbackEvidence {
-    param(
-        [Parameter(Mandatory = $true)][string]$OutputRoot,
-        [Parameter(Mandatory = $true)][bool]$RightAdded,
-        [Parameter(Mandatory = $true)][bool]$PolicyRollbackVerified,
-        [Parameter(Mandatory = $true)][bool]$EffectiveTokenTeardownVerified,
-        [Parameter(Mandatory = $true)][bool]$ServiceRegistrationRemoved,
-        [Parameter(Mandatory = $true)]$StopEvidence,
-        [Parameter(Mandatory = $true)]$ProcessEvidence,
-        [Parameter(Mandatory = $true)]$RightState
-    )
-    $fullRollback = $PolicyRollbackVerified -and $EffectiveTokenTeardownVerified -and
-        $ServiceRegistrationRemoved
-    Write-I2fJson -Path (Join-Path $OutputRoot 'I2F-ROLLBACK.json') -Value ([ordered]@{
-            schema = 'amd-i2f-rollback/v1'
-            qualification_only = $true
-            right = $I2fRequiredRight
-            right_added_by_experiment = $RightAdded
-            all_rights = $false
-            service_stop_attempted = $true
-            service_stop_verified = [bool]($StopEvidence.state -eq 'Stopped' -and $StopEvidence.process_id -eq 0)
-            service_state_after_stop = $StopEvidence.state
-            service_pid_after_stop = $StopEvidence.process_id
-            owned_broker_process_count_after_stop = $ProcessEvidence.owned_broker_process_count
-            amd_cli_process_count_after_stop = $ProcessEvidence.amd_cli_process_count
-            policy_remove_attempted = $RightAdded
-            policy_rollback_verified = $PolicyRollbackVerified
-            direct_verification = $RightState.direct
-            assignment_verification = $RightState.assigned
-            effective_token_teardown_verified = $EffectiveTokenTeardownVerified
-            full_rollback_verified = $fullRollback
-            rollback_verified = $fullRollback
-            service_registration_removed = $ServiceRegistrationRemoved
-            rollback_at_utc = [DateTime]::UtcNow.ToString('o')
-        })
-    $fullRollback
 }
 
 if ($LibraryOnly) { return }
@@ -212,82 +423,64 @@ $serviceCreated = $false
 $rightAdded = $false
 $serviceSid = $null
 $amdCliPath = [string]$identityCheck.current_identity.path
-$stopEvidence = [pscustomobject]@{ state = 'NOT_ATTEMPTED'; process_id = 0L }
-$processEvidence = [pscustomobject]@{ owned_broker_process_count = 0; amd_cli_process_count = 0 }
-$policyRollbackVerified = $false
-$serviceRegistrationRemoved = $false
-$fullRollbackVerified = $false
-$rightState = $null
+$result = $null
+$cleanupResult = $null
+$primaryExperimentError = $null
 
 try {
-    $binPath = '"{0}" --service-profile-enable-counter-service' -f $ArtifactPath
-    $createArgs = New-QualificationServiceCreateArguments -ServiceName $ServiceName -BinPath $binPath `
-        -ServiceAccount $ScServiceAccount -DisplayName 'Resource Timeline AMD I2F self-enable qualification'
-    Invoke-I2eSc -Arguments $createArgs | Out-Null
-    $serviceCreated = $true
-    Invoke-I2eSc -Arguments @('sidtype', $ServiceName, 'unrestricted') | Out-Null
-    Assert-I2eServiceSidType
-    $serviceSid = Get-I2fServiceSid
-    Set-I2eDirectoryAcl -Path $QualificationRoot -ServiceSid $serviceSid
-    Set-I2eDirectoryAcl -Path $outputRoot -ServiceSid $serviceSid
-    $config = Get-I2fServiceConfig -Scope $scope -OutputRoot $outputRoot -ServiceSid $serviceSid `
-        -AmdCliPreflight $identityCheck.current_identity
-    Write-I2fJson -Path $ConfigPath -Value $config
-    Write-I2fJson -Path (Join-Path $outputRoot 'I2F-CONFIG.json') -Value $config
+    try {
+        $binPath = '"{0}" --service-profile-enable-counter-service' -f $ArtifactPath
+        $createArgs = New-QualificationServiceCreateArguments -ServiceName $ServiceName -BinPath $binPath `
+            -ServiceAccount $ScServiceAccount -DisplayName 'Resource Timeline AMD I2F self-enable qualification'
+        Invoke-I2eSc -Arguments $createArgs | Out-Null
+        $serviceCreated = $true
+        Invoke-I2eSc -Arguments @('sidtype', $ServiceName, 'unrestricted') | Out-Null
+        Assert-I2eServiceSidType
+        $serviceSid = Get-I2fServiceSid
+        Set-I2eDirectoryAcl -Path $QualificationRoot -ServiceSid $serviceSid
+        Set-I2eDirectoryAcl -Path $outputRoot -ServiceSid $serviceSid
+        $config = Get-I2fServiceConfig -Scope $scope -OutputRoot $outputRoot -ServiceSid $serviceSid `
+            -AmdCliPreflight $identityCheck.current_identity
+        Write-I2fJson -Path $ConfigPath -Value $config
+        Write-I2fJson -Path (Join-Path $outputRoot 'I2F-CONFIG.json') -Value $config
 
-    $rightState = Assert-I2fRightAbsent -ServiceSid $serviceSid
-    Write-I2fJson -Path (Join-Path $outputRoot 'I2F-LSA-BEFORE.json') -Value $rightState
-    Add-I2eExactServiceProfileRight -ServiceSid $serviceSid
-    $rightAdded = $true
-    $afterAdd = Get-I2fRightState -ServiceSid $serviceSid
-    if (-not $afterAdd.direct_present -or -not $afterAdd.assignment_present) {
-        throw 'I2F exact-right dual verification failed after LSA assignment.'
+        $rightState = Assert-I2fRightAbsent -ServiceSid $serviceSid
+        Write-I2fJson -Path (Join-Path $outputRoot 'I2F-LSA-BEFORE.json') -Value $rightState
+        Add-I2eExactServiceProfileRight -ServiceSid $serviceSid
+        $rightAdded = $true
+        $afterAdd = Get-I2fRightState -ServiceSid $serviceSid
+        if (-not $afterAdd.direct_present -or -not $afterAdd.assignment_present) {
+            throw 'I2F exact-right dual verification failed after LSA assignment.'
+        }
+        Write-I2fJson -Path (Join-Path $outputRoot 'I2F-LSA-AFTER-ADD.json') -Value $afterAdd
+
+        Invoke-I2eSc -Arguments @('start', $ServiceName) | Out-Null
+        $result = Wait-I2fServiceEvidence -OutputRoot $outputRoot
+    } catch {
+        $primaryExperimentError = $_.Exception.Message
     }
-    Write-I2fJson -Path (Join-Path $outputRoot 'I2F-LSA-AFTER-ADD.json') -Value $afterAdd
-
-    Invoke-I2eSc -Arguments @('start', $ServiceName) | Out-Null
-    $result = Wait-I2fServiceEvidence -OutputRoot $outputRoot
-    $stopEvidence = Stop-I2eService
-    $processEvidence = Assert-I2fNoOwnedProcesses -AmdCliPath $amdCliPath
 }
 finally {
-    if ($serviceCreated) {
-        try { $stopEvidence = Stop-I2eService } catch { }
-        try { $processEvidence = Assert-I2fNoOwnedProcesses -AmdCliPath $amdCliPath } catch { }
-    }
-    if ($rightAdded -and $null -ne $serviceSid) {
-        try {
-            Remove-I2eExactServiceProfileRight -ServiceSid $serviceSid
-            $rightState = Get-I2fRightState -ServiceSid $serviceSid
-            $policyRollbackVerified = -not $rightState.direct_present -and -not $rightState.assignment_present
-        } catch {
-            $policyRollbackVerified = $false
-            $rightState = [pscustomobject]@{ error = $_.Exception.Message }
-        }
-    }
-    if ($serviceCreated) {
-        try {
-            Remove-I2eService
-            $serviceRegistrationRemoved = -not (Get-I2eServiceSnapshot).present
-        } catch { $serviceRegistrationRemoved = $false }
-    }
-    if ($null -ne $serviceSid -and (Test-Path -LiteralPath $outputRoot -PathType Container)) {
-        $effectiveTeardown = ($stopEvidence.state -eq 'Stopped' -and $stopEvidence.process_id -eq 0 -and
-            $processEvidence.owned_broker_process_count -eq 0 -and
-            $processEvidence.amd_cli_process_count -eq 0)
-        if ($null -ne $rightState) {
-            $fullRollbackVerified = Write-I2fRollbackEvidence -OutputRoot $outputRoot -RightAdded $rightAdded `
-                -PolicyRollbackVerified $policyRollbackVerified `
-                -EffectiveTokenTeardownVerified $effectiveTeardown `
-                -ServiceRegistrationRemoved $serviceRegistrationRemoved `
-                -StopEvidence $stopEvidence -ProcessEvidence $processEvidence -RightState $rightState
-            Write-Host "I2F_FULL_ROLLBACK_VERIFIED=$fullRollbackVerified"
-        }
-    }
+    $cleanupResult = Invoke-I2fCleanup -OutputRoot $outputRoot -ServiceCreated $serviceCreated `
+        -RightAdded $rightAdded -ServiceSid $serviceSid -AmdCliPath $amdCliPath `
+        -PrimaryExperimentError $primaryExperimentError
 }
 
-if (-not $fullRollbackVerified) {
-    throw 'I2F cleanup did not establish full rollback; evidence remains open for human recovery.'
+if ($null -ne $primaryExperimentError) {
+    $cleanupError = [string](Get-I2fPropertyValue -Object $cleanupResult.state -Name 'cleanup_error' -Default '')
+    $evidenceError = [string](Get-I2fPropertyValue -Object $cleanupResult -Name 'evidence_write_error' -Default '')
+    if (-not [string]::IsNullOrWhiteSpace($cleanupError) -or -not [string]::IsNullOrWhiteSpace($evidenceError)) {
+        throw ('PRIMARY_EXPERIMENT_ERROR: {0}; CLEANUP_ERROR: {1}; ROLLBACK_EVIDENCE_WRITE_ERROR: {2}' -f
+            $primaryExperimentError, $cleanupError, $evidenceError)
+    }
+    throw ('PRIMARY_EXPERIMENT_ERROR: {0}' -f $primaryExperimentError)
+}
+
+if ($cleanupResult.state.cleanup_required -and -not $cleanupResult.state.full_rollback_verified) {
+    $cleanupError = [string](Get-I2fPropertyValue -Object $cleanupResult.state -Name 'cleanup_error' -Default '')
+    $evidenceError = [string](Get-I2fPropertyValue -Object $cleanupResult -Name 'evidence_write_error' -Default '')
+    throw ('I2F cleanup failed closed; CLEANUP_ERROR: {0}; ROLLBACK_EVIDENCE_WRITE_ERROR: {1}' -f
+        $cleanupError, $evidenceError)
 }
 
 Remove-Item -LiteralPath $ConfigPath -Force -ErrorAction SilentlyContinue
