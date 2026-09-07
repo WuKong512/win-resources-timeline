@@ -10,9 +10,9 @@ I2E paired, treatment-resume, and standalone cleanup real entrypoints are
 retired and permanently fail closed. I2F experiment and cleanup real
 entrypoints are also retired. All historical real gates are consumed; only
 plan-only, `LibraryOnly`, synthetic validation, and explicitly guarded offline
-sentinels remain available. No production account is selected. The next
-research gate is residual SYSTEM-versus-I2F analysis followed by selection of a
-single-variable I2G harness.
+sentinels remain available. No production account is selected. The read-only
+residual SYSTEM-versus-I2F review selected `SeProfileSingleProcessPrivilege`;
+the next gate is design and offline implementation review of the I2G harness.
 
 ```text
 I2E_REAL_PAIRED_ENTRYPOINT = PERMANENTLY_FAIL_CLOSED
@@ -36,13 +36,19 @@ I2_LEGACY_RERUN = FORBIDDEN
 I2B_RERUN = FORBIDDEN
 I2C_RERUN = FORBIDDEN
 AMD_QUALIFICATION_EXECUTABLE_ENTRYPOINT_AUDIT = PASS_NO_UNRETIRED_HISTORICAL_REAL_GATE
-I2G_VARIABLE = UNRESOLVED
+I2G_VARIABLE = SeProfileSingleProcessPrivilege
+I2G_VARIABLE_SELECTION = PASS_READ_ONLY
+I2G_SELECTION_CONFIDENCE = MEDIUM
+I2G_SINGLE_VARIABLE_ISOLATABLE = true
 I2G_HARNESS = NOT_IMPLEMENTED
+I2G_REAL_RUNTIME = 0
+I2G_HARNESS_IMPLEMENTATION_AUTHORIZED = false
+I2G_REAL_RUNTIME_AUTHORIZED = false
 PRODUCTION_ACCOUNT = UNRESOLVED
 LOCAL_SYSTEM_PRODUCTION_SELECTION = NOT_AUTHORIZED
 PRODUCTION_ADMISSION = NOT_COMPLETE
-NEXT_GATE = REVIEW_RESIDUAL_DIFFERENTIAL_AND_SELECT_SINGLE_I2G_VARIABLE
-NEXT_TASK = UNRESOLVED_PENDING_I2G_VARIABLE_SELECTION
+NEXT_GATE = I2G_HARNESS_DESIGN_AND_OFFLINE_IMPLEMENTATION_REVIEW
+NEXT_TASK = I2G_HARNESS_DESIGN_AND_OFFLINE_IMPLEMENTATION_REVIEW
 README_CURRENT_STATE_RECONCILED=PASS
 ```
 

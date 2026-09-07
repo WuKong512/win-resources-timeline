@@ -34,6 +34,7 @@ $ExecutionPlan = Join-Path $ToolRoot '..\..\docs\upgrade\execution-plan.md'
 $ArchitectureDoc = Join-Path $ToolRoot '..\..\docs\architecture\cpu-sensor-amd-privilege-deployment.md'
 $QualificationReadme = Join-Path $ToolRoot 'README.md'
 $ResidualDifferential = Join-Path $ToolRoot '..\..\docs\upgrade\amd-system-vs-i2f-residual-differential.md'
+$I2gSelectionDocument = Join-Path $ToolRoot '..\..\docs\upgrade\amd-i2g-variable-selection.md'
 
 foreach ($wrapper in @(
         $ScArgumentContract,
@@ -1564,7 +1565,7 @@ Write-Host 'LEGACY_REAL_GATE_RETIREMENT_REGRESSION=PASS'
 
 $counterDiscoveryFunction = [regex]::Match(
     $windowsSourceText,
-    '(?s)fn\s+execute_counter_discovery_at_with_prefix\(.*?\n}\n\nfn\s+start_session'
+    '(?s)fn\s+execute_counter_discovery_at_with_prefix\(.*?\r?\n}\r?\n\r?\nfn\s+start_session'
 ).Value
 if ([string]::IsNullOrWhiteSpace($counterDiscoveryFunction) -or
     $counterDiscoveryFunction -notmatch 'CounterDiscoveryExecutionEvidence::from_spawn\(true\)' -or
@@ -1574,7 +1575,7 @@ if ([string]::IsNullOrWhiteSpace($counterDiscoveryFunction) -or
 }
 Write-Host 'COUNTER_DISCOVERY_EXECUTION_EVIDENCE_CONTRACT=PASS'
 
-foreach ($documentationPath in @($ExecutionPlan, $QualificationReadme, $ResidualDifferential)) {
+foreach ($documentationPath in @($ExecutionPlan, $QualificationReadme, $ResidualDifferential, $I2gSelectionDocument)) {
     if (-not (Test-Path -LiteralPath $documentationPath -PathType Leaf)) {
         throw "I2F real-closure documentation is missing: $documentationPath"
     }
@@ -1582,7 +1583,8 @@ foreach ($documentationPath in @($ExecutionPlan, $QualificationReadme, $Residual
 $architectureSource = Get-Content -LiteralPath $ArchitectureDoc -Raw
 $currentDocumentation = $architectureSource + [Environment]::NewLine +
     (Get-Content -LiteralPath $ExecutionPlan -Raw) + [Environment]::NewLine +
-    (Get-Content -LiteralPath $QualificationReadme -Raw)
+    (Get-Content -LiteralPath $QualificationReadme -Raw) + [Environment]::NewLine +
+    (Get-Content -LiteralPath $I2gSelectionDocument -Raw)
 foreach ($requiredI2eCurrentStateText in @(
         'I2E = CLOSED / RERUN_FORBIDDEN',
         'I2F = REAL_COMPLETED / PASS_WITH_NEGATIVE_COUNTER_ACCESS_RESULT / RERUN_FORBIDDEN',
@@ -1596,9 +1598,14 @@ foreach ($requiredI2eCurrentStateText in @(
         'I2B_REAL_ENTRYPOINTS = RETIRED',
         'I2C_REAL_ENTRYPOINTS = RETIRED',
         'AMD_QUALIFICATION_EXECUTABLE_ENTRYPOINT_AUDIT = PASS_NO_UNRETIRED_HISTORICAL_REAL_GATE',
-        'I2G_VARIABLE = UNRESOLVED',
-        'NEXT_GATE = REVIEW_RESIDUAL_DIFFERENTIAL_AND_SELECT_SINGLE_I2G_VARIABLE',
-        'NEXT_TASK = UNRESOLVED_PENDING_I2G_VARIABLE_SELECTION'
+        'I2G_VARIABLE = SeProfileSingleProcessPrivilege',
+        'I2G_VARIABLE_SELECTION = PASS_READ_ONLY',
+        'I2G_SELECTION_CONFIDENCE = MEDIUM',
+        'I2G_HARNESS = NOT_IMPLEMENTED',
+        'I2G_HARNESS_IMPLEMENTATION_AUTHORIZED = false',
+        'I2G_REAL_RUNTIME_AUTHORIZED = false',
+        'NEXT_GATE = I2G_HARNESS_DESIGN_AND_OFFLINE_IMPLEMENTATION_REVIEW',
+        'NEXT_TASK = I2G_HARNESS_DESIGN_AND_OFFLINE_IMPLEMENTATION_REVIEW'
     )) {
     if ($currentDocumentation.IndexOf($requiredI2eCurrentStateText, [StringComparison]::Ordinal) -lt 0) {
         throw "I2E current-state reconciliation is missing: $requiredI2eCurrentStateText"
@@ -1633,6 +1640,7 @@ $i2fClosureDocumentation = @(
     Get-Content -LiteralPath $ExecutionPlan -Raw
     Get-Content -LiteralPath $QualificationReadme -Raw
     Get-Content -LiteralPath $ResidualDifferential -Raw
+    Get-Content -LiteralPath $I2gSelectionDocument -Raw
 ) -join [Environment]::NewLine
 foreach ($requiredI2fClosureText in @(
         'I2F_RESULT = PASS_WITH_NEGATIVE_COUNTER_ACCESS_RESULT',
@@ -1649,7 +1657,9 @@ foreach ($requiredI2fClosureText in @(
         'I2F_REAL_RERUN_MACHINE_STATE = UNCHANGED',
         'counter_discovery_cli_executed = true after Command::spawn succeeds',
         'power_sampling_runtime_executed = false',
-        'I2G_VARIABLE = UNRESOLVED',
+        'I2G_VARIABLE = SeProfileSingleProcessPrivilege',
+        'I2G_VARIABLE_SELECTION = PASS_READ_ONLY',
+        'I2G_SELECTION_CONFIDENCE = MEDIUM',
         'PRODUCTION_ACCOUNT = UNRESOLVED',
         'LOCAL_SYSTEM_PRODUCTION_SELECTION = NOT_AUTHORIZED'
     )) {

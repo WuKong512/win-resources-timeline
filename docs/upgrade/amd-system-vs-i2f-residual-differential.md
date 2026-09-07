@@ -120,17 +120,51 @@ hypotheses rather than being collapsed into “SYSTEM is required”.
 ## I2G boundary
 
 ```text
-I2G_VARIABLE = UNRESOLVED
+I2G_VARIABLE = SeProfileSingleProcessPrivilege
+I2G_VARIABLE_SELECTION = PASS_READ_ONLY
+I2G_SELECTION_CONFIDENCE = MEDIUM
+I2G_SINGLE_VARIABLE_ISOLATABLE = true
 I2G_REAL_RUNTIME = 0
+I2G_HARNESS = NOT_IMPLEMENTED
+I2G_HARNESS_IMPLEMENTATION_AUTHORIZED = false
+I2G_REAL_RUNTIME_AUTHORIZED = false
 PRODUCTION_ACCOUNT = UNRESOLVED
 LOCAL_SYSTEM_PRODUCTION_SELECTION = NOT_AUTHORIZED
 PRODUCTION_ADMISSION = NOT_COMPLETE
+NEXT_GATE = I2G_HARNESS_DESIGN_AND_OFFLINE_IMPLEMENTATION_REVIEW
 ```
 
 Any future I2G must be a fresh, human-authorized, non-sampling
 `timechart --list` qualification with one intentional variable, a fresh
 Service SID, exact rollback, and no bulk privilege or group grants. This file
-does not prepare or execute that experiment.
+does not implement, authorize, or execute that experiment. The detailed
+normalized matrix, candidate scoring, and design-only contract are recorded in
+[`amd-i2g-variable-selection.md`](amd-i2g-variable-selection.md).
+
+## I2G variable-selection closure
+
+The read-only review selected exactly one future variable:
+
+```text
+I2G_VARIABLE_SELECTED = SeProfileSingleProcessPrivilege
+BASE_ACCOUNT = LocalService / S-1-5-19
+BASE_CONTEXT = final authoritative I2F post-enable context
+CHANGE = fresh dedicated unrestricted Service SID receives only SeProfileSingleProcessPrivilege; the service enables exactly that one newly materialized right
+RETAIN_SE_SYSTEM_PROFILE_PRIVILEGE = true / PRESENT + ENABLED from I2F
+ADMINISTRATORS_MEMBERSHIP_MUTATION = FORBIDDEN
+SE_DEBUG_PRIVILEGE_MUTATION = FORBIDDEN
+LOCAL_SYSTEM_AS_I2G_VARIABLE = FORBIDDEN_AS_NON_SINGLE_VARIABLE
+I2G_SELECTION_CONFIDENCE = MEDIUM
+I2G_HARNESS = NOT_IMPLEMENTED
+I2G_REAL_RUNTIME = 0
+```
+
+`SeProfileSingleProcessPrivilege` was selected because it is a recorded
+SYSTEM-only enabled privilege with the strongest indirect semantic connection
+to a profiler path and the cleanest reversible one-right/one-enable shape.
+This is a future sufficiency test in the preserved I2F context, not a claim of
+necessity. The exact device/backend authorization remains indirect and no
+direct AMD SID check or device ACL was recovered.
 
 ## Counter-discovery evidence semantics
 
