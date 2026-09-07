@@ -10,9 +10,9 @@ I2E paired, treatment-resume, and standalone cleanup real entrypoints are
 retired and permanently fail closed. I2F experiment and cleanup real
 entrypoints are also retired. All historical real gates are consumed; only
 plan-only, `LibraryOnly`, synthetic validation, and explicitly guarded offline
-sentinels remain available. No production account is selected. The next
-research gate is residual SYSTEM-versus-I2F analysis followed by selection of a
-single-variable I2G harness.
+sentinels remain available. No production account is selected. The read-only
+residual SYSTEM-versus-I2F review selected `SeProfileSingleProcessPrivilege`;
+the next gate is design and offline implementation review of the I2G harness.
 
 ```text
 I2E_REAL_PAIRED_ENTRYPOINT = PERMANENTLY_FAIL_CLOSED
@@ -36,15 +36,78 @@ I2_LEGACY_RERUN = FORBIDDEN
 I2B_RERUN = FORBIDDEN
 I2C_RERUN = FORBIDDEN
 AMD_QUALIFICATION_EXECUTABLE_ENTRYPOINT_AUDIT = PASS_NO_UNRETIRED_HISTORICAL_REAL_GATE
-I2G_VARIABLE = UNRESOLVED
+I2G_VARIABLE = SeProfileSingleProcessPrivilege
+I2G_VARIABLE_SELECTION = PASS_READ_ONLY
+I2G_SELECTION_CONFIDENCE = MEDIUM
+I2G_SINGLE_VARIABLE_ISOLATABLE = true
+I2G_SELECTION_CHANGED = false
+BLOCKER = I2G_PAIRED_PHASE_CONFIGURATION_INVARIANT_CONTRADICTS_TREATMENT_MUTATION
+BLOCKER_STATUS = CLOSED_OFFLINE
+PREVIOUS_BLOCKER_1 = I2G_BASELINE_RECONSTRUCTION_CONTRACT_INCONSISTENT / CLOSED_OFFLINE
+PREVIOUS_BLOCKER_2 = I2G_STAGED_TREATMENT_TOKEN_MISCLASSIFIED_AS_EXACT_I2F_BASELINE / CLOSED_OFFLINE
+PREVIOUS_BLOCKER_3 = I2G_HISTORICAL_CONTROL_LEAVES_NON_TREATMENT_CONFOUNDERS_UNCONTROLLED / CLOSED_OFFLINE
+I2G_BASELINE_RECONSTRUCTION_RIGHT = SeSystemProfilePrivilege
+I2G_TREATMENT_VARIABLE = SeProfileSingleProcessPrivilege
+I2G_EXPERIMENT_SHAPE = PAIRED_CONTROL_TREATMENT
+HISTORICAL_I2F_ROLE = PREDECESSOR_EVIDENCE_ONLY
+HISTORICAL_I2F_IS_ACTIVE_CAUSAL_CONTROL = false
+TEMPORARY_POLICY_ASSIGNMENT_COUNT = 2
+SCIENTIFIC_TREATMENT_VARIABLE_COUNT = 1
+HISTORICAL_I2F_PROFILE_SINGLE_STATE = ABSENT
+I2G_CONTROL_PROFILE_SINGLE_STATE = ABSENT
+I2G_CONTROL_SYSTEM_PROFILE_STATE = PRESENT + ENABLED
+I2G_TREATMENT_PROFILE_SINGLE_STATE = PRESENT + ENABLED
+I2G_TREATMENT_SYSTEM_PROFILE_STATE = PRESENT + ENABLED
+I2G_PAIRED_CAUSAL_TREATMENT_DELTA = SeProfileSingleProcessPrivilege ABSENT -> PRESENT + ENABLED
+I2G_TREATMENT_MATERIALIZATION_DELTA = SeProfileSingleProcessPrivilege ABSENT -> PRESENT + DISABLED
+I2G_TREATMENT_ACTIVATION_DELTA = SeProfileSingleProcessPrivilege DISABLED -> ENABLED
+NO_CODE_CHANGE_BETWEEN_PHASES = true
+NO_NON_TREATMENT_CONFIGURATION_CHANGE_BETWEEN_PHASES = true
+ALLOWED_TREATMENT_CONFIGURATION_DELTA = SeProfileSingleProcessPrivilege assignment to same Service SID only
+CONTROL_TO_TREATMENT_POLICY_DELTA_COUNT = 1
+PLANNED_CONTROL_COUNTER_DISCOVERY_RUNS = 1
+PLANNED_TREATMENT_COUNTER_DISCOVERY_RUNS = 1
+PLANNED_VALID_PAIR_COUNTER_DISCOVERY_RUNS = 2
+MAX_CONTROL_COUNTER_DISCOVERY_RUNS = 1
+MAX_TREATMENT_COUNTER_DISCOVERY_RUNS = 1
+MAX_TOTAL_I2G_COUNTER_DISCOVERY_RUNS = 2
+ACTUAL_RUN_COUNT_EVIDENCE_SCHEMA = DEFINED
+CONTROL_RETRY_ALLOWED = false
+TREATMENT_RETRY_ALLOWED = false
+POWER_SAMPLING_RUNS = 0
+CONTROL_SERVICE_NAME_EQUALS_TREATMENT = true
+CONTROL_SERVICE_SID_EQUALS_TREATMENT = true
+CONTROL_HARNESS_SHA_EQUALS_TREATMENT = true
+CONTROL_EXPECTED_RESULT = POWER_UNAVAILABLE
+CONTROL_DRIFT_STOP_BEFORE_TREATMENT = true
+CONTROL_TOKEN_TEARDOWN_BEFORE_TREATMENT_POLICY_MUTATION = true
 I2G_HARNESS = NOT_IMPLEMENTED
+I2G_REAL_RUNTIME = 0
+I2G_HARNESS_IMPLEMENTATION_AUTHORIZED = false
+I2G_REAL_RUNTIME_AUTHORIZED = false
 PRODUCTION_ACCOUNT = UNRESOLVED
 LOCAL_SYSTEM_PRODUCTION_SELECTION = NOT_AUTHORIZED
 PRODUCTION_ADMISSION = NOT_COMPLETE
-NEXT_GATE = REVIEW_RESIDUAL_DIFFERENTIAL_AND_SELECT_SINGLE_I2G_VARIABLE
-NEXT_TASK = UNRESOLVED_PENDING_I2G_VARIABLE_SELECTION
+NEXT_GATE = I2G_HARNESS_DESIGN_AND_OFFLINE_IMPLEMENTATION_REVIEW
+NEXT_TASK = I2G_HARNESS_DESIGN_AND_OFFLINE_IMPLEMENTATION_REVIEW
 README_CURRENT_STATE_RECONCILED=PASS
 ```
+
+The selected I2G treatment remains one variable. Historical I2F is predecessor
+evidence only, not the active causal control. The future experiment is a
+paired CONTROL -> TREATMENT design on one fresh service identity. CONTROL
+assigns only `SeSystemProfilePrivilege`, requires `POWER_UNAVAILABLE`, and is
+fully torn down before treatment adds `SeProfileSingleProcessPrivilege` to the
+same Service SID. A planned valid pair runs one non-sampling
+`timechart --list` in each phase; the
+paired delta is `ABSENT -> PRESENT + ENABLED`. The expected control,
+treatment, invariant comparison, drift gate, and independent rollback are
+specified in
+[`docs/upgrade/amd-i2g-variable-selection.md`](../../docs/upgrade/amd-i2g-variable-selection.md).
+The only allowed CONTROL-to-TREATMENT configuration delta is assignment of
+`SeProfileSingleProcessPrivilege` to the same Service SID after CONTROL
+teardown. Planned and maximum run counts are separate from actual counts. No
+I2G harness or runtime exists.
 
 The automated path is completely synthetic. `--synthetic` exercises the
 versioned semantic protocol, bounded framing, explicit pipe-DACL policy,

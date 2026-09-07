@@ -34,6 +34,7 @@ $ExecutionPlan = Join-Path $ToolRoot '..\..\docs\upgrade\execution-plan.md'
 $ArchitectureDoc = Join-Path $ToolRoot '..\..\docs\architecture\cpu-sensor-amd-privilege-deployment.md'
 $QualificationReadme = Join-Path $ToolRoot 'README.md'
 $ResidualDifferential = Join-Path $ToolRoot '..\..\docs\upgrade\amd-system-vs-i2f-residual-differential.md'
+$I2gSelectionDocument = Join-Path $ToolRoot '..\..\docs\upgrade\amd-i2g-variable-selection.md'
 
 foreach ($wrapper in @(
         $ScArgumentContract,
@@ -1564,7 +1565,7 @@ Write-Host 'LEGACY_REAL_GATE_RETIREMENT_REGRESSION=PASS'
 
 $counterDiscoveryFunction = [regex]::Match(
     $windowsSourceText,
-    '(?s)fn\s+execute_counter_discovery_at_with_prefix\(.*?\n}\n\nfn\s+start_session'
+    '(?s)fn\s+execute_counter_discovery_at_with_prefix\(.*?\r?\n}\r?\n\r?\nfn\s+start_session'
 ).Value
 if ([string]::IsNullOrWhiteSpace($counterDiscoveryFunction) -or
     $counterDiscoveryFunction -notmatch 'CounterDiscoveryExecutionEvidence::from_spawn\(true\)' -or
@@ -1574,7 +1575,7 @@ if ([string]::IsNullOrWhiteSpace($counterDiscoveryFunction) -or
 }
 Write-Host 'COUNTER_DISCOVERY_EXECUTION_EVIDENCE_CONTRACT=PASS'
 
-foreach ($documentationPath in @($ExecutionPlan, $QualificationReadme, $ResidualDifferential)) {
+foreach ($documentationPath in @($ExecutionPlan, $QualificationReadme, $ResidualDifferential, $I2gSelectionDocument)) {
     if (-not (Test-Path -LiteralPath $documentationPath -PathType Leaf)) {
         throw "I2F real-closure documentation is missing: $documentationPath"
     }
@@ -1582,7 +1583,8 @@ foreach ($documentationPath in @($ExecutionPlan, $QualificationReadme, $Residual
 $architectureSource = Get-Content -LiteralPath $ArchitectureDoc -Raw
 $currentDocumentation = $architectureSource + [Environment]::NewLine +
     (Get-Content -LiteralPath $ExecutionPlan -Raw) + [Environment]::NewLine +
-    (Get-Content -LiteralPath $QualificationReadme -Raw)
+    (Get-Content -LiteralPath $QualificationReadme -Raw) + [Environment]::NewLine +
+    (Get-Content -LiteralPath $I2gSelectionDocument -Raw)
 foreach ($requiredI2eCurrentStateText in @(
         'I2E = CLOSED / RERUN_FORBIDDEN',
         'I2F = REAL_COMPLETED / PASS_WITH_NEGATIVE_COUNTER_ACCESS_RESULT / RERUN_FORBIDDEN',
@@ -1596,9 +1598,32 @@ foreach ($requiredI2eCurrentStateText in @(
         'I2B_REAL_ENTRYPOINTS = RETIRED',
         'I2C_REAL_ENTRYPOINTS = RETIRED',
         'AMD_QUALIFICATION_EXECUTABLE_ENTRYPOINT_AUDIT = PASS_NO_UNRETIRED_HISTORICAL_REAL_GATE',
-        'I2G_VARIABLE = UNRESOLVED',
-        'NEXT_GATE = REVIEW_RESIDUAL_DIFFERENTIAL_AND_SELECT_SINGLE_I2G_VARIABLE',
-        'NEXT_TASK = UNRESOLVED_PENDING_I2G_VARIABLE_SELECTION'
+        'I2G_VARIABLE = SeProfileSingleProcessPrivilege',
+        'I2G_VARIABLE_SELECTION = PASS_READ_ONLY',
+        'I2G_SELECTION_CONFIDENCE = MEDIUM',
+        'I2G_SELECTION_CHANGED = false',
+        'BLOCKER = I2G_PAIRED_PHASE_CONFIGURATION_INVARIANT_CONTRADICTS_TREATMENT_MUTATION',
+        'BLOCKER_STATUS = CLOSED_OFFLINE',
+        'I2G_HARNESS = NOT_IMPLEMENTED',
+        'I2G_HARNESS_IMPLEMENTATION_AUTHORIZED = false',
+        'I2G_REAL_RUNTIME_AUTHORIZED = false',
+        'I2G_BASELINE_RECONSTRUCTION_RIGHT = SeSystemProfilePrivilege',
+        'I2G_TREATMENT_VARIABLE = SeProfileSingleProcessPrivilege',
+        'I2G_EXPERIMENT_SHAPE = PAIRED_CONTROL_TREATMENT',
+        'HISTORICAL_I2F_ROLE = PREDECESSOR_EVIDENCE_ONLY',
+        'HISTORICAL_I2F_IS_ACTIVE_CAUSAL_CONTROL = false',
+        'TEMPORARY_POLICY_ASSIGNMENT_COUNT = 2',
+        'SCIENTIFIC_TREATMENT_VARIABLE_COUNT = 1',
+        'PLANNED_CONTROL_COUNTER_DISCOVERY_RUNS = 1',
+        'PLANNED_TREATMENT_COUNTER_DISCOVERY_RUNS = 1',
+        'PLANNED_VALID_PAIR_COUNTER_DISCOVERY_RUNS = 2',
+        'MAX_CONTROL_COUNTER_DISCOVERY_RUNS = 1',
+        'MAX_TREATMENT_COUNTER_DISCOVERY_RUNS = 1',
+        'MAX_TOTAL_I2G_COUNTER_DISCOVERY_RUNS = 2',
+        'ACTUAL_RUN_COUNT_EVIDENCE_SCHEMA = DEFINED',
+        'POWER_SAMPLING_RUNS = 0',
+        'NEXT_GATE = I2G_HARNESS_DESIGN_AND_OFFLINE_IMPLEMENTATION_REVIEW',
+        'NEXT_TASK = I2G_HARNESS_DESIGN_AND_OFFLINE_IMPLEMENTATION_REVIEW'
     )) {
     if ($currentDocumentation.IndexOf($requiredI2eCurrentStateText, [StringComparison]::Ordinal) -lt 0) {
         throw "I2E current-state reconciliation is missing: $requiredI2eCurrentStateText"
@@ -1607,6 +1632,174 @@ foreach ($requiredI2eCurrentStateText in @(
 Write-Host 'ARCHITECTURE_SINGLE_AUTHORITATIVE_CURRENT_STATE=PASS'
 Write-Host 'EXECUTION_PLAN_SINGLE_CURRENT_STATE=PASS'
 Write-Host 'README_CURRENT_STATE_RECONCILED=PASS'
+$i2gContractSource = Get-Content -LiteralPath $I2gSelectionDocument -Raw
+foreach ($requiredI2gContractText in @(
+        'BLOCKER = I2G_PAIRED_PHASE_CONFIGURATION_INVARIANT_CONTRADICTS_TREATMENT_MUTATION',
+        'BLOCKER_STATUS = CLOSED_OFFLINE',
+        'PREVIOUS_BLOCKER_1 = I2G_BASELINE_RECONSTRUCTION_CONTRACT_INCONSISTENT / CLOSED_OFFLINE',
+        'PREVIOUS_BLOCKER_2 = I2G_STAGED_TREATMENT_TOKEN_MISCLASSIFIED_AS_EXACT_I2F_BASELINE / CLOSED_OFFLINE',
+        'PREVIOUS_BLOCKER_3 = I2G_HISTORICAL_CONTROL_LEAVES_NON_TREATMENT_CONFOUNDERS_UNCONTROLLED / CLOSED_OFFLINE',
+        'I2G_EXPERIMENT_SHAPE = PAIRED_CONTROL_TREATMENT',
+        'HISTORICAL_I2F_REFERENCE =',
+        'HISTORICAL_I2F_ROLE = PREDECESSOR_EVIDENCE_ONLY',
+        'HISTORICAL_I2F_IS_ACTIVE_CAUSAL_CONTROL = false',
+        'CONTROL_POLICY_RIGHTS = SeSystemProfilePrivilege only',
+        'I2G_CONTROL_MATERIALIZED_TOKEN =',
+        'I2G_CONTROL_FINAL_TOKEN =',
+        'I2G_CONTROL_TOKEN = I2G-CONTROL-TOKEN.json',
+        'CONTROL_SAMPLING = false',
+        'CONTROL_COUNTER_DISCOVERY = timechart --list',
+        'PLANNED_CONTROL_COUNTER_DISCOVERY_RUNS = 1',
+        'CONTROL_EXPECTED_RESULT = POWER_UNAVAILABLE',
+        'CONTROL_DRIFT =',
+        'CONTROL_DRIFT_STOP_BEFORE_TREATMENT = true',
+        'CONTROL_TOKEN_TEARDOWN_BEFORE_TREATMENT_POLICY_MUTATION = true',
+        'CONTROL_DIRECT_SERVICE_SID_RIGHTS = SeSystemProfilePrivilege',
+        'TREATMENT_POLICY_RIGHTS =',
+        'TREATMENT_POLICY_ADDITION = SeProfileSingleProcessPrivilege only',
+        'TREATMENT_POLICY_MUTATION_GATE = CONTROL_TOKEN_TEARDOWN_BEFORE_TREATMENT_POLICY_MUTATION',
+        'TREATMENT_DIRECT_SERVICE_SID_RIGHTS = SeSystemProfilePrivilege + SeProfileSingleProcessPrivilege',
+        'EXACT_TREATMENT_POLICY_DELTA = SeProfileSingleProcessPrivilege added',
+        'NO_CODE_CHANGE_BETWEEN_PHASES = true',
+        'NO_HARNESS_REBUILD_BETWEEN_PHASES = true',
+        'NO_NON_TREATMENT_CONFIGURATION_CHANGE_BETWEEN_PHASES = true',
+        'ALLOWED_TREATMENT_CONFIGURATION_DELTA = SeProfileSingleProcessPrivilege assignment to same Service SID only',
+        'CONTROL_TO_TREATMENT_POLICY_DELTA = SeProfileSingleProcessPrivilege assignment to same Service SID only',
+        'CONTROL_TO_TREATMENT_POLICY_DELTA_COUNT = 1',
+        'NON_TREATMENT_CONFIGURATION_INVARIANTS = UNCHANGED',
+        'CONTROL_SERVICE_NAME_EQUALS_TREATMENT = true',
+        'CONTROL_SERVICE_SID_EQUALS_TREATMENT = true',
+        'CONTROL_HARNESS_SHA_EQUALS_TREATMENT = true',
+        'SERVICE_RESTART = REQUIRED_TECHNICAL_MATERIALIZATION_BOUNDARY',
+        'I2G_TREATMENT_MATERIALIZED_TOKEN =',
+        'I2G_TREATMENT_FINAL_TOKEN =',
+        'I2G_TREATMENT_TOKEN = I2G-TREATMENT-TOKEN.json',
+        'TREATMENT_SAMPLING = false',
+        'TREATMENT_COUNTER_DISCOVERY = timechart --list',
+        'PLANNED_TREATMENT_COUNTER_DISCOVERY_RUNS = 1',
+        'CONTROL_TO_TREATMENT_NON_TREATMENT_INVARIANTS = UNCHANGED',
+        'I2G_PAIRED_CAUSAL_TREATMENT_DELTA = SeProfileSingleProcessPrivilege ABSENT -> PRESENT + ENABLED',
+        'I2G_TREATMENT_MATERIALIZATION_DELTA = SeProfileSingleProcessPrivilege ABSENT -> PRESENT + DISABLED',
+        'I2G_TREATMENT_ACTIVATION_DELTA = SeProfileSingleProcessPrivilege DISABLED -> ENABLED',
+        'TREATMENT_MATERIALIZATION_AND_ACTIVATION = ONE_CAPABILITY_INTERVENTION',
+        'PLANNED_VALID_PAIR_COUNTER_DISCOVERY_RUNS = 2',
+        'MAX_CONTROL_COUNTER_DISCOVERY_RUNS = 1',
+        'MAX_TREATMENT_COUNTER_DISCOVERY_RUNS = 1',
+        'MAX_TOTAL_I2G_COUNTER_DISCOVERY_RUNS = 2',
+        'ACTUAL_RUN_COUNTS =',
+        'ACTUAL_CONTROL_COUNTER_DISCOVERY_RUNS',
+        'ACTUAL_TREATMENT_COUNTER_DISCOVERY_RUNS',
+        'ACTUAL_TOTAL_I2G_COUNTER_DISCOVERY_RUNS',
+        'CONTROL_DRIFT_EXPECTED_ACTUAL_COUNTS = control 1; treatment 0; total 1',
+        'PRE_CONTROL_FAILURE_ACTUAL_COUNTS = 0 / 0 / 0',
+        'CONTROL_RETRY_ALLOWED = false',
+        'TREATMENT_RETRY_ALLOWED = false',
+        'COUNTER_DISCOVERY_RETRY_POLICY = NO_RETRY',
+        'POWER_SAMPLING_RUNS = 0',
+        'TOKEN_TEARDOWN_BEFORE_POLICY_RIGHT_REMOVAL = true',
+        'I2G_BASELINE_POLICY_ROLLBACK = SeSystemProfilePrivilege',
+        'I2G_TREATMENT_POLICY_ROLLBACK = SeProfileSingleProcessPrivilege',
+        'PLANNED_RUN_COUNTS; MAX_RUN_COUNTS;',
+        'ACTUAL_RUN_COUNTS; CONTROL_POLICY_STATE; CONTROL_TOKEN;',
+        'CONTROL_TREATMENT_CONFIGURATION_INVARIANT_COMPARISON;',
+        'CONTROL_TREATMENT_TOKEN_INVARIANT_COMPARISON;',
+        'CONTROL_TREATMENT_TOKEN_INVARIANT_COMPARISON =',
+        'PAIRED_CAUSAL_DELTA',
+        'PARTIAL_FAILURE_ACCOUNTING =',
+        'INVALID_RESULT_CONTROL_DRIFT_GATE =',
+        'INVALID_RESULT_CAUSAL_GATE =',
+        'INVALID_CONFIGURATION_DELTA =',
+        'ACTUAL_RUN_COUNT_RULE ='
+    )) {
+    if ($i2gContractSource.IndexOf($requiredI2gContractText, [StringComparison]::Ordinal) -lt 0) {
+        throw "I2G baseline reconstruction contract is missing: $requiredI2gContractText"
+    }
+}
+if ($i2gContractSource -match '(?m)^NO_BASELINE_AMD_RUN = true\s*$') {
+    throw 'I2G current contract still claims that no baseline/control AMD run is required.'
+}
+$pairedContractMarker = '## Design-only I2G paired CONTROL -> TREATMENT contract'
+$pairedContractStart = $i2gContractSource.IndexOf($pairedContractMarker, [StringComparison]::Ordinal)
+if ($pairedContractStart -lt 0) {
+    throw 'I2G paired CONTROL -> TREATMENT contract section is missing.'
+}
+$pairedContractSource = $i2gContractSource.Substring($pairedContractStart)
+if ($pairedContractSource.IndexOf('HISTORICAL_I2F_IS_ACTIVE_CAUSAL_CONTROL = true', [StringComparison]::Ordinal) -ge 0 -or
+    $pairedContractSource.IndexOf('historical I2F is the active causal control', [StringComparison]::OrdinalIgnoreCase) -ge 0) {
+    throw 'I2G paired contract still treats historical I2F as the active causal control.'
+}
+if ($pairedContractSource -match '(?m)^NO_CODE_OR_CONFIGURATION_CHANGE_BETWEEN_PHASES = true\s*$') {
+    throw 'I2G paired contract still uses the obsolete configuration invariant.'
+}
+if ($pairedContractSource -match '(?m)^(I2G_CONTROL_COUNTER_DISCOVERY_RUNS|I2G_TREATMENT_COUNTER_DISCOVERY_RUNS|TOTAL_I2G_COUNTER_DISCOVERY_RUNS) = \d+\s*$') {
+    throw 'I2G paired contract still presents an unqualified actual run count.'
+}
+Write-Host 'I2G_PAIRED_CONTROL_TREATMENT_CONTRACT=PASS'
+Write-Host 'I2G_PAIRED_PHASE_TRANSITION_CONTRACT=PASS'
+function Get-I2gPrivilegeCategoryBody {
+    param([string]$CategoryName)
+    return [regex]::Match(
+        $i2gContractSource,
+        "(?ms)^$([regex]::Escape($CategoryName)) =\r?\n(?<body>.*?)(?=^[A-Z0-9_]+ =|\z)"
+    ).Groups['body'].Value
+}
+$mustRemainAbsentLine = Get-I2gPrivilegeCategoryBody 'MUST_REMAIN_ABSENT'
+$mustRemainDisabledLine = Get-I2gPrivilegeCategoryBody 'MUST_REMAIN_DISABLED'
+$mustRemainEnabledLine = Get-I2gPrivilegeCategoryBody 'MUST_REMAIN_ENABLED'
+if ([string]::IsNullOrWhiteSpace($mustRemainAbsentLine) -or
+    [string]::IsNullOrWhiteSpace($mustRemainDisabledLine) -or
+    [string]::IsNullOrWhiteSpace($mustRemainEnabledLine)) {
+    throw 'I2G privilege-state classification categories are missing.'
+}
+foreach ($mustRemainAbsentPrivilege in @(
+        'SeDebugPrivilege',
+        'SeCreatePagefilePrivilege',
+        'SeCreatePermanentPrivilege',
+        'SeCreateSymbolicLinkPrivilege',
+        'SeDelegateSessionUserImpersonatePrivilege',
+        'SeIncreaseBasePriorityPrivilege',
+        'SeLockMemoryPrivilege',
+        'SeTcbPrivilege',
+        'SeBackupPrivilege',
+        'SeLoadDriverPrivilege',
+        'SeManageVolumePrivilege',
+        'SeRestorePrivilege',
+        'SeSecurityPrivilege',
+        'SeSystemEnvironmentPrivilege',
+        'SeTakeOwnershipPrivilege'
+    )) {
+    if ($mustRemainAbsentLine.IndexOf($mustRemainAbsentPrivilege, [StringComparison]::Ordinal) -lt 0) {
+        throw "I2G MUST_REMAIN_ABSENT classification is missing: $mustRemainAbsentPrivilege"
+    }
+}
+foreach ($mustRemainDisabledPrivilege in @(
+        'SeAuditPrivilege',
+        'SeIncreaseWorkingSetPrivilege',
+        'SeTimeZonePrivilege',
+        'SeAssignPrimaryTokenPrivilege',
+        'SeIncreaseQuotaPrivilege',
+        'SeShutdownPrivilege',
+        'SeSystemtimePrivilege',
+        'SeUndockPrivilege'
+    )) {
+    if ($mustRemainDisabledLine.IndexOf($mustRemainDisabledPrivilege, [StringComparison]::Ordinal) -lt 0 -or
+        $mustRemainAbsentLine.IndexOf($mustRemainDisabledPrivilege, [StringComparison]::Ordinal) -ge 0) {
+        throw "I2G MUST_REMAIN_DISABLED classification is invalid: $mustRemainDisabledPrivilege"
+    }
+}
+foreach ($mustRemainEnabledPrivilege in @(
+        'SeChangeNotifyPrivilege',
+        'SeCreateGlobalPrivilege',
+        'SeImpersonatePrivilege',
+        'SeSystemProfilePrivilege',
+        'SeProfileSingleProcessPrivilege'
+    )) {
+    if ($mustRemainEnabledLine.IndexOf($mustRemainEnabledPrivilege, [StringComparison]::Ordinal) -lt 0) {
+        throw "I2G MUST_REMAIN_ENABLED classification is missing: $mustRemainEnabledPrivilege"
+    }
+}
+Write-Host 'I2G_BASELINE_RECONSTRUCTION_CONTRACT=PASS'
+Write-Host 'I2G_PRIVILEGE_STATE_CLASSIFICATIONS=PASS'
 $legacyCurrentStateSource = @(
     Get-Content -LiteralPath $ArchitectureDoc -Raw
     Get-Content -LiteralPath $ExecutionPlan -Raw
@@ -1633,6 +1826,7 @@ $i2fClosureDocumentation = @(
     Get-Content -LiteralPath $ExecutionPlan -Raw
     Get-Content -LiteralPath $QualificationReadme -Raw
     Get-Content -LiteralPath $ResidualDifferential -Raw
+    Get-Content -LiteralPath $I2gSelectionDocument -Raw
 ) -join [Environment]::NewLine
 foreach ($requiredI2fClosureText in @(
         'I2F_RESULT = PASS_WITH_NEGATIVE_COUNTER_ACCESS_RESULT',
@@ -1649,7 +1843,9 @@ foreach ($requiredI2fClosureText in @(
         'I2F_REAL_RERUN_MACHINE_STATE = UNCHANGED',
         'counter_discovery_cli_executed = true after Command::spawn succeeds',
         'power_sampling_runtime_executed = false',
-        'I2G_VARIABLE = UNRESOLVED',
+        'I2G_VARIABLE = SeProfileSingleProcessPrivilege',
+        'I2G_VARIABLE_SELECTION = PASS_READ_ONLY',
+        'I2G_SELECTION_CONFIDENCE = MEDIUM',
         'PRODUCTION_ACCOUNT = UNRESOLVED',
         'LOCAL_SYSTEM_PRODUCTION_SELECTION = NOT_AUTHORIZED'
     )) {
