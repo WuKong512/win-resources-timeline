@@ -510,6 +510,10 @@ function Get-I2eTreatmentResumePlan {
         treatment_only = $true
         exact_right = $I2eRequiredRight
         artifact_sha256 = $ExpectedArtifactSha256
+        authoritative_experiment_id = $I2eAuthoritativeExperimentId
+        gate_consumed = $I2eRealGateConsumed
+        treatment_resume_allowed = $I2eTreatmentResumeAllowed
+        experiment_status = 'CLOSED / RERUN_FORBIDDEN'
         no_production_account_switch = $true
     }
 }
@@ -523,6 +527,8 @@ if ($InternalTestOnlyPreMutationSentinel -and -not $ExecuteAuthorizedTreatmentOn
 if (-not $ExecuteAuthorizedTreatmentOnly) {
     Get-I2eTreatmentResumePlan | ConvertTo-Json -Depth 20
     Write-Host 'I2E_TREATMENT_RESUME_PLAN_ONLY=true'
+    Write-Host 'I2E_RERUN=FORBIDDEN'
+    Write-Host "AUTHORITATIVE_EXPERIMENT=$I2eAuthoritativeExperimentId"
     Write-Host 'No service, LSA mutation, or AMD runtime was performed.'
     return
 }
@@ -530,6 +536,10 @@ if ($InternalTestOnlyPreMutationSentinel) {
     Write-Host 'I2E_TREATMENT_RESUME_AUTHORIZED_PRE_MUTATION_SENTINEL=true'
     Write-Host 'No service, LSA mutation, token adjustment, or AMD runtime was performed.'
     return
+}
+
+if ($I2eRealGateConsumed -or -not $I2eTreatmentResumeAllowed) {
+    throw ('I2E_TREATMENT_RESUME_RERUN_FORBIDDEN: authoritative I2E treatment attempt {0} is closed. The historical treatment result and rollback are immutable; use a fresh future experiment task/harness for any new capability question.' -f $I2eAuthoritativeExperimentId)
 }
 
 $null = Assert-I2eAdministrator

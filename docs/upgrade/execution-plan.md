@@ -184,7 +184,7 @@ wrapper 的非 AMD synthetic validation 和静态 PE/hash/signature preflight �
 runtime complete。不得运行 B1 或开始 `CPU-SENSOR-AMD-PROVIDER-DESIGN`。
 详见 [`docs/measurements/cpu-sensor-amd-executable-directory-runtime-confirmation.md`](../measurements/cpu-sensor-amd-executable-directory-runtime-confirmation.md)。
 
-## AMD CURRENT STATE RECONCILIATION
+## HISTORICAL / SUPERSEDED — AMD CURRENT STATE RECONCILIATION (SPIKE HANDOFF)
 
 The earlier AMD investigation sections explicitly marked
 `HISTORICAL / SUPERSEDED` above retain their raw findings, but their former
@@ -967,7 +967,7 @@ NEXT_GATE = HUMAN_SETUP_ONLY
 No qualification wrapper was run during this repair. The real AMD runtime
 gate remains unconsumed.
 
-## AMD-PRIVILEGE-I2B COUNTER AVAILABILITY DIFFERENTIAL PREPARATION
+## HISTORICAL / SUPERSEDED — AMD-PRIVILEGE-I2B COUNTER AVAILABILITY DIFFERENTIAL PREPARATION
 
 The bounded real I2 run consumed the real-runtime gate and reached the AMD
 counter backend from the LocalService broker. It must not be rerun as part of
@@ -1078,7 +1078,7 @@ NEXT_GATE = HUMAN_COUNTER_DISCOVERY_DIFFERENTIAL
 `COUNTER_PRIVILEGE_DIFFERENTIAL_REQUIRED` remains the result classification;
 this does not mark AMD-PRIVILEGE-I2 PASS or select LocalSystem for production.
 
-## AMD-PRIVILEGE-I2C SYSTEM COUNTER DISCOVERY COMPARISON PREPARATION
+## HISTORICAL / SUPERSEDED — AMD-PRIVILEGE-I2C SYSTEM COUNTER DISCOVERY COMPARISON PREPARATION
 
 The completed LocalService differential side is authoritative real evidence and
 must not be rerun. Its duplicate cleanup invocation affected only the single
@@ -1189,7 +1189,7 @@ PR22_STATE = DRAFT
 NEXT_GATE = HUMAN_I2F_SELF_ENABLE_QUALIFICATION_REVIEW
 ```
 
-## PR22 I2F cleanup entrypoint retirement closure
+## HISTORICAL / SUPERSEDED — PR22 I2F cleanup entrypoint retirement closure
 
 This is the current state and supersedes earlier I2F preparation and recovery
 instructions. The authoritative I2F experiment completed full rollback, so its
@@ -1335,7 +1335,7 @@ as an explicit offline closure-contract fixture for the authoritative I2E
 negative token-enablement result. It is marked as an example and is not a copy
 of, or replacement for, the immutable real ProgramData evidence.
 
-## PR22 AMD-I2E treatment pre-run review closure
+## HISTORICAL / SUPERSEDED — PR22 AMD-I2E treatment pre-run review closure
 
 PR #22's two confirmed treatment blockers are closed offline. The immutable
 real CONTROL evidence remains authoritative (`POWER_UNAVAILABLE`) and was not
@@ -1373,7 +1373,7 @@ FROZEN_QUALIFICATION_ARTIFACT_SHA256 = 871CD20D228BD9510606DE640F516F62C2983B9F4
 ARTIFACT_CHANGED = false
 NEXT_GATE = HUMAN_I2E_TREATMENT_ONLY_RESUME_REVIEW
 
-## AMD-PRIVILEGE-I2F PRE-RUN REVIEW CLOSURE
+## HISTORICAL / SUPERSEDED — AMD-PRIVILEGE-I2F PRE-RUN REVIEW CLOSURE
 
 I2F_ROLLBACK_STOP_FIRST = PASS_STATIC
 I2F_PROCESS_EVIDENCE_UNKNOWN_NOT_ZERO = PASS
@@ -1424,7 +1424,7 @@ REAL_CONTROL_EVIDENCE = PRESERVED
 TREATMENT = PENDING_HUMAN_AUTHORIZATION
 ```
 
-## PR22 I2E partial rollback retry closure
+## HISTORICAL / SUPERSEDED — PR22 I2E partial rollback retry closure
 
 Cleanup retries now treat the split policy/effective rollback state as
 authoritative. An already verified policy removal is re-read in both LSA
@@ -1445,7 +1445,7 @@ PRODUCTION_ACCOUNT = UNRESOLVED
 NEXT_GATE = HUMAN_I2E_TREATMENT_ONLY_RESUME_REVIEW
 ```
 
-## PR22 I2E historical pointer schema compatibility closure
+## HISTORICAL / SUPERSEDED — PR22 I2E historical pointer schema compatibility closure
 
 The latest treatment-only invocation stopped before LSA mutation because a
 historical `ConvertFrom-Json` pointer was a `PSCustomObject` without the newer
@@ -1519,7 +1519,7 @@ discovery has not executed. The future Administrator wrapper intentionally
 consumes the coupled SYSTEM `timechart --list` comparison gate; there is no
 separate setup-only stage.
 
-## AMD-PRIVILEGE-I2E SERVICE-SID SYSTEM-PROFILE EXPERIMENT PREPARATION
+## HISTORICAL / SUPERSEDED — AMD-PRIVILEGE-I2E SERVICE-SID SYSTEM-PROFILE EXPERIMENT PREPARATION
 
 I2E was the qualification-only step after the authoritative I2D
 read-only differential. I2D established that LocalService reports
@@ -1589,7 +1589,7 @@ LSA_POLICY_HANDLES = OPERATION_SPECIFIC_MINIMUM_ACCESS
 NEXT_GATE = HUMAN_I2E_TREATMENT_ONLY_RESUME
 ~~~
 
-## AMD-PRIVILEGE-I2E PRE-CONTROL SCM IDENTITY INCIDENT CLOSURE
+## HISTORICAL / SUPERSEDED — AMD-PRIVILEGE-I2E PRE-CONTROL SCM IDENTITY INCIDENT CLOSURE
 
 The first human-authorized I2E invocation did not reach the control phase. The
 qualification wrapper attempted `sc.exe create` with the bare SCM account value
@@ -1635,7 +1635,7 @@ The existing failed-attempt pointer and evidence must be closed by the human
 with the repaired cleanup wrapper before any new I2E invocation. No control,
 treatment, LSA mutation, or AMD runtime was executed by the failed attempt.
 
-## AMD-PRIVILEGE-I2E CONTROL-COMPLETE INCIDENT CLOSURE — CURRENT STATE
+## HISTORICAL / SUPERSEDED — AMD-PRIVILEGE-I2E CONTROL-COMPLETE INCIDENT CLOSURE — CURRENT STATE
 
 The next human invocation corrected the SCM account spelling and reached the
 real CONTROL phase. CONTROL completed under the existing LocalService service
@@ -1685,7 +1685,7 @@ Set-Location 'F:\File\codex\codex-worktrees\ac74\resource-timeline'
 & '.\tools\amd-privilege-qualification\resume-admin-amd-i2e-treatment.ps1' -ExecuteAuthorizedTreatmentOnly
 ```
 
-## AMD-PRIVILEGE-I2E TREATMENT-RESUME EVIDENCE PATH CLOSURE
+## HISTORICAL / SUPERSEDED — AMD-PRIVILEGE-I2E TREATMENT-RESUME EVIDENCE PATH CLOSURE
 
 The treatment-only resume previously derived a nested `counter-discovery`
 directory when validating the immutable CONTROL phase. The real CONTROL run
@@ -1980,7 +1980,7 @@ PRODUCTION_ACCOUNT_SWITCH = NOT_AUTHORIZED
 NEXT_GATE = HUMAN_ELEVATED_READ_ONLY_I2D_EVIDENCE_COLLECTION
 ```
 
-## PR22 I2F real closure / counter-discovery evidence repair
+## HISTORICAL / SUPERSEDED — PR22 I2F real closure / counter-discovery evidence repair
 
 The authoritative I2F run consumed the single real self-enable gate. It must
 not be rerun. The exact Service SID assignment, pre-enable gate, native
@@ -2060,7 +2060,7 @@ I2G_REAL_RUNTIME = 0
 No I2G variable is selected, no SYSTEM/I2F rerun is authorized, and production
 account selection remains unresolved.
 
-## PR22 I2F consumed-gate runtime guard closure
+## HISTORICAL / SUPERSEDED — PR22 I2F consumed-gate runtime guard closure
 
 The authoritative I2F real qualification has already consumed its one-time
 gate. The historical executable remains available for plan-only and guarded
@@ -2103,3 +2103,40 @@ process state unchanged. The offline sentinel remains an explicitly guarded
 test seam and is not a real experiment authorization. A new capability
 experiment requires a distinct I2G contract, harness, and human gate; no I2G
 variable is selected here.
+
+## AMD CURRENT STATE RECONCILIATION — CURRENT / AUTHORITATIVE
+
+All preceding AMD handoff blocks are historical snapshots. They remain for
+traceability but are superseded by this single current state; historical
+commands must not be treated as authorization.
+
+```text
+AMD_SERVICE_CONTEXT_I1 = COMPLETED / PASS
+AMD_PRIVILEGE_I2 = COMPLETED
+I2E = CLOSED / RERUN_FORBIDDEN
+I2E_REAL_PAIRED_ENTRYPOINT = PERMANENTLY_FAIL_CLOSED
+I2E_REAL_TREATMENT_RESUME_ENTRYPOINT = PERMANENTLY_FAIL_CLOSED
+I2E_REAL_CLEANUP_ENTRYPOINT = PERMANENTLY_FAIL_CLOSED
+I2E_HISTORICAL_EVIDENCE = IMMUTABLE
+I2E_RERUN = FORBIDDEN
+I2E_CLEANUP_RERUN = FORBIDDEN
+I2F = REAL_COMPLETED / PASS_WITH_NEGATIVE_COUNTER_ACCESS_RESULT / RERUN_FORBIDDEN
+I2F_AUTHORITATIVE_SCOPE = f68bf4d3d36547a0ba753cff489bb6eb
+I2F_REAL_EXECUTION_ENTRYPOINT = PERMANENTLY_FAIL_CLOSED
+I2F_REAL_CLEANUP_ENTRYPOINT = PERMANENTLY_FAIL_CLOSED
+I2F_FULL_ROLLBACK = REAL_PASS
+LOCAL_SERVICE_POWER_COUNTER_ACCESS = UNAVAILABLE
+SYSTEM_POWER_COUNTER_ACCESS = AVAILABLE / HISTORICAL REAL DIFFERENTIAL
+SECURITY_CONTEXT_DIFFERENTIAL = REAL_CONFIRMED
+SE_SYSTEM_PROFILE_PRIVILEGE_ALONE_SUFFICIENT = false
+SE_SYSTEM_PROFILE_PRIVILEGE_NECESSITY = UNRESOLVED
+MINIMUM_REQUIRED_CAPABILITY = UNRESOLVED
+I2G_VARIABLE = UNRESOLVED
+I2G_HARNESS = NOT_IMPLEMENTED
+PRODUCTION_ACCOUNT = UNRESOLVED
+LOCAL_SYSTEM_PRODUCTION_SELECTION = NOT_AUTHORIZED
+PRODUCTION_ADMISSION = NOT_COMPLETE
+NEXT_GATE = REVIEW_RESIDUAL_DIFFERENTIAL_AND_SELECT_SINGLE_I2G_VARIABLE
+NEXT_TASK = UNRESOLVED_PENDING_I2G_VARIABLE_SELECTION
+EXECUTION_PLAN_SINGLE_CURRENT_STATE = PASS
+```

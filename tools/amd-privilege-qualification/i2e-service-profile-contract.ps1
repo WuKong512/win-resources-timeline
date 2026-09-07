@@ -14,6 +14,17 @@ $I2eForbiddenPrivileges = @('SeProfileSingleProcessPrivilege', 'SeDebugPrivilege
 $I2eFixedArguments = @('timechart', '--list')
 $I2eOutputSubdirectory = 'ResourceTimeline\qualification\amd-system-profile'
 
+# The I2E paired experiment, treatment-only resume, and standalone cleanup are
+# historical gates.  Their retirement is source-controlled contract state; it
+# is deliberately independent of ProgramData pointers, evidence directories,
+# service registration, and artifact hashes.
+$I2eRealGateConsumed = $true
+$I2eRealExperimentAllowed = $false
+$I2eTreatmentResumeAllowed = $false
+$I2eRealCleanupAllowed = $false
+$I2eAuthoritativeExperimentId = '3935ac9082954bcfb2b1f94c54cf95d7'
+$I2eAuthoritativeRollbackComplete = $true
+
 function Get-I2ePropertyValue {
     param(
         [AllowNull()][object]$Object,
@@ -42,6 +53,13 @@ function Get-I2eExperimentPlan {
         sampling = $false
         paired_phases = @('CONTROL', 'TREATMENT')
         intentional_variable = 'DEDICATED_SERVICE_SID_HAS_SeSystemProfilePrivilege'
+        authoritative_experiment_id = $I2eAuthoritativeExperimentId
+        real_gate_consumed = $I2eRealGateConsumed
+        real_experiment_allowed = $I2eRealExperimentAllowed
+        treatment_resume_allowed = $I2eTreatmentResumeAllowed
+        real_cleanup_allowed = $I2eRealCleanupAllowed
+        authoritative_rollback_complete = $I2eAuthoritativeRollbackComplete
+        experiment_status = 'CLOSED / RERUN_FORBIDDEN'
         forbidden_account_wide_mutation = 'S-1-5-19'
         forbidden_group_mutation = 'S-1-5-32-544'
         artifact_sha256 = $ArtifactSha256

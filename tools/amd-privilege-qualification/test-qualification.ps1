@@ -21,6 +21,7 @@ $I2eCleanup = Join-Path $ToolRoot 'cleanup-admin-amd-i2e-service-profile-experim
 $I2eResumeContract = Join-Path $ToolRoot 'i2e-treatment-resume-contract.ps1'
 $I2eResume = Join-Path $ToolRoot 'resume-admin-amd-i2e-treatment.ps1'
 $I2eResumeEntrypointTest = Join-Path $ToolRoot 'test-i2e-resume-entrypoint.ps1'
+$I2eRetirementEntrypointTest = Join-Path $ToolRoot 'test-i2e-retirement-entrypoints.ps1'
 $I2fContract = Join-Path $ToolRoot 'i2f-service-profile-contract.ps1'
 $I2fSetup = Join-Path $ToolRoot 'run-admin-amd-i2f-service-profile-experiment.ps1'
 $I2fCleanup = Join-Path $ToolRoot 'cleanup-admin-amd-i2f-service-profile-experiment.ps1'
@@ -28,6 +29,7 @@ $I2fEntrypointScopeTest = Join-Path $ToolRoot 'test-i2f-entrypoint-scope.ps1'
 $I2eFinalFixture = Join-Path $ToolRoot 'i2e-token-materialization-final.example.json'
 $WindowsSource = Join-Path $ToolRoot 'src\windows.rs'
 $ExecutionPlan = Join-Path $ToolRoot '..\..\docs\upgrade\execution-plan.md'
+$ArchitectureDoc = Join-Path $ToolRoot '..\..\docs\architecture\cpu-sensor-amd-privilege-deployment.md'
 $QualificationReadme = Join-Path $ToolRoot 'README.md'
 $ResidualDifferential = Join-Path $ToolRoot '..\..\docs\upgrade\amd-system-vs-i2f-residual-differential.md'
 
@@ -49,6 +51,7 @@ foreach ($wrapper in @(
         $I2eResumeContract,
         $I2eResume,
         $I2eResumeEntrypointTest,
+        $I2eRetirementEntrypointTest,
         $I2fContract,
         $I2fSetup,
         $I2fCleanup,
@@ -87,7 +90,7 @@ function Assert-I2eNoPidAssignment {
     }
 }
 
-foreach ($i2eScript in @($I2eRuntimeLibrary, $I2eSetup, $I2eCleanup, $I2eContract, $I2eResumeContract, $I2eResume, $I2eResumeEntrypointTest, $I2fSetup, $I2fCleanup, $I2fContract, $I2fEntrypointScopeTest)) {
+foreach ($i2eScript in @($I2eRuntimeLibrary, $I2eSetup, $I2eCleanup, $I2eContract, $I2eResumeContract, $I2eResume, $I2eResumeEntrypointTest, $I2eRetirementEntrypointTest, $I2fSetup, $I2fCleanup, $I2fContract, $I2fEntrypointScopeTest)) {
     Assert-I2eNoPidAssignment -Path $i2eScript
 }
 Write-Host 'I2E_PID_AUTOMATIC_VARIABLE_ASSIGNMENT_AUDIT=PASS'
@@ -1477,7 +1480,7 @@ if ($counterDiscoverySource -match '--event|--output-dir|--duration|--interval')
 Write-Host 'COUNTER_DISCOVERY_CLIENT_WRAPPER_IS_NON_SAMPLING=PASS'
 
 $readmeSource = Get-Content -LiteralPath (Join-Path $ToolRoot 'README.md') -Raw
-$i2bStart = $readmeSource.IndexOf('## I2B human handoff: non-sampling counter discovery')
+$i2bStart = $readmeSource.IndexOf('## HISTORICAL / CONSUMED / DO NOT RUN — I2B human handoff: non-sampling counter discovery')
 $i2cStart = $readmeSource.IndexOf('## HISTORICAL / SUPERSEDED I2C human handoff: SYSTEM counter-discovery comparison')
 if ($i2bStart -lt 0 -or $i2cStart -le $i2bStart) {
     throw 'README does not contain a bounded I2B handoff section.'
@@ -1533,6 +1536,14 @@ if ($LASTEXITCODE -ne 0) {
 $i2eResumeEntrypointOutput | ForEach-Object { Write-Host $_ }
 Write-Host 'I2E_RESUME_ENTRYPOINT_REGRESSION=PASS'
 
+$i2eRetirementEntrypointOutput = @(& powershell.exe -NoProfile -ExecutionPolicy Bypass -File $I2eRetirementEntrypointTest `
+        -ToolRoot $ToolRoot 2>&1 | ForEach-Object { [string]$_ })
+if ($LASTEXITCODE -ne 0) {
+    throw "I2E retirement entrypoint tests failed: $($i2eRetirementEntrypointOutput -join [Environment]::NewLine)"
+}
+$i2eRetirementEntrypointOutput | ForEach-Object { Write-Host $_ }
+Write-Host 'I2E_RETIREMENT_ENTRYPOINT_REGRESSION=PASS'
+
 $counterDiscoveryFunction = [regex]::Match(
     $windowsSourceText,
     '(?s)fn\s+execute_counter_discovery_at_with_prefix\(.*?\n}\n\nfn\s+start_session'
@@ -1550,6 +1561,30 @@ foreach ($documentationPath in @($ExecutionPlan, $QualificationReadme, $Residual
         throw "I2F real-closure documentation is missing: $documentationPath"
     }
 }
+$architectureSource = Get-Content -LiteralPath $ArchitectureDoc -Raw
+$currentDocumentation = $architectureSource + [Environment]::NewLine +
+    (Get-Content -LiteralPath $ExecutionPlan -Raw) + [Environment]::NewLine +
+    (Get-Content -LiteralPath $QualificationReadme -Raw)
+foreach ($requiredI2eCurrentStateText in @(
+        'I2E = CLOSED / RERUN_FORBIDDEN',
+        'I2F = REAL_COMPLETED / PASS_WITH_NEGATIVE_COUNTER_ACCESS_RESULT / RERUN_FORBIDDEN',
+        'I2E_REAL_PAIRED_ENTRYPOINT = PERMANENTLY_FAIL_CLOSED',
+        'I2E_REAL_TREATMENT_RESUME_ENTRYPOINT = PERMANENTLY_FAIL_CLOSED',
+        'I2E_REAL_CLEANUP_ENTRYPOINT = PERMANENTLY_FAIL_CLOSED',
+        'I2E_HISTORICAL_EVIDENCE = IMMUTABLE',
+        'I2E_RERUN = FORBIDDEN',
+        'I2E_CLEANUP_RERUN = FORBIDDEN',
+        'I2G_VARIABLE = UNRESOLVED',
+        'NEXT_GATE = REVIEW_RESIDUAL_DIFFERENTIAL_AND_SELECT_SINGLE_I2G_VARIABLE',
+        'NEXT_TASK = UNRESOLVED_PENDING_I2G_VARIABLE_SELECTION'
+    )) {
+    if ($currentDocumentation.IndexOf($requiredI2eCurrentStateText, [StringComparison]::Ordinal) -lt 0) {
+        throw "I2E current-state reconciliation is missing: $requiredI2eCurrentStateText"
+    }
+}
+Write-Host 'ARCHITECTURE_SINGLE_AUTHORITATIVE_CURRENT_STATE=PASS'
+Write-Host 'EXECUTION_PLAN_SINGLE_CURRENT_STATE=PASS'
+Write-Host 'README_CURRENT_STATE_RECONCILED=PASS'
 $i2fClosureDocumentation = @(
     Get-Content -LiteralPath $ExecutionPlan -Raw
     Get-Content -LiteralPath $QualificationReadme -Raw

@@ -4,6 +4,38 @@ This is an independent, qualification-only Windows Service Broker artifact for
 `AMD-PRIVILEGE-I2`. It is not the Resource Timeline collector, production
 provider, installer, autostart path, or database writer.
 
+## CURRENT STATUS — AUTHORITATIVE
+
+I2E paired, treatment-resume, and standalone cleanup real entrypoints are
+retired and permanently fail closed. I2F experiment and cleanup real
+entrypoints are also retired. All historical real gates are consumed; only
+plan-only, `LibraryOnly`, synthetic validation, and explicitly guarded offline
+sentinels remain available. No production account is selected. The next
+research gate is residual SYSTEM-versus-I2F analysis followed by selection of a
+single-variable I2G harness.
+
+```text
+I2E_REAL_PAIRED_ENTRYPOINT = PERMANENTLY_FAIL_CLOSED
+I2E_REAL_TREATMENT_RESUME_ENTRYPOINT = PERMANENTLY_FAIL_CLOSED
+I2E_REAL_CLEANUP_ENTRYPOINT = PERMANENTLY_FAIL_CLOSED
+I2E_HISTORICAL_EVIDENCE = IMMUTABLE
+I2E_RERUN = FORBIDDEN
+I2E_CLEANUP_RERUN = FORBIDDEN
+I2F_REAL_EXECUTION_ENTRYPOINT = PERMANENTLY_FAIL_CLOSED
+I2F_REAL_CLEANUP_ENTRYPOINT = PERMANENTLY_FAIL_CLOSED
+I2F_RERUN = FORBIDDEN
+I2F_CLEANUP_RERUN = FORBIDDEN
+I2F_RESULT = PASS_WITH_NEGATIVE_COUNTER_ACCESS_RESULT
+I2G_VARIABLE = UNRESOLVED
+I2G_HARNESS = NOT_IMPLEMENTED
+PRODUCTION_ACCOUNT = UNRESOLVED
+LOCAL_SYSTEM_PRODUCTION_SELECTION = NOT_AUTHORIZED
+PRODUCTION_ADMISSION = NOT_COMPLETE
+NEXT_GATE = REVIEW_RESIDUAL_DIFFERENTIAL_AND_SELECT_SINGLE_I2G_VARIABLE
+NEXT_TASK = UNRESOLVED_PENDING_I2G_VARIABLE_SELECTION
+README_CURRENT_STATE_RECONCILED=PASS
+```
+
 The automated path is completely synthetic. `--synthetic` exercises the
 versioned semantic protocol, bounded framing, explicit pipe-DACL policy,
 client identity authorization, one-session arbitration, ownership,
@@ -95,7 +127,7 @@ The real run is at most one bounded `LocalService + Service SID + Session 0`
 AMD package-power session. Cancellation is qualified synthetically and is not
 performed against a real AMD runtime.
 
-## I2B human handoff: non-sampling counter discovery
+## HISTORICAL / CONSUMED / DO NOT RUN — I2B human handoff: non-sampling counter discovery
 
 This is the only authorized LocalService client sequence for the I2B
 differential. It is **NON_SAMPLING**, sends only
@@ -213,7 +245,7 @@ must not be substituted for either counter-discovery path:
 `run-standard-user-amd-privilege-client.ps1` remains preserved as the
 historical **I2 POWER-SAMPLING CLIENT**, not an active I2B command.
 
-## I2E service-SID SeSystemProfile minimum-variable experiment
+## HISTORICAL / SUPERSEDED — I2E service-SID SeSystemProfile minimum-variable experiment
 
 I2E prepared a paired control/treatment experiment against the real LocalService
 counter-availability differential. Its contract keeps the
@@ -278,7 +310,7 @@ NEXT_GATE = HUMAN_I2E_TREATMENT_ONLY_RESUME
 PRODUCTION_ACCOUNT = UNRESOLVED
 ~~~
 
-## Current I2E status: pre-control harness incident
+## HISTORICAL / SUPERSEDED — Current I2E status: pre-control harness incident
 
 The first human-authorized I2E invocation failed before Service creation:
 `sc.exe create` returned `1057` because the SCM-facing account value was the
@@ -308,7 +340,7 @@ HISTORICAL_NEXT_GATE_AT_FIRST_INCIDENT = HUMAN_I2E_FAILED_ATTEMPT_CLEANUP
 HISTORICAL_AFTER_CLEANUP_NEXT_GATE = HUMAN_SERVICE_SID_SESYSTEMPROFILE_EXPERIMENT_EXECUTION
 ```
 
-## Current I2E status: CONTROL complete, treatment-only resume prepared
+## HISTORICAL / SUPERSEDED — Current I2E status: CONTROL complete, treatment-only resume prepared
 
 The first corrected human I2E invocation reached and completed the real
 LocalService CONTROL phase. The authoritative result is `POWER_UNAVAILABLE`;
@@ -586,7 +618,7 @@ LOCAL_SYSTEM_PRODUCTION_SELECTION = NOT_AUTHORIZED
 NEXT_GATE = HUMAN_I2F_SELF_ENABLE_QUALIFICATION_REVIEW
 ```
 
-## PR22 I2F cleanup entrypoint retirement closure
+## HISTORICAL / SUPERSEDED — PR22 I2F cleanup entrypoint retirement closure
 
 This is the current state and supersedes earlier I2F preparation and recovery
 instructions. The authoritative I2F experiment completed full rollback, so
@@ -663,7 +695,7 @@ I2F_ARTIFACT_CHANGED = false
 NEXT_GATE = HUMAN_I2F_SELF_ENABLE_QUALIFICATION_REVIEW
 ```
 
-## PR22 I2F consumed-gate runtime guard closure
+## HISTORICAL / SUPERSEDED — PR22 I2F consumed-gate runtime guard closure
 
 This section supersedes the earlier I2F preparation-only status blocks in this
 README; those blocks are historical snapshots from before the real I2F gate was
@@ -712,7 +744,7 @@ spawned counter discovery is explicit while power sampling remains false.
 Any future capability experiment requires a fresh I2G task/harness and human
 authorization; I2G is not implemented or selected here.
 
-## PR22 I2F real closure / residual differential preparation
+## HISTORICAL / SUPERSEDED — PR22 I2F real closure / residual differential preparation
 
 The authoritative I2F qualification consumed exactly one real self-enable
 gate. It is closed and must not be rerun. The dedicated LocalService Service

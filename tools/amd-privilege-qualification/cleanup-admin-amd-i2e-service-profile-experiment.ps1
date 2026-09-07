@@ -1,6 +1,12 @@
 #requires -Version 5.1
 [CmdletBinding()]
-param()
+param(
+    [switch]$ExecuteAuthorizedCleanup,
+    [switch]$LibraryOnly,
+    # Internal offline-test seam. It is accepted only with the dedicated
+    # test environment marker and always returns before machine mutation.
+    [switch]$InternalTestOnlyPreMutationSentinel
+)
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
@@ -11,6 +17,44 @@ $ServiceName = $I2eServiceName
 $ArtifactPath = Join-Path $PSScriptRoot 'target\release\amd-privilege-qualification.exe'
 $QualificationRoot = Join-Path $env:ProgramData $I2eOutputSubdirectory
 $PointerPath = Join-Path $QualificationRoot 'I2E-EXPERIMENT-CURRENT.json'
+
+if ($LibraryOnly) { return }
+if ($InternalTestOnlyPreMutationSentinel -and $env:I2E_CLEANUP_OFFLINE_TEST_SENTINEL -cne 'true') {
+    throw 'The I2E cleanup pre-mutation sentinel is restricted to the offline test environment.'
+}
+if ($InternalTestOnlyPreMutationSentinel -and -not $ExecuteAuthorizedCleanup) {
+    throw 'The I2E cleanup pre-mutation sentinel requires -ExecuteAuthorizedCleanup.'
+}
+if (-not $ExecuteAuthorizedCleanup) {
+    [ordered]@{
+        schema = 'amd-service-profile-cleanup-plan/v2'
+        qualification_only = $true
+        service_name = $I2eServiceName
+        right = $I2eRequiredRight
+        all_rights = $false
+        authoritative_experiment = $I2eAuthoritativeExperimentId
+        gate_consumed = [bool]$I2eRealGateConsumed
+        real_cleanup = if ($I2eRealCleanupAllowed) { 'ALLOWED' } else { 'FORBIDDEN' }
+        authoritative_rollback = if ($I2eAuthoritativeRollbackComplete) { 'COMPLETE' } else { 'OPEN' }
+        candidate_evidence_roots = @()
+        fixed_cli_arguments = $I2eFixedArguments
+        sampling = $false
+    } | ConvertTo-Json -Depth 20
+    Write-Host 'I2E_CLEANUP_PLAN_ONLY=true'
+    Write-Host 'I2E_RERUN=FORBIDDEN'
+    Write-Host "AUTHORITATIVE_EXPERIMENT=$I2eAuthoritativeExperimentId"
+    Write-Host "I2E_CLEANUP_RERUN=$(if ($I2eRealCleanupAllowed) { 'ALLOWED' } else { 'FORBIDDEN' })"
+    Write-Host 'No service, LSA mutation, or AMD runtime was performed.'
+    return
+}
+if ($InternalTestOnlyPreMutationSentinel) {
+    Write-Host 'I2E_CLEANUP_AUTHORIZED_PRE_MUTATION_SENTINEL=true'
+    Write-Host 'No service, LSA mutation, token adjustment, or AMD runtime was performed.'
+    return
+}
+if ($I2eRealGateConsumed -or $I2eAuthoritativeRollbackComplete -or -not $I2eRealCleanupAllowed) {
+    throw ('I2E_CLEANUP_RERUN_FORBIDDEN: authoritative I2E experiment {0} already completed rollback. Historical I2E cleanup/finalization evidence is immutable.' -f $I2eAuthoritativeExperimentId)
+}
 
 function Assert-I2eCleanupAdministrator {
     $identity = [Security.Principal.WindowsIdentity]::GetCurrent()

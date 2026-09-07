@@ -61,13 +61,20 @@ function Invoke-I2ePhase {
 
 if ($LibraryOnly) { return }
 
-$null = Assert-I2eAdministrator
 if (-not $ExecuteAuthorizedExperiment) {
     Get-I2eExperimentPlan -ArtifactSha256 $ExpectedArtifactSha256 | ConvertTo-Json -Depth 20
     Write-Host 'I2E_PLAN_ONLY=true'
+    Write-Host 'I2E_RERUN=FORBIDDEN'
+    Write-Host "AUTHORITATIVE_EXPERIMENT=$I2eAuthoritativeExperimentId"
     Write-Host 'No service, LSA mutation, or AMD runtime was performed.'
     return
 }
+
+if ($I2eRealGateConsumed -or -not $I2eRealExperimentAllowed) {
+    throw ('I2E_RERUN_FORBIDDEN: authoritative I2E experiment {0} is closed. No further paired CONTROL/TREATMENT execution is allowed.' -f $I2eAuthoritativeExperimentId)
+}
+
+$null = Assert-I2eAdministrator
 
 if (-not (Test-Path -LiteralPath $ArtifactPath -PathType Leaf)) { throw ('Missing artifact: {0}' -f $ArtifactPath) }
 $artifactHash = (Get-FileHash -LiteralPath $ArtifactPath -Algorithm SHA256).Hash.ToUpperInvariant()
