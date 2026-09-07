@@ -2139,10 +2139,25 @@ I2G_VARIABLE = SeProfileSingleProcessPrivilege
 I2G_VARIABLE_SELECTION = PASS_READ_ONLY
 I2G_SELECTION_CONFIDENCE = MEDIUM
 I2G_SINGLE_VARIABLE_ISOLATABLE = true
+BLOCKER = I2G_STAGED_TREATMENT_TOKEN_MISCLASSIFIED_AS_EXACT_I2F_BASELINE
+BLOCKER_STATUS = CLOSED_OFFLINE
+PREVIOUS_BLOCKER = I2G_BASELINE_RECONSTRUCTION_CONTRACT_INCONSISTENT / CLOSED_OFFLINE
 I2G_BASELINE_RECONSTRUCTION_RIGHT = SeSystemProfilePrivilege
 I2G_TREATMENT_VARIABLE = SeProfileSingleProcessPrivilege
 TEMPORARY_POLICY_ASSIGNMENT_COUNT = 2
 SCIENTIFIC_TREATMENT_VARIABLE_COUNT = 1
+HISTORICAL_I2F_PROFILE_SINGLE_STATE = ABSENT
+I2G_MATERIALIZED_PROFILE_SINGLE_STATE = PRESENT + DISABLED
+I2G_STAGED_PROFILE_SINGLE_STATE = PRESENT + DISABLED
+I2G_TREATMENT_PROFILE_SINGLE_STATE = PRESENT + ENABLED
+I2G_NON_TREATMENT_BASELINE_INVARIANTS = EXACT_FINAL_I2F
+I2G_STAGED_TREATMENT_EXCEPTION = SeProfileSingleProcessPrivilege PRESENT + DISABLED
+STAGED_EXCEPTION_COUNT = 1
+BASELINE_RECONSTRUCTION_TOKEN_DELTA = SeSystemProfilePrivilege DISABLED -> ENABLED
+I2G_TREATMENT_MATERIALIZATION_DELTA = SeProfileSingleProcessPrivilege ABSENT -> PRESENT + DISABLED
+I2G_TREATMENT_ACTIVATION_DELTA = SeProfileSingleProcessPrivilege DISABLED -> ENABLED
+I2G_TOTAL_CAUSAL_TREATMENT_DELTA = SeProfileSingleProcessPrivilege ABSENT -> PRESENT + ENABLED
+NO_BASELINE_AMD_RUN = true
 I2G_HARNESS = NOT_IMPLEMENTED
 I2G_REAL_RUNTIME = 0
 I2G_HARNESS_IMPLEMENTATION_AUTHORIZED = false
@@ -2156,16 +2171,16 @@ EXECUTION_PLAN_SINGLE_CURRENT_STATE = PASS
 ```
 
 The current read-only research state selects exactly one future I2G variable:
-`SeProfileSingleProcessPrivilege`. The final I2F token state is the causal
-base, including `SeSystemProfilePrivilege = PRESENT + ENABLED`. Because a
-fresh Service SID cannot inherit the historical I2F policy assignment, the
-future design temporarily assigns two rights to that fresh SID: the baseline
-reconstruction right `SeSystemProfilePrivilege` and the selected treatment
-right `SeProfileSingleProcessPrivilege`. The baseline first enables only
-`SeSystemProfilePrivilege`; treatment then enables only
-`SeProfileSingleProcessPrivilege`, leaving exactly one baseline-to-treatment
-privilege-state change. This does not select LocalSystem, add Administrators
-membership, enable `SeDebugPrivilege`, or admit an AMD provider. The
-design-only contract and normalized matrix are in
+`SeProfileSingleProcessPrivilege`. Historical I2F is the existing control
+observation with ProfileSingle `ABSENT` and power unavailable. A fresh I2G
+Service SID materializes ProfileSingle as `PRESENT + DISABLED`, reconstructs
+the final-I2F non-treatment dimensions, and then enables ProfileSingle as the
+single treatment capability. The staged token is therefore not an exact copy
+of the historical I2F token. The total causal comparison is
+`ABSENT -> PRESENT + ENABLED`; within the future run, activation remains one
+state change, `DISABLED -> ENABLED`. This does not select LocalSystem, add
+Administrators membership, enable `SeDebugPrivilege`, or admit an AMD
+provider. No baseline AMD run is planned. The design-only contract and
+normalized matrix are in
 [`amd-i2g-variable-selection.md`](amd-i2g-variable-selection.md). No I2G
 harness or runtime exists.

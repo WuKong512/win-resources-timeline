@@ -152,18 +152,26 @@ The read-only review selected exactly one future variable:
 ```text
 I2G_VARIABLE_SELECTED = SeProfileSingleProcessPrivilege
 BASE_ACCOUNT = LocalService / S-1-5-19
-BASE_CONTEXT = final authoritative I2F post-enable context
-BLOCKER = I2G_BASELINE_RECONSTRUCTION_CONTRACT_INCONSISTENT
+BASE_CONTEXT = final-I2F non-treatment dimensions; ProfileSingle staged PRESENT + DISABLED
+BLOCKER = I2G_STAGED_TREATMENT_TOKEN_MISCLASSIFIED_AS_EXACT_I2F_BASELINE
 BLOCKER_STATUS = CLOSED_OFFLINE
+PREVIOUS_BLOCKER = I2G_BASELINE_RECONSTRUCTION_CONTRACT_INCONSISTENT / CLOSED_OFFLINE
 I2G_BASELINE_RECONSTRUCTION_RIGHT = SeSystemProfilePrivilege
 I2G_TREATMENT_VARIABLE = SeProfileSingleProcessPrivilege
 TEMPORARY_POLICY_ASSIGNMENT_COUNT = 2
 SCIENTIFIC_TREATMENT_VARIABLE_COUNT = 1
 EXPECTED_MATERIALIZED_TOKEN = SystemProfile PRESENT + DISABLED; ProfileSingle PRESENT + DISABLED
-EXPECTED_BASELINE_TOKEN = SystemProfile PRESENT + ENABLED; ProfileSingle PRESENT + DISABLED
+HISTORICAL_I2F_CONTROL = SystemProfile PRESENT + ENABLED; ProfileSingle ABSENT; POWER_UNAVAILABLE
+EXPECTED_STAGED_TOKEN = SystemProfile PRESENT + ENABLED; ProfileSingle PRESENT + DISABLED
 EXPECTED_TREATMENT_TOKEN = SystemProfile PRESENT + ENABLED; ProfileSingle PRESENT + ENABLED
-I2G_BASELINE_RECONSTRUCTION_TOKEN_DELTA = SeSystemProfilePrivilege DISABLED -> ENABLED
-I2G_TREATMENT_TOKEN_DELTA = SeProfileSingleProcessPrivilege DISABLED -> ENABLED
+I2G_NON_TREATMENT_BASELINE_INVARIANTS = EXACT_FINAL_I2F
+I2G_STAGED_TREATMENT_EXCEPTION = SeProfileSingleProcessPrivilege PRESENT + DISABLED
+STAGED_EXCEPTION_COUNT = 1
+BASELINE_RECONSTRUCTION_TOKEN_DELTA = SeSystemProfilePrivilege DISABLED -> ENABLED
+I2G_TREATMENT_MATERIALIZATION_DELTA = SeProfileSingleProcessPrivilege ABSENT -> PRESENT + DISABLED
+I2G_TREATMENT_ACTIVATION_DELTA = SeProfileSingleProcessPrivilege DISABLED -> ENABLED
+I2G_TOTAL_CAUSAL_TREATMENT_DELTA = SeProfileSingleProcessPrivilege ABSENT -> PRESENT + ENABLED
+NO_BASELINE_AMD_RUN = true
 ADMINISTRATORS_MEMBERSHIP_MUTATION = FORBIDDEN
 SE_DEBUG_PRIVILEGE_MUTATION = FORBIDDEN
 LOCAL_SYSTEM_AS_I2G_VARIABLE = FORBIDDEN_AS_NON_SINGLE_VARIABLE
@@ -175,11 +183,11 @@ I2G_REAL_RUNTIME = 0
 The fresh Service SID cannot inherit the historical I2F Service SID's LSA
 assignment. The future contract therefore temporarily assigns exactly two
 rights with different roles: `SeSystemProfilePrivilege` reconstructs the
-frozen final-I2F baseline, and `SeProfileSingleProcessPrivilege` is the one
-scientific treatment variable. The baseline token first enables only
-`SeSystemProfilePrivilege`; only after that gate passes does treatment enable
-`SeProfileSingleProcessPrivilege`. The baseline-to-treatment delta is exactly
-one privilege-state change. No baseline AMD run is planned.
+frozen final-I2F non-treatment state, and `SeProfileSingleProcessPrivilege`
+is the one scientific treatment variable. Historical I2F had ProfileSingle
+`ABSENT`; the fresh I2G materialized and staged token has it
+`PRESENT + DISABLED`, and only treatment enables it. No baseline AMD run is
+planned. The future staged token is not an exact copy of historical I2F.
 
 `SeProfileSingleProcessPrivilege` remains selected because it is a recorded
 SYSTEM-only enabled privilege with the strongest indirect semantic connection

@@ -217,13 +217,21 @@ I2G_SELECTION_RATIONALE = highest-scoring narrow SYSTEM-only capability with ind
 I2G_SINGLE_VARIABLE_ISOLATABLE = true
 BASE_ACCOUNT = NT AUTHORITY\LOCAL SERVICE
 BASE_ACCOUNT_SID = S-1-5-19
-BASE_SECURITY_CONTEXT = final authoritative I2F post-enable context
-BLOCKER = I2G_BASELINE_RECONSTRUCTION_CONTRACT_INCONSISTENT
+BASE_SECURITY_CONTEXT = final authoritative I2F non-treatment context; ProfileSingle staged PRESENT + DISABLED
+BLOCKER = I2G_STAGED_TREATMENT_TOKEN_MISCLASSIFIED_AS_EXACT_I2F_BASELINE
 BLOCKER_STATUS = CLOSED_OFFLINE
+PREVIOUS_BLOCKER = I2G_BASELINE_RECONSTRUCTION_CONTRACT_INCONSISTENT / CLOSED_OFFLINE
 I2G_BASELINE_RECONSTRUCTION_RIGHT = SeSystemProfilePrivilege
 I2G_TREATMENT_VARIABLE = SeProfileSingleProcessPrivilege
 TEMPORARY_POLICY_ASSIGNMENT_COUNT = 2
 SCIENTIFIC_TREATMENT_VARIABLE_COUNT = 1
+HISTORICAL_I2F_PROFILE_SINGLE_STATE = ABSENT
+I2G_MATERIALIZED_PROFILE_SINGLE_STATE = PRESENT + DISABLED
+I2G_STAGED_PROFILE_SINGLE_STATE = PRESENT + DISABLED
+I2G_TREATMENT_PROFILE_SINGLE_STATE = PRESENT + ENABLED
+I2G_NON_TREATMENT_BASELINE_INVARIANTS = EXACT_FINAL_I2F
+I2G_STAGED_TREATMENT_EXCEPTION = SeProfileSingleProcessPrivilege PRESENT + DISABLED
+STAGED_EXCEPTION_COUNT = 1
 BASELINE_RECONSTRUCTION_ROLE = frozen final-I2F state; not a new treatment
 TREATMENT_ROLE = selected single causal capability
 SE_SYSTEM_PROFILE_PRIVILEGE_STATE_IN_LOGICAL_BASELINE = PRESENT + ENABLED
@@ -258,8 +266,30 @@ executable code and does not create an authorization path.
 ```text
 I2G_BASE_CONTEXT =
   LocalService (S-1-5-19), fresh unrestricted dedicated Service SID,
-  Session 0, x64, System integrity, exact final-I2F token/group baseline,
-  exact fixed AMD CLI identity, fixed working directory and environment
+  Session 0, x64, System integrity; all non-treatment security-context
+  dimensions reproduce the final authoritative I2F state; the selected
+  treatment right is staged PRESENT + DISABLED before activation; exact fixed
+  AMD CLI identity, fixed working directory, and environment
+
+HISTORICAL_I2F_CONTROL =
+  TokenUser = LocalService / S-1-5-19;
+  SeSystemProfilePrivilege = PRESENT + ENABLED;
+  SeProfileSingleProcessPrivilege = ABSENT;
+  AMD_RESULT = POWER_UNAVAILABLE; no new control run
+
+I2G_MATERIALIZED_TOKEN =
+  SeSystemProfilePrivilege = PRESENT + DISABLED;
+  SeProfileSingleProcessPrivilege = PRESENT + DISABLED
+
+I2G_STAGED_TOKEN =
+  SeSystemProfilePrivilege = PRESENT + ENABLED;
+  SeProfileSingleProcessPrivilege = PRESENT + DISABLED;
+  I2G_NON_TREATMENT_BASELINE_INVARIANTS = EXACT_FINAL_I2F
+
+I2G_TREATMENT_TOKEN =
+  SeSystemProfilePrivilege = PRESENT + ENABLED;
+  SeProfileSingleProcessPrivilege = PRESENT + ENABLED;
+  all non-treatment dimensions unchanged from I2G_STAGED_TOKEN
 
 POLICY_ASSIGNMENT_BASELINE =
   fresh I2G Service SID temporarily receives SeSystemProfilePrivilege only
@@ -296,16 +326,21 @@ EXPECTED_MATERIALIZED_TOKEN =
   integrity states unchanged
 
 PHASE_B_BASELINE_RECONSTRUCTION =
-  enable SeSystemProfilePrivilege only; capture I2G-BASELINE-TOKEN.json;
-  do not launch AMD CLI before this exact baseline gate passes
+  enable SeSystemProfilePrivilege only; capture I2G-STAGED-TOKEN.json;
+  do not launch AMD CLI before the staged token gate passes
 
-EXPECTED_BASELINE_TOKEN =
+EXPECTED_STAGED_TOKEN =
   SeSystemProfilePrivilege = PRESENT + ENABLED;
   SeProfileSingleProcessPrivilege = PRESENT + DISABLED;
-  exact final-I2F relevant state; no Administrators SID; no SeDebugPrivilege
+  all non-treatment dimensions MATCH FINAL I2F; no Administrators SID;
+  no SeDebugPrivilege
 
-I2G_BASELINE_RECONSTRUCTION = EXACT_FINAL_I2F_RELEVANT_STATE
-I2G_BASELINE_RECONSTRUCTION_TOKEN_DELTA = SeSystemProfilePrivilege DISABLED -> ENABLED
+I2G_NON_TREATMENT_BASELINE_INVARIANTS = EXACT_FINAL_I2F
+I2G_BASELINE_RECONSTRUCTION = FINAL_I2F_NON_TREATMENT_STATE_RECONSTRUCTED
+I2G_STAGED_TREATMENT_RIGHT = SeProfileSingleProcessPrivilege PRESENT + DISABLED
+I2G_STAGED_TREATMENT_EXCEPTION = SeProfileSingleProcessPrivilege PRESENT + DISABLED
+STAGED_EXCEPTION_COUNT = 1
+BASELINE_RECONSTRUCTION_TOKEN_DELTA = SeSystemProfilePrivilege DISABLED -> ENABLED
 
 PHASE_C_TREATMENT =
   after baseline verification, enable SeProfileSingleProcessPrivilege only;
@@ -314,11 +349,15 @@ PHASE_C_TREATMENT =
 EXPECTED_TREATMENT_TOKEN =
   SeSystemProfilePrivilege = PRESENT + ENABLED;
   SeProfileSingleProcessPrivilege = PRESENT + ENABLED;
-  all other final-I2F relevant privilege, group, account, session, and
-  integrity states unchanged
+  all non-treatment dimensions MATCH FINAL I2F and are unchanged from the
+  staged token
 
-I2G_TREATMENT_TOKEN_DELTA = SeProfileSingleProcessPrivilege DISABLED -> ENABLED
-I2G_EXACT_TREATMENT_DELTA = ONE_PRIVILEGE_STATE_CHANGE
+I2G_TREATMENT_MATERIALIZATION_DELTA = SeProfileSingleProcessPrivilege ABSENT -> PRESENT + DISABLED
+I2G_TREATMENT_ACTIVATION_DELTA = SeProfileSingleProcessPrivilege DISABLED -> ENABLED
+I2G_EXACT_TREATMENT_ACTIVATION_DELTA = ONE_PRIVILEGE_STATE_CHANGE
+I2G_TOTAL_CAUSAL_TREATMENT_DELTA = SeProfileSingleProcessPrivilege ABSENT -> PRESENT + ENABLED
+I2G_TOTAL_CAUSAL_TREATMENT = SeProfileSingleProcessPrivilege ABSENT -> PRESENT + ENABLED
+SCIENTIFIC_TREATMENT_VARIABLE_COUNT = 1
 
 NO_BASELINE_AMD_RUN = true
 AMD_LAUNCH_GATE = baseline token gate must pass before any AMD CLI launch
@@ -401,8 +440,10 @@ PROCESS_OWNERSHIP =
 EVIDENCE_SCHEMA =
   immutable I2G scope; gate state; service/SID metadata;
   POLICY_ASSIGNMENT_BASELINE; POLICY_ASSIGNMENT_TREATMENT;
-  TOKEN_MATERIALIZED; TOKEN_BASELINE; TOKEN_TREATMENT;
-  BASELINE_RECONSTRUCTION_DELTA; TREATMENT_DELTA; relevant groups;
+  TOKEN_MATERIALIZED; TOKEN_STAGED; TOKEN_TREATMENT;
+  BASELINE_RECONSTRUCTION_DELTA; I2G_TREATMENT_MATERIALIZATION_DELTA;
+  I2G_TREATMENT_ACTIVATION_DELTA; I2G_TOTAL_CAUSAL_TREATMENT_DELTA;
+  relevant groups;
   AMD_CLI_IDENTITY; COUNTER_DISCOVERY_RESULT;
   POLICY_ROLLBACK_TREATMENT; POLICY_ROLLBACK_BASELINE; FULL_ROLLBACK;
   command; sampling=false; bounded stdout/stderr; exit code; normalized
@@ -413,12 +454,13 @@ RESULT_CLASSIFICATION =
   IDENTITY_MISMATCH, CLEANUP_FAILED, or INVALID_NO_CAUSAL_INTERPRETATION
 
 INVALID_RESULT_BASELINE_GATE =
-  INVALID_NO_CAUSAL_INTERPRETATION if baseline SeSystemProfilePrivilege is
-  not PRESENT + ENABLED; ProfileSingle is not PRESENT + DISABLED at baseline;
-  any unexpected privilege is present; any expected I2F state changes;
-  Administrators appears; TokenUser, session, or integrity changes; AMD CLI
-  identity mismatches; sampling is not false; treatment delta contains more
-  than ProfileSingle enablement; or rollback is incomplete
+  INVALID_NO_CAUSAL_INTERPRETATION if any non-treatment invariant differs from
+  final I2F; ProfileSingle is enabled before treatment; ProfileSingle is absent
+  from the staged token or has unexpected attributes; staged SystemProfile is
+  not PRESENT + ENABLED; Administrators appears; an unexpected SYSTEM-only
+  privilege appears; baseline reconstruction changes another privilege;
+  treatment activation changes more than ProfileSingle's enabled bit; AMD CLI
+  identity differs; sampling is not false; or rollback is incomplete
 
 ONE_TIME_GATE =
   I2G_GATE_CONSUMED = false;
@@ -431,14 +473,17 @@ ONE_TIME_GATE =
 
 The result interpretation is preregistered:
 
-- `SeProfileSingleProcessPrivilege enabled + POWER_AVAILABLE` means the
-  selected right is sufficient only in the preserved final-I2F base context.
-  It does not establish necessity, production suitability, or a minimum
-  privilege in another account/context.
+- `SeProfileSingleProcessPrivilege enabled + POWER_AVAILABLE` means that
+  introducing usable `SeProfileSingleProcessPrivilege` from historical
+  `ABSENT` to `PRESENT + ENABLED` in the preserved final-I2F non-treatment
+  context was sufficient to change counter discovery in this experiment. It
+  does not establish that enablement alone caused it, necessity, production
+  suitability, or a minimum privilege in another account/context.
 - `SeProfileSingleProcessPrivilege enabled + POWER_UNAVAILABLE` means that
-  adding this right alone to the preserved I2F base is insufficient. It does
-  not prove the right irrelevant in another context or prove that another
-  combination is unnecessary.
+  introducing this capability from `ABSENT` to `PRESENT + ENABLED` in the
+  preserved I2F non-treatment context was insufficient. It does not prove the
+  right universally irrelevant or prove that another combination is
+  unnecessary.
 - Any pre/post token, identity, group, CLI, sampling, or cleanup mismatch is
   a failed/invalid qualification result and must not be interpreted as a
   causal AMD result.
@@ -448,6 +493,12 @@ The result interpretation is preregistered:
 ```text
 I2G_VARIABLE = SeProfileSingleProcessPrivilege
 I2G_VARIABLE_SELECTION = PASS_READ_ONLY
+I2G_SELECTION_CONFIDENCE = MEDIUM
+I2G_SINGLE_VARIABLE_ISOLATABLE = true
+I2G_BASELINE_RECONSTRUCTION_RIGHT = SeSystemProfilePrivilege
+I2G_TREATMENT_VARIABLE = SeProfileSingleProcessPrivilege
+TEMPORARY_POLICY_ASSIGNMENT_COUNT = 2
+SCIENTIFIC_TREATMENT_VARIABLE_COUNT = 1
 I2G_HARNESS = NOT_IMPLEMENTED
 I2G_REAL_RUNTIME = 0
 I2G_HARNESS_IMPLEMENTATION_AUTHORIZED = false

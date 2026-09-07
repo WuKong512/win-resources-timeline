@@ -1620,21 +1620,35 @@ Write-Host 'EXECUTION_PLAN_SINGLE_CURRENT_STATE=PASS'
 Write-Host 'README_CURRENT_STATE_RECONCILED=PASS'
 $i2gContractSource = Get-Content -LiteralPath $I2gSelectionDocument -Raw
 foreach ($requiredI2gContractText in @(
-        'BLOCKER = I2G_BASELINE_RECONSTRUCTION_CONTRACT_INCONSISTENT',
+        'BLOCKER = I2G_STAGED_TREATMENT_TOKEN_MISCLASSIFIED_AS_EXACT_I2F_BASELINE',
         'BLOCKER_STATUS = CLOSED_OFFLINE',
-        'I2G_BASELINE_RECONSTRUCTION_TOKEN_DELTA = SeSystemProfilePrivilege DISABLED -> ENABLED',
-        'I2G_TREATMENT_TOKEN_DELTA = SeProfileSingleProcessPrivilege DISABLED -> ENABLED',
-        'I2G_EXACT_TREATMENT_DELTA = ONE_PRIVILEGE_STATE_CHANGE',
+        'PREVIOUS_BLOCKER = I2G_BASELINE_RECONSTRUCTION_CONTRACT_INCONSISTENT / CLOSED_OFFLINE',
+        'HISTORICAL_I2F_CONTROL =',
+        'I2G_MATERIALIZED_TOKEN =',
+        'I2G_STAGED_TOKEN =',
+        'I2G_TREATMENT_TOKEN =',
+        'I2G_NON_TREATMENT_BASELINE_INVARIANTS = EXACT_FINAL_I2F',
+        'I2G_STAGED_TREATMENT_EXCEPTION = SeProfileSingleProcessPrivilege PRESENT + DISABLED',
+        'STAGED_EXCEPTION_COUNT = 1',
+        'BASELINE_RECONSTRUCTION_TOKEN_DELTA = SeSystemProfilePrivilege DISABLED -> ENABLED',
+        'I2G_TREATMENT_MATERIALIZATION_DELTA = SeProfileSingleProcessPrivilege ABSENT -> PRESENT + DISABLED',
+        'I2G_TREATMENT_ACTIVATION_DELTA = SeProfileSingleProcessPrivilege DISABLED -> ENABLED',
+        'I2G_TOTAL_CAUSAL_TREATMENT_DELTA = SeProfileSingleProcessPrivilege ABSENT -> PRESENT + ENABLED',
+        'I2G_EXACT_TREATMENT_ACTIVATION_DELTA = ONE_PRIVILEGE_STATE_CHANGE',
+        'I2G_BASELINE_RECONSTRUCTION = FINAL_I2F_NON_TREATMENT_STATE_RECONSTRUCTED',
+        'NO_BASELINE_AMD_RUN = true',
         'I2G_BASELINE_POLICY_ROLLBACK = SeSystemProfilePrivilege',
         'I2G_TREATMENT_POLICY_ROLLBACK = SeProfileSingleProcessPrivilege',
         'TOKEN_TEARDOWN_BEFORE_POLICY_RIGHT_REMOVAL = true',
         'POLICY_ASSIGNMENT_BASELINE =',
         'POLICY_ASSIGNMENT_TREATMENT =',
         'TOKEN_MATERIALIZED',
-        'TOKEN_BASELINE',
+        'TOKEN_STAGED',
         'TOKEN_TREATMENT',
         'BASELINE_RECONSTRUCTION_DELTA',
-        'TREATMENT_DELTA',
+        'I2G_TREATMENT_MATERIALIZATION_DELTA',
+        'I2G_TREATMENT_ACTIVATION_DELTA',
+        'I2G_TOTAL_CAUSAL_TREATMENT_DELTA',
         'POLICY_ROLLBACK_TREATMENT',
         'POLICY_ROLLBACK_BASELINE',
         'FULL_ROLLBACK',
@@ -1644,6 +1658,12 @@ foreach ($requiredI2gContractText in @(
         throw "I2G baseline reconstruction contract is missing: $requiredI2gContractText"
     }
 }
+if ($i2gContractSource.IndexOf('I2G_BASELINE_RECONSTRUCTION = EXACT_FINAL_I2F_RELEVANT_STATE', [StringComparison]::Ordinal) -ge 0 -or
+    $i2gContractSource.IndexOf('EXPECTED_STAGED_TOKEN = exact final-I2F token', [StringComparison]::Ordinal) -ge 0 -or
+    $i2gContractSource.IndexOf('exact final-I2F token/group baseline', [StringComparison]::Ordinal) -ge 0) {
+    throw 'I2G staged token is still misclassified as an exact full I2F token.'
+}
+Write-Host 'I2G_STAGED_TREATMENT_CAUSAL_MODEL=PASS'
 function Get-I2gPrivilegeCategoryBody {
     param([string]$CategoryName)
     return [regex]::Match(

@@ -40,10 +40,25 @@ I2G_VARIABLE = SeProfileSingleProcessPrivilege
 I2G_VARIABLE_SELECTION = PASS_READ_ONLY
 I2G_SELECTION_CONFIDENCE = MEDIUM
 I2G_SINGLE_VARIABLE_ISOLATABLE = true
+BLOCKER = I2G_STAGED_TREATMENT_TOKEN_MISCLASSIFIED_AS_EXACT_I2F_BASELINE
+BLOCKER_STATUS = CLOSED_OFFLINE
+PREVIOUS_BLOCKER = I2G_BASELINE_RECONSTRUCTION_CONTRACT_INCONSISTENT / CLOSED_OFFLINE
 I2G_BASELINE_RECONSTRUCTION_RIGHT = SeSystemProfilePrivilege
 I2G_TREATMENT_VARIABLE = SeProfileSingleProcessPrivilege
 TEMPORARY_POLICY_ASSIGNMENT_COUNT = 2
 SCIENTIFIC_TREATMENT_VARIABLE_COUNT = 1
+HISTORICAL_I2F_PROFILE_SINGLE_STATE = ABSENT
+I2G_MATERIALIZED_PROFILE_SINGLE_STATE = PRESENT + DISABLED
+I2G_STAGED_PROFILE_SINGLE_STATE = PRESENT + DISABLED
+I2G_TREATMENT_PROFILE_SINGLE_STATE = PRESENT + ENABLED
+I2G_NON_TREATMENT_BASELINE_INVARIANTS = EXACT_FINAL_I2F
+I2G_STAGED_TREATMENT_EXCEPTION = SeProfileSingleProcessPrivilege PRESENT + DISABLED
+STAGED_EXCEPTION_COUNT = 1
+BASELINE_RECONSTRUCTION_TOKEN_DELTA = SeSystemProfilePrivilege DISABLED -> ENABLED
+I2G_TREATMENT_MATERIALIZATION_DELTA = SeProfileSingleProcessPrivilege ABSENT -> PRESENT + DISABLED
+I2G_TREATMENT_ACTIVATION_DELTA = SeProfileSingleProcessPrivilege DISABLED -> ENABLED
+I2G_TOTAL_CAUSAL_TREATMENT_DELTA = SeProfileSingleProcessPrivilege ABSENT -> PRESENT + ENABLED
+NO_BASELINE_AMD_RUN = true
 I2G_HARNESS = NOT_IMPLEMENTED
 I2G_REAL_RUNTIME = 0
 I2G_HARNESS_IMPLEMENTATION_AUTHORIZED = false
@@ -57,15 +72,16 @@ README_CURRENT_STATE_RECONCILED=PASS
 ```
 
 The selected I2G treatment remains one variable even though a fresh
-qualification Service SID needs two temporary policy assignments. The
-baseline reconstruction assignment is `SeSystemProfilePrivilege`; it
-recreates the final-I2F state and is enabled first. The treatment assignment
-is `SeProfileSingleProcessPrivilege`; it is enabled only after the baseline
-token gate passes. The expected materialized, baseline, and treatment token
-states and the independent rollback accounting are specified in
+qualification Service SID needs two temporary policy assignments. Historical
+I2F is the existing control with ProfileSingle `ABSENT`. The fresh service
+materializes ProfileSingle as `PRESENT + DISABLED`, reconstructs all final-I2F
+non-treatment dimensions, and enables ProfileSingle only after the staged
+token gate passes. The staged token is not an exact historical I2F token. The
+total causal delta is `ABSENT -> PRESENT + ENABLED`; the future-run activation
+delta remains `DISABLED -> ENABLED`. The expected materialized, staged, and
+treatment token states and independent rollback accounting are specified in
 [`docs/upgrade/amd-i2g-variable-selection.md`](../../docs/upgrade/amd-i2g-variable-selection.md).
-No AMD CLI is launched at baseline, and the only causal delta is
-`SeProfileSingleProcessPrivilege: DISABLED -> ENABLED`.
+No AMD CLI is launched at baseline.
 
 The automated path is completely synthetic. `--synthetic` exercises the
 versioned semantic protocol, bounded framing, explicit pipe-DACL policy,
