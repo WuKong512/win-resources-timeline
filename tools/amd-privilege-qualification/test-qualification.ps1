@@ -1604,6 +1604,10 @@ foreach ($requiredI2eCurrentStateText in @(
         'I2G_HARNESS = NOT_IMPLEMENTED',
         'I2G_HARNESS_IMPLEMENTATION_AUTHORIZED = false',
         'I2G_REAL_RUNTIME_AUTHORIZED = false',
+        'I2G_BASELINE_RECONSTRUCTION_RIGHT = SeSystemProfilePrivilege',
+        'I2G_TREATMENT_VARIABLE = SeProfileSingleProcessPrivilege',
+        'TEMPORARY_POLICY_ASSIGNMENT_COUNT = 2',
+        'SCIENTIFIC_TREATMENT_VARIABLE_COUNT = 1',
         'NEXT_GATE = I2G_HARNESS_DESIGN_AND_OFFLINE_IMPLEMENTATION_REVIEW',
         'NEXT_TASK = I2G_HARNESS_DESIGN_AND_OFFLINE_IMPLEMENTATION_REVIEW'
     )) {
@@ -1614,6 +1618,96 @@ foreach ($requiredI2eCurrentStateText in @(
 Write-Host 'ARCHITECTURE_SINGLE_AUTHORITATIVE_CURRENT_STATE=PASS'
 Write-Host 'EXECUTION_PLAN_SINGLE_CURRENT_STATE=PASS'
 Write-Host 'README_CURRENT_STATE_RECONCILED=PASS'
+$i2gContractSource = Get-Content -LiteralPath $I2gSelectionDocument -Raw
+foreach ($requiredI2gContractText in @(
+        'BLOCKER = I2G_BASELINE_RECONSTRUCTION_CONTRACT_INCONSISTENT',
+        'BLOCKER_STATUS = CLOSED_OFFLINE',
+        'I2G_BASELINE_RECONSTRUCTION_TOKEN_DELTA = SeSystemProfilePrivilege DISABLED -> ENABLED',
+        'I2G_TREATMENT_TOKEN_DELTA = SeProfileSingleProcessPrivilege DISABLED -> ENABLED',
+        'I2G_EXACT_TREATMENT_DELTA = ONE_PRIVILEGE_STATE_CHANGE',
+        'I2G_BASELINE_POLICY_ROLLBACK = SeSystemProfilePrivilege',
+        'I2G_TREATMENT_POLICY_ROLLBACK = SeProfileSingleProcessPrivilege',
+        'TOKEN_TEARDOWN_BEFORE_POLICY_RIGHT_REMOVAL = true',
+        'POLICY_ASSIGNMENT_BASELINE =',
+        'POLICY_ASSIGNMENT_TREATMENT =',
+        'TOKEN_MATERIALIZED',
+        'TOKEN_BASELINE',
+        'TOKEN_TREATMENT',
+        'BASELINE_RECONSTRUCTION_DELTA',
+        'TREATMENT_DELTA',
+        'POLICY_ROLLBACK_TREATMENT',
+        'POLICY_ROLLBACK_BASELINE',
+        'FULL_ROLLBACK',
+        'INVALID_RESULT_BASELINE_GATE ='
+    )) {
+    if ($i2gContractSource.IndexOf($requiredI2gContractText, [StringComparison]::Ordinal) -lt 0) {
+        throw "I2G baseline reconstruction contract is missing: $requiredI2gContractText"
+    }
+}
+function Get-I2gPrivilegeCategoryBody {
+    param([string]$CategoryName)
+    return [regex]::Match(
+        $i2gContractSource,
+        "(?ms)^$([regex]::Escape($CategoryName)) =\r?\n(?<body>.*?)(?=^[A-Z0-9_]+ =|\z)"
+    ).Groups['body'].Value
+}
+$mustRemainAbsentLine = Get-I2gPrivilegeCategoryBody 'MUST_REMAIN_ABSENT'
+$mustRemainDisabledLine = Get-I2gPrivilegeCategoryBody 'MUST_REMAIN_DISABLED'
+$mustRemainEnabledLine = Get-I2gPrivilegeCategoryBody 'MUST_REMAIN_ENABLED'
+if ([string]::IsNullOrWhiteSpace($mustRemainAbsentLine) -or
+    [string]::IsNullOrWhiteSpace($mustRemainDisabledLine) -or
+    [string]::IsNullOrWhiteSpace($mustRemainEnabledLine)) {
+    throw 'I2G privilege-state classification categories are missing.'
+}
+foreach ($mustRemainAbsentPrivilege in @(
+        'SeDebugPrivilege',
+        'SeCreatePagefilePrivilege',
+        'SeCreatePermanentPrivilege',
+        'SeCreateSymbolicLinkPrivilege',
+        'SeDelegateSessionUserImpersonatePrivilege',
+        'SeIncreaseBasePriorityPrivilege',
+        'SeLockMemoryPrivilege',
+        'SeTcbPrivilege',
+        'SeBackupPrivilege',
+        'SeLoadDriverPrivilege',
+        'SeManageVolumePrivilege',
+        'SeRestorePrivilege',
+        'SeSecurityPrivilege',
+        'SeSystemEnvironmentPrivilege',
+        'SeTakeOwnershipPrivilege'
+    )) {
+    if ($mustRemainAbsentLine.IndexOf($mustRemainAbsentPrivilege, [StringComparison]::Ordinal) -lt 0) {
+        throw "I2G MUST_REMAIN_ABSENT classification is missing: $mustRemainAbsentPrivilege"
+    }
+}
+foreach ($mustRemainDisabledPrivilege in @(
+        'SeAuditPrivilege',
+        'SeIncreaseWorkingSetPrivilege',
+        'SeTimeZonePrivilege',
+        'SeAssignPrimaryTokenPrivilege',
+        'SeIncreaseQuotaPrivilege',
+        'SeShutdownPrivilege',
+        'SeSystemtimePrivilege',
+        'SeUndockPrivilege'
+    )) {
+    if ($mustRemainDisabledLine.IndexOf($mustRemainDisabledPrivilege, [StringComparison]::Ordinal) -lt 0 -or
+        $mustRemainAbsentLine.IndexOf($mustRemainDisabledPrivilege, [StringComparison]::Ordinal) -ge 0) {
+        throw "I2G MUST_REMAIN_DISABLED classification is invalid: $mustRemainDisabledPrivilege"
+    }
+}
+foreach ($mustRemainEnabledPrivilege in @(
+        'SeChangeNotifyPrivilege',
+        'SeCreateGlobalPrivilege',
+        'SeImpersonatePrivilege',
+        'SeSystemProfilePrivilege',
+        'SeProfileSingleProcessPrivilege'
+    )) {
+    if ($mustRemainEnabledLine.IndexOf($mustRemainEnabledPrivilege, [StringComparison]::Ordinal) -lt 0) {
+        throw "I2G MUST_REMAIN_ENABLED classification is missing: $mustRemainEnabledPrivilege"
+    }
+}
+Write-Host 'I2G_BASELINE_RECONSTRUCTION_CONTRACT=PASS'
+Write-Host 'I2G_PRIVILEGE_STATE_CLASSIFICATIONS=PASS'
 $legacyCurrentStateSource = @(
     Get-Content -LiteralPath $ArchitectureDoc -Raw
     Get-Content -LiteralPath $ExecutionPlan -Raw

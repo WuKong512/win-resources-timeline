@@ -218,19 +218,37 @@ I2G_SINGLE_VARIABLE_ISOLATABLE = true
 BASE_ACCOUNT = NT AUTHORITY\LOCAL SERVICE
 BASE_ACCOUNT_SID = S-1-5-19
 BASE_SECURITY_CONTEXT = final authoritative I2F post-enable context
-CHANGE = dedicated fresh I2G Service SID receives only SeProfileSingleProcessPrivilege; service token materializes it PRESENT + DISABLED; service enables exactly that one right
-RETAIN_SE_SYSTEM_PROFILE_PRIVILEGE = true
-SE_SYSTEM_PROFILE_PRIVILEGE_STATE_IN_BASE = PRESENT + ENABLED
+BLOCKER = I2G_BASELINE_RECONSTRUCTION_CONTRACT_INCONSISTENT
+BLOCKER_STATUS = CLOSED_OFFLINE
+I2G_BASELINE_RECONSTRUCTION_RIGHT = SeSystemProfilePrivilege
+I2G_TREATMENT_VARIABLE = SeProfileSingleProcessPrivilege
+TEMPORARY_POLICY_ASSIGNMENT_COUNT = 2
+SCIENTIFIC_TREATMENT_VARIABLE_COUNT = 1
+BASELINE_RECONSTRUCTION_ROLE = frozen final-I2F state; not a new treatment
+TREATMENT_ROLE = selected single causal capability
+SE_SYSTEM_PROFILE_PRIVILEGE_STATE_IN_LOGICAL_BASELINE = PRESENT + ENABLED
+SE_PROFILE_SINGLE_PROCESS_PRIVILEGE_STATE_IN_LOGICAL_BASELINE = PRESENT + DISABLED
 ADMINISTRATORS_MEMBERSHIP_MUTATION = FORBIDDEN
 LOCAL_SYSTEM_AS_I2G_VARIABLE = FORBIDDEN_AS_NON_SINGLE_VARIABLE
 SE_DEBUG_PRIVILEGE_MUTATION = FORBIDDEN
 ```
 
-The future treatment must not assign the right to the global LocalService
-account. The policy change, if separately authorized, is only the exact right
-on the fresh dedicated Service SID. No broad privilege set, Administrators
-membership, LocalSystem account, AMD service ACL, driver ACL, or registry ACL
-is part of the selected variable.
+The review blocker was an inconsistent description of a fresh Service SID as
+receiving only `SeProfileSingleProcessPrivilege` while also requiring the
+final-I2F `SeSystemProfilePrivilege` state. It is closed by separating logical
+baseline reconstruction from the treatment variable. A fresh I2G Service SID
+must temporarily receive exactly two rights: `SeSystemProfilePrivilege` to
+reconstruct the frozen final-I2F baseline, and `SeProfileSingleProcessPrivilege`
+as the one intentional treatment capability. The two policy assignments do
+not make this a two-variable experiment.
+
+The historical I2F Service SID's policy assignment cannot persist across a
+fresh Service SID. Therefore `SeSystemProfilePrivilege = PRESENT + ENABLED`
+is a logical baseline state, while the temporary assignment of that right is
+the physical operation required to recreate it. No right is added to the
+global LocalService account. No Administrators membership, LocalSystem
+account, AMD service ACL, driver ACL, or registry ACL is part of the selected
+variable.
 
 ## Design-only I2G experiment contract
 
@@ -243,42 +261,91 @@ I2G_BASE_CONTEXT =
   Session 0, x64, System integrity, exact final-I2F token/group baseline,
   exact fixed AMD CLI identity, fixed working directory and environment
 
-I2G_SINGLE_VARIABLE =
-  SeProfileSingleProcessPrivilege assigned only to the fresh I2G Service SID,
-  materialized as PRESENT + DISABLED, then enabled by exactly one
-  AdjustTokenPrivileges request in the qualification service token
+POLICY_ASSIGNMENT_BASELINE =
+  fresh I2G Service SID temporarily receives SeSystemProfilePrivilege only
+  for final-I2F baseline reconstruction
+
+POLICY_ASSIGNMENT_TREATMENT =
+  fresh I2G Service SID temporarily receives SeProfileSingleProcessPrivilege
+  as the selected treatment capability
+
+I2G_SINGLE_VARIABLE = SeProfileSingleProcessPrivilege
+TEMPORARY_POLICY_ASSIGNMENT_COUNT = 2
+SCIENTIFIC_TREATMENT_VARIABLE_COUNT = 1
 
 CONSTANTS =
-  SeSystemProfilePrivilege remains PRESENT + ENABLED from final I2F;
-  account SID, session, architecture, integrity, elevation field,
+  SeSystemProfilePrivilege is reconstructed on the fresh I2G Service SID and
+  must reach PRESENT + ENABLED before the treatment gate; its logical state is
+  frozen to final I2F. Account SID, session, architecture, integrity,
+  elevation field,
   Administrators absence, all other privilege states, group set/model,
   AMD installation, driver/service state, CLI path/hash/version/signature,
   working directory, environment, protocol, timeout, job policy, output
   policy, cleanup policy, and result classifier remain unchanged
 
-EXPECTED_PRE_TOKEN =
-  all final-I2F states unchanged; SeProfileSingleProcessPrivilege is the
-  only newly present right and is PRESENT + DISABLED; no Administrators SID;
-  no SeDebugPrivilege or other newly enabled privilege
+PHASE_A_SERVICE_TOKEN_MATERIALIZATION =
+  after fresh Service SID policy assignment and service start, both controlled
+  rights are PRESENT + DISABLED; all other final-I2F relevant states remain
+  unchanged; no Administrators SID; no SeDebugPrivilege; no other new
+  SYSTEM-only right
 
-EXPECTED_POST_TOKEN =
-  EXPECTED_PRE_TOKEN except SeProfileSingleProcessPrivilege is
-  PRESENT + ENABLED
+EXPECTED_MATERIALIZED_TOKEN =
+  SeSystemProfilePrivilege = PRESENT + DISABLED;
+  SeProfileSingleProcessPrivilege = PRESENT + DISABLED;
+  all other final-I2F relevant privilege, group, account, session, and
+  integrity states unchanged
 
-EXACT_TOKEN_DELTA =
-  SeProfileSingleProcessPrivilege: DISABLED -> ENABLED only;
-  account SID, Service SID, session, integrity, elevation, groups, and every
-  other privilege state are unchanged
+PHASE_B_BASELINE_RECONSTRUCTION =
+  enable SeSystemProfilePrivilege only; capture I2G-BASELINE-TOKEN.json;
+  do not launch AMD CLI before this exact baseline gate passes
 
-FORBIDDEN_PRIVILEGES =
-  SeDebugPrivilege, SeTcbPrivilege, SeLockMemoryPrivilege,
-  SeCreatePermanentPrivilege, SeCreateSymbolicLinkPrivilege,
-  SeCreatePagefilePrivilege, SeDelegateSessionUserImpersonatePrivilege,
-  SeIncreaseBasePriorityPrivilege, SeIncreaseWorkingSetPrivilege,
-  SeTimeZonePrivilege, SeAuditPrivilege, SeBackupPrivilege,
-  SeLoadDriverPrivilege, SeManageVolumePrivilege, SeRestorePrivilege,
-  SeSecurityPrivilege, SeSystemEnvironmentPrivilege, SeTakeOwnershipPrivilege;
-  no Administrators membership and no combined-right treatment
+EXPECTED_BASELINE_TOKEN =
+  SeSystemProfilePrivilege = PRESENT + ENABLED;
+  SeProfileSingleProcessPrivilege = PRESENT + DISABLED;
+  exact final-I2F relevant state; no Administrators SID; no SeDebugPrivilege
+
+I2G_BASELINE_RECONSTRUCTION = EXACT_FINAL_I2F_RELEVANT_STATE
+I2G_BASELINE_RECONSTRUCTION_TOKEN_DELTA = SeSystemProfilePrivilege DISABLED -> ENABLED
+
+PHASE_C_TREATMENT =
+  after baseline verification, enable SeProfileSingleProcessPrivilege only;
+  capture I2G-TREATMENT-TOKEN.json
+
+EXPECTED_TREATMENT_TOKEN =
+  SeSystemProfilePrivilege = PRESENT + ENABLED;
+  SeProfileSingleProcessPrivilege = PRESENT + ENABLED;
+  all other final-I2F relevant privilege, group, account, session, and
+  integrity states unchanged
+
+I2G_TREATMENT_TOKEN_DELTA = SeProfileSingleProcessPrivilege DISABLED -> ENABLED
+I2G_EXACT_TREATMENT_DELTA = ONE_PRIVILEGE_STATE_CHANGE
+
+NO_BASELINE_AMD_RUN = true
+AMD_LAUNCH_GATE = baseline token gate must pass before any AMD CLI launch
+
+MUST_REMAIN_ABSENT =
+  SeDebugPrivilege, SeCreatePagefilePrivilege, SeCreatePermanentPrivilege,
+  SeCreateSymbolicLinkPrivilege, SeDelegateSessionUserImpersonatePrivilege,
+  SeIncreaseBasePriorityPrivilege, SeLockMemoryPrivilege, SeTcbPrivilege,
+  SeBackupPrivilege, SeLoadDriverPrivilege, SeManageVolumePrivilege,
+  SeRestorePrivilege, SeSecurityPrivilege, SeSystemEnvironmentPrivilege,
+  SeTakeOwnershipPrivilege
+
+MUST_REMAIN_DISABLED =
+  SeAuditPrivilege, SeIncreaseWorkingSetPrivilege, SeTimeZonePrivilege,
+  SeAssignPrimaryTokenPrivilege, SeIncreaseQuotaPrivilege,
+  SeShutdownPrivilege, SeSystemtimePrivilege, SeUndockPrivilege
+
+MUST_REMAIN_ENABLED =
+  SeChangeNotifyPrivilege, SeCreateGlobalPrivilege, SeImpersonatePrivilege;
+  SeSystemProfilePrivilege after baseline reconstruction;
+  SeProfileSingleProcessPrivilege only after treatment enablement
+
+FORBIDDEN_PRIVILEGE_AND_IDENTITY_CHANGES =
+  no newly present SYSTEM-only right outside the two controlled rights;
+  no Administrators SID; no LocalSystem account; no global LocalService right;
+  no combined-right treatment; no account, Service SID model, session,
+  architecture, integrity, or group mutation
 
 AMD_CLI_IDENTITY =
   D:\apps\AMDuProf\bin\AMDuProfCLI.exe;
@@ -292,16 +359,32 @@ FRESH_SERVICE_NAME = ResourceTimelineAmdProfileSingleProcessQualification
 FRESH_SERVICE_SID = derived at future setup from the fresh service name; must be an unrestricted NT SERVICE SID and must not reuse historical I2E/I2F identities
 
 ROLLBACK_ORDER =
-  stop accepting work; wait for the owned CLI child; prove child/process
-  absence; close/tear down the effective token with the service process;
-  read exact Service SID rights; remove only the right added by this run;
-  verify both LSA directions; delete the fresh service; verify service and
-  process absence; write final evidence
+  stop accepting work; wait/terminate the exact owned AMD child if needed;
+  verify AMD child absent; stop service; verify service PID = 0 and effective
+  token gone; verify fresh Service SID direct rights; remove treatment right;
+  dual LSA readback; remove baseline reconstruction right; dual LSA readback;
+  delete fresh qualification service; verify service absent; verify broker and
+  AMD-owned processes absent; persist final rollback evidence
 
+BASELINE_POLICY_RIGHT_ADDED = SeSystemProfilePrivilege
+TREATMENT_POLICY_RIGHT_ADDED = SeProfileSingleProcessPrivilege
+I2G_BASELINE_POLICY_ROLLBACK = SeSystemProfilePrivilege
+I2G_TREATMENT_POLICY_ROLLBACK = SeProfileSingleProcessPrivilege
 POLICY_ROLLBACK =
-  exact SeProfileSingleProcessPrivilege removal only after effective token
-  teardown; dual readback; no all-rights removal; if already absent on
-  recovery, record already-absent and issue no duplicate removal
+  after effective token teardown, remove SeProfileSingleProcessPrivilege if
+  added by this run and verify dual LSA readback; then remove
+  SeSystemProfilePrivilege if added by this run and verify dual LSA readback;
+  if a right is already absent, record ALREADY_ABSENT and issue no duplicate
+  removal; no LsaRemoveAccountRights(all=true)
+
+TOKEN_TEARDOWN_BEFORE_POLICY_RIGHT_REMOVAL = true
+
+PARTIAL_FAILURE_ACCOUNTING =
+  system_profile_right_added_by_run;
+  profile_single_right_added_by_run;
+  system_profile_remove_attempted; system_profile_remove_verified;
+  profile_single_remove_attempted; profile_single_remove_verified;
+  already_absent is recorded independently for each right
 
 TOKEN_TEARDOWN =
   service stop and process-absence proof; token dies with the stopped service
@@ -316,14 +399,26 @@ PROCESS_OWNERSHIP =
   kill-on-close/job-owned policy; no orphan child is acceptable
 
 EVIDENCE_SCHEMA =
-  immutable I2G scope; gate state; service/SID metadata; pre-token and
-  post-token snapshots; exact privilege delta; relevant groups; LSA
-  assignment/readback; CLI identity; command; sampling=false; bounded
-  stdout/stderr; exit code; normalized result; cleanup and rollback evidence
+  immutable I2G scope; gate state; service/SID metadata;
+  POLICY_ASSIGNMENT_BASELINE; POLICY_ASSIGNMENT_TREATMENT;
+  TOKEN_MATERIALIZED; TOKEN_BASELINE; TOKEN_TREATMENT;
+  BASELINE_RECONSTRUCTION_DELTA; TREATMENT_DELTA; relevant groups;
+  AMD_CLI_IDENTITY; COUNTER_DISCOVERY_RESULT;
+  POLICY_ROLLBACK_TREATMENT; POLICY_ROLLBACK_BASELINE; FULL_ROLLBACK;
+  command; sampling=false; bounded stdout/stderr; exit code; normalized
+  result; cleanup and rollback evidence
 
 RESULT_CLASSIFICATION =
   POWER_AVAILABLE, POWER_UNAVAILABLE, DISCOVERY_FAILED, TOKEN_GATE_FAILED,
   IDENTITY_MISMATCH, CLEANUP_FAILED, or INVALID_NO_CAUSAL_INTERPRETATION
+
+INVALID_RESULT_BASELINE_GATE =
+  INVALID_NO_CAUSAL_INTERPRETATION if baseline SeSystemProfilePrivilege is
+  not PRESENT + ENABLED; ProfileSingle is not PRESENT + DISABLED at baseline;
+  any unexpected privilege is present; any expected I2F state changes;
+  Administrators appears; TokenUser, session, or integrity changes; AMD CLI
+  identity mismatches; sampling is not false; treatment delta contains more
+  than ProfileSingle enablement; or rollback is incomplete
 
 ONE_TIME_GATE =
   I2G_GATE_CONSUMED = false;

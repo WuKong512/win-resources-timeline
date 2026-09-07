@@ -40,6 +40,10 @@ I2G_VARIABLE = SeProfileSingleProcessPrivilege
 I2G_VARIABLE_SELECTION = PASS_READ_ONLY
 I2G_SELECTION_CONFIDENCE = MEDIUM
 I2G_SINGLE_VARIABLE_ISOLATABLE = true
+I2G_BASELINE_RECONSTRUCTION_RIGHT = SeSystemProfilePrivilege
+I2G_TREATMENT_VARIABLE = SeProfileSingleProcessPrivilege
+TEMPORARY_POLICY_ASSIGNMENT_COUNT = 2
+SCIENTIFIC_TREATMENT_VARIABLE_COUNT = 1
 I2G_HARNESS = NOT_IMPLEMENTED
 I2G_REAL_RUNTIME = 0
 I2G_HARNESS_IMPLEMENTATION_AUTHORIZED = false
@@ -51,6 +55,17 @@ NEXT_GATE = I2G_HARNESS_DESIGN_AND_OFFLINE_IMPLEMENTATION_REVIEW
 NEXT_TASK = I2G_HARNESS_DESIGN_AND_OFFLINE_IMPLEMENTATION_REVIEW
 README_CURRENT_STATE_RECONCILED=PASS
 ```
+
+The selected I2G treatment remains one variable even though a fresh
+qualification Service SID needs two temporary policy assignments. The
+baseline reconstruction assignment is `SeSystemProfilePrivilege`; it
+recreates the final-I2F state and is enabled first. The treatment assignment
+is `SeProfileSingleProcessPrivilege`; it is enabled only after the baseline
+token gate passes. The expected materialized, baseline, and treatment token
+states and the independent rollback accounting are specified in
+[`docs/upgrade/amd-i2g-variable-selection.md`](../../docs/upgrade/amd-i2g-variable-selection.md).
+No AMD CLI is launched at baseline, and the only causal delta is
+`SeProfileSingleProcessPrivilege: DISABLED -> ENABLED`.
 
 The automated path is completely synthetic. `--synthetic` exercises the
 versioned semantic protocol, bounded framing, explicit pipe-DACL policy,

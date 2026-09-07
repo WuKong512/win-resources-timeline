@@ -2139,6 +2139,10 @@ I2G_VARIABLE = SeProfileSingleProcessPrivilege
 I2G_VARIABLE_SELECTION = PASS_READ_ONLY
 I2G_SELECTION_CONFIDENCE = MEDIUM
 I2G_SINGLE_VARIABLE_ISOLATABLE = true
+I2G_BASELINE_RECONSTRUCTION_RIGHT = SeSystemProfilePrivilege
+I2G_TREATMENT_VARIABLE = SeProfileSingleProcessPrivilege
+TEMPORARY_POLICY_ASSIGNMENT_COUNT = 2
+SCIENTIFIC_TREATMENT_VARIABLE_COUNT = 1
 I2G_HARNESS = NOT_IMPLEMENTED
 I2G_REAL_RUNTIME = 0
 I2G_HARNESS_IMPLEMENTATION_AUTHORIZED = false
@@ -2153,10 +2157,15 @@ EXECUTION_PLAN_SINGLE_CURRENT_STATE = PASS
 
 The current read-only research state selects exactly one future I2G variable:
 `SeProfileSingleProcessPrivilege`. The final I2F token state is the causal
-base, including `SeSystemProfilePrivilege = PRESENT + ENABLED`; the future
-design adds only the selected right to a fresh dedicated unrestricted Service
-SID and enables only that right. This does not select LocalSystem, add
-Administrators membership, enable `SeDebugPrivilege`, or admit an AMD
-provider. The design-only contract and normalized matrix are in
+base, including `SeSystemProfilePrivilege = PRESENT + ENABLED`. Because a
+fresh Service SID cannot inherit the historical I2F policy assignment, the
+future design temporarily assigns two rights to that fresh SID: the baseline
+reconstruction right `SeSystemProfilePrivilege` and the selected treatment
+right `SeProfileSingleProcessPrivilege`. The baseline first enables only
+`SeSystemProfilePrivilege`; treatment then enables only
+`SeProfileSingleProcessPrivilege`, leaving exactly one baseline-to-treatment
+privilege-state change. This does not select LocalSystem, add Administrators
+membership, enable `SeDebugPrivilege`, or admit an AMD provider. The
+design-only contract and normalized matrix are in
 [`amd-i2g-variable-selection.md`](amd-i2g-variable-selection.md). No I2G
 harness or runtime exists.
