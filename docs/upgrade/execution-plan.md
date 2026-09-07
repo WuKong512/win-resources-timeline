@@ -1196,7 +1196,10 @@ process state before and after execution. A guarded authorized pre-mutation
 sentinel also proves the authorization switch survives library loading without
 starting a service, changing LSA policy, adjusting a token, or launching AMD.
 
-## AMD-PRIVILEGE-I2E REAL CLOSURE / AMD-PRIVILEGE-I2F PREPARATION
+## HISTORICAL / SUPERSEDED — AMD-PRIVILEGE-I2E REAL CLOSURE / AMD-PRIVILEGE-I2F PREPARATION
+
+Historical pre-run status block; superseded by the authoritative I2F real
+closure and consumed-gate retirement recorded later in this document.
 
 The dedicated Service-SID I2E treatment has answered the token-materialization
 question exactly once. The right was assigned and verified in both LSA
@@ -1661,7 +1664,7 @@ The repository regression covers the known direct-root layout and rejects a
 nested-only `counter-discovery` fixture. The treatment-only command remains
 the sole next human gate.
 
-## PR22 I2F entrypoint scope-isolation incident closure
+## HISTORICAL / SUPERSEDED — PR22 I2F entrypoint scope-isolation incident closure
 
 The first human I2F invocation was a confirmed no-op before experiment entry.
 The I2F executable setup and standalone cleanup wrappers had each dot-sourced
@@ -2007,3 +2010,47 @@ I2G_REAL_RUNTIME = 0
 
 No I2G variable is selected, no SYSTEM/I2F rerun is authorized, and production
 account selection remains unresolved.
+
+## PR22 I2F consumed-gate runtime guard closure
+
+The authoritative I2F real qualification has already consumed its one-time
+gate. The historical executable remains available for plan-only and guarded
+offline sentinel validation, but its real authorization path is retired and
+must fail closed before administrator checks or any live qualification access.
+
+```text
+I2F_AUTHORITATIVE_SCOPE = f68bf4d3d36547a0ba753cff489bb6eb
+I2F_GATE_CONSUMED = true
+I2F_RERUN = FORBIDDEN
+I2F_REAL_EXECUTION_ENTRYPOINT = PERMANENTLY_FAIL_CLOSED
+I2F_REAL_RERUN_ERROR = I2F_RERUN_FORBIDDEN
+I2F_REAL_RERUN_GUARD_BEFORE_ADMIN = PASS
+I2F_REAL_RERUN_MACHINE_STATE = UNCHANGED
+I2F_REAL_RERUN_NEW_SCOPE_CREATED = false
+I2F_REAL_RERUN_SERVICE_MUTATION = 0
+I2F_REAL_RERUN_LSA_MUTATION = 0
+I2F_REAL_RERUN_TOKEN_ADJUSTMENT = 0
+I2F_REAL_RERUN_AMD_RUNTIME = 0
+I2F_PLAN_ONLY = PASS
+I2F_LIBRARY_ONLY = PASS
+I2F_OFFLINE_AUTHORIZED_SENTINEL = PASS
+I2F_RESULT = PASS_WITH_NEGATIVE_COUNTER_ACCESS_RESULT
+SE_SYSTEM_PROFILE_PRIVILEGE_ALONE_SUFFICIENT = false
+SE_SYSTEM_PROFILE_PRIVILEGE_NECESSITY = UNRESOLVED
+I2G_VARIABLE = UNRESOLVED
+I2G_HARNESS = NOT_IMPLEMENTED
+I2G_REAL_RUNTIME = 0
+PRODUCTION_ACCOUNT = UNRESOLVED
+LOCAL_SYSTEM_PRODUCTION_SELECTION = NOT_AUTHORIZED
+PRODUCTION_ADMISSION = NOT_COMPLETE
+NEXT_GATE = PR22_FINAL_CLOSURE_REVIEW
+```
+
+The real child-process rerun regression invokes the retired entrypoint with
+`-ExecuteAuthorizedExperiment`, receives the stable
+`I2F_RERUN_FORBIDDEN` marker and the authoritative scope, exits nonzero, and
+leaves the service registration, qualification evidence inventory, and owned
+process state unchanged. The offline sentinel remains an explicitly guarded
+test seam and is not a real experiment authorization. A new capability
+experiment requires a distinct I2G contract, harness, and human gate; no I2G
+variable is selected here.

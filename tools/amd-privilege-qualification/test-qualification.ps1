@@ -1560,6 +1560,9 @@ foreach ($requiredI2fClosureText in @(
         'I2F_SCOPE = f68bf4d3d36547a0ba753cff489bb6eb',
         'I2F_GATE_CONSUMED = true',
         'I2F_RERUN = FORBIDDEN',
+        'I2F_REAL_EXECUTION_ENTRYPOINT = PERMANENTLY_FAIL_CLOSED',
+        'I2F_REAL_RERUN_ERROR = I2F_RERUN_FORBIDDEN',
+        'I2F_REAL_RERUN_MACHINE_STATE = UNCHANGED',
         'counter_discovery_cli_executed = true after Command::spawn succeeds',
         'power_sampling_runtime_executed = false',
         'I2G_VARIABLE = UNRESOLVED',
@@ -1575,6 +1578,19 @@ if ($i2fClosureDocumentation.IndexOf('I2F_HISTORICAL_ARTIFACT_SHA256 = F272E2D5E
     throw 'I2F historical/post-repair artifact distinction is missing from the closure documentation.'
 }
 Write-Host 'I2F_REAL_CLOSURE_DOCUMENTATION=PASS'
+
+foreach ($requiredI2fConsumedGateContract in @(
+        '$I2fAuthoritativeScope = ''f68bf4d3d36547a0ba753cff489bb6eb''',
+        '$I2fRealGateConsumed = $true',
+        '$I2fRealRerunAllowed = $false',
+        'I2F_RERUN_FORBIDDEN'
+    )) {
+    if ($i2fContractSource.IndexOf($requiredI2fConsumedGateContract, [StringComparison]::Ordinal) -lt 0 -and
+        $i2fSetupSource.IndexOf($requiredI2fConsumedGateContract, [StringComparison]::Ordinal) -lt 0) {
+        throw "I2F consumed-gate contract is missing: $requiredI2fConsumedGateContract"
+    }
+}
+Write-Host 'I2F_CONSUMED_GATE_CONTRACT=PASS'
 
 Remove-Item -LiteralPath $EvidenceRoot -Recurse -Force -ErrorAction SilentlyContinue
 New-Item -ItemType Directory -Force -Path $EvidenceRoot | Out-Null

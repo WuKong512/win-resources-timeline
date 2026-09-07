@@ -386,6 +386,9 @@ if ($InternalTestOnlyPreMutationSentinel -and -not $ExecuteAuthorizedExperiment)
 if (-not $ExecuteAuthorizedExperiment) {
     Get-I2fExperimentPlan -ArtifactSha256 $ExpectedArtifactSha256 | ConvertTo-Json -Depth 20
     Write-Host 'I2F_PLAN_ONLY=true'
+    Write-Host "I2F_GATE_CONSUMED=$($I2fRealGateConsumed.ToString().ToLowerInvariant())"
+    Write-Host "I2F_RERUN=$(if ($I2fRealRerunAllowed) { 'ALLOWED' } else { 'FORBIDDEN' })"
+    Write-Host "AUTHORITATIVE_SCOPE=$I2fAuthoritativeScope"
     Write-Host 'No service, LSA mutation, token adjustment, or AMD runtime was performed.'
     return
 }
@@ -393,6 +396,10 @@ if ($InternalTestOnlyPreMutationSentinel) {
     Write-Host 'I2F_AUTHORIZED_PRE_MUTATION_SENTINEL=true'
     Write-Host 'No service, LSA mutation, token adjustment, or AMD runtime was performed.'
     return
+}
+
+if ($I2fRealGateConsumed -or -not $I2fRealRerunAllowed) {
+    throw ('I2F_RERUN_FORBIDDEN: authoritative I2F scope {0} already consumed the one-time real gate. Create a fresh experiment task/harness for any future variable.' -f $I2fAuthoritativeScope)
 }
 
 $null = Assert-I2eAdministrator

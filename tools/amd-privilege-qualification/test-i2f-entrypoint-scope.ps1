@@ -19,8 +19,18 @@ function Invoke-I2fChildFile {
         [AllowEmptyCollection()][string[]]$Arguments
     )
 
-    $output = @(& powershell.exe -NoProfile -ExecutionPolicy Bypass -File $Path @Arguments 2>&1 |
-        ForEach-Object { [string]$_ })
+    $previousErrorActionPreference = $ErrorActionPreference
+    try {
+        # A forbidden child entrypoint is expected to write its stable marker
+        # through the error stream.  Capture that stream as data so the parent
+        # test can assert the nonzero exit contract instead of terminating while
+        # collecting the expected rejection.
+        $ErrorActionPreference = 'Continue'
+        $output = @(& powershell.exe -NoProfile -ExecutionPolicy Bypass -File $Path @Arguments 2>&1 |
+            ForEach-Object { [string]$_ })
+    } finally {
+        $ErrorActionPreference = $previousErrorActionPreference
+    }
     [pscustomobject]@{
         exit_code = [int]$LASTEXITCODE
         output = $output
@@ -31,8 +41,14 @@ function Invoke-I2fChildFile {
 function Invoke-I2fChildCommand {
     param([Parameter(Mandatory = $true)][string]$Command)
 
-    $output = @(& powershell.exe -NoProfile -ExecutionPolicy Bypass -Command $Command 2>&1 |
-        ForEach-Object { [string]$_ })
+    $previousErrorActionPreference = $ErrorActionPreference
+    try {
+        $ErrorActionPreference = 'Continue'
+        $output = @(& powershell.exe -NoProfile -ExecutionPolicy Bypass -Command $Command 2>&1 |
+            ForEach-Object { [string]$_ })
+    } finally {
+        $ErrorActionPreference = $previousErrorActionPreference
+    }
     [pscustomobject]@{
         exit_code = [int]$LASTEXITCODE
         output = $output
@@ -49,6 +65,16 @@ function Assert-I2fChildMarker {
 
     if ($Result.exit_code -ne 0 -or $Result.text.IndexOf($Marker, [StringComparison]::Ordinal) -lt 0) {
         throw "$Description failed: exit=$($Result.exit_code)`n$($Result.text)"
+    }
+}
+
+function Assert-I2fRerunGuard {
+    param([Parameter(Mandatory = $true)]$Result)
+
+    if ($Result.exit_code -eq 0 -or
+        $Result.text.IndexOf('I2F_RERUN_FORBIDDEN', [StringComparison]::Ordinal) -lt 0 -or
+        $Result.text.IndexOf('f68bf4d3d36547a0ba753cff489bb6eb', [StringComparison]::Ordinal) -lt 0) {
+        throw "I2F consumed-gate guard failed: exit=$($Result.exit_code)`n$($Result.text)"
     }
 }
 
@@ -132,6 +158,27 @@ foreach ($source in @($setupSource, $cleanupSource)) {
 }
 Write-Host 'I2F_DOTSOURCE_EXECUTABLE_I2E_WRAPPER=PASS'
 
+$rerunGuardIndex = $setupSource.IndexOf('I2F_RERUN_FORBIDDEN', [StringComparison]::Ordinal)
+if ($rerunGuardIndex -lt 0) {
+    throw 'I2F consumed-gate runtime guard is missing.'
+}
+foreach ($requiredBeforeGuard in @(
+        '$null = Assert-I2eAdministrator',
+        '$artifactHash = Assert-I2fArtifact',
+        'Get-I2eServiceSnapshot -ServiceName $ServiceName',
+        '$identityCheck = Compare-I2fCurrentAmdIdentity',
+        '[Guid]::NewGuid()',
+        'New-Item -ItemType Directory -Force -Path $QualificationRoot, $outputRoot',
+        'Invoke-I2eSc -Arguments $createArgs',
+        'Add-I2eExactServiceProfileRight -ServiceSid $serviceSid'
+    )) {
+    $requiredIndex = $setupSource.IndexOf($requiredBeforeGuard, [StringComparison]::Ordinal)
+    if ($requiredIndex -lt 0 -or $rerunGuardIndex -ge $requiredIndex) {
+        throw "I2F consumed-gate runtime guard is not before: $requiredBeforeGuard"
+    }
+}
+Write-Host 'I2F_RERUN_GUARD_PRECEDES_ADMIN_GATE=PASS'
+
 $libraryErrors = $null
 $libraryTokens = $null
 $libraryAst = [System.Management.Automation.Language.Parser]::ParseFile(
@@ -160,11 +207,28 @@ Write-Host 'SHARED_LIBRARY_LOAD_SIDE_EFFECTS=NONE'
 $beforePlan = Get-I2fMachineState
 $setupPlan = Invoke-I2fChildFile -Path $setupPath -Arguments @()
 Assert-I2fChildMarker -Result $setupPlan -Marker 'I2F_PLAN_ONLY=true' -Description 'I2F setup plan-only entrypoint'
+Assert-I2fChildMarker -Result $setupPlan -Marker 'I2F_GATE_CONSUMED=true' -Description 'I2F plan consumed-gate state'
+Assert-I2fChildMarker -Result $setupPlan -Marker 'I2F_RERUN=FORBIDDEN' -Description 'I2F plan rerun state'
+Assert-I2fChildMarker -Result $setupPlan -Marker 'AUTHORITATIVE_SCOPE=f68bf4d3d36547a0ba753cff489bb6eb' -Description 'I2F plan authoritative scope'
 Assert-I2fChildMarker -Result $setupPlan -Marker 'No service, LSA mutation, token adjustment, or AMD runtime was performed.' -Description 'I2F setup plan-only safety output'
 $afterSetupPlan = Get-I2fMachineState
 Assert-I2fMachineStateUnchanged -Before $beforePlan -After $afterSetupPlan -Description 'I2F setup plan-only entrypoint'
 Write-Host 'I2F_PLAN_ONLY_REAL_ENTRYPOINT=PASS'
 Write-Host 'I2F_PLAN_ONLY_OUTPUT=I2F_PLAN_ONLY=true'
+
+$libraryOnlyResult = Invoke-I2fChildFile -Path $setupPath -Arguments @('-LibraryOnly')
+if ($libraryOnlyResult.exit_code -ne 0) {
+    throw "I2F LibraryOnly entrypoint failed: $($libraryOnlyResult.text)"
+}
+Write-Host 'I2F_LIBRARY_ONLY_REAL_ENTRYPOINT=PASS'
+
+$beforeRerunGuard = Get-I2fMachineState
+$rerunGuard = Invoke-I2fChildFile -Path $setupPath -Arguments @('-ExecuteAuthorizedExperiment')
+Assert-I2fRerunGuard -Result $rerunGuard
+$afterRerunGuard = Get-I2fMachineState
+Assert-I2fMachineStateUnchanged -Before $beforeRerunGuard -After $afterRerunGuard -Description 'I2F consumed-gate rerun guard'
+Write-Host 'I2F_REAL_RERUN_GUARD=PASS'
+Write-Host 'I2F_RERUN_GUARD_MACHINE_STATE_UNCHANGED=PASS'
 
 $cleanupPlan = Invoke-I2fChildFile -Path $cleanupPath -Arguments @()
 Assert-I2fChildMarker -Result $cleanupPlan -Marker 'I2F_CLEANUP_PLAN_ONLY=true' -Description 'I2F cleanup plan-only entrypoint'

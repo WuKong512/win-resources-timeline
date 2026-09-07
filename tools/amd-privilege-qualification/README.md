@@ -511,7 +511,7 @@ readable. It never invokes
 `MINIMUM_REQUIRED_CAPABILITY = UNRESOLVED`; the next gate is
 `HUMAN_ELEVATED_READ_ONLY_I2D_EVIDENCE_COLLECTION`.
 
-## AMD-PRIVILEGE-I2E real closure / I2F self-enable preparation
+## HISTORICAL / SUPERSEDED — AMD-PRIVILEGE-I2E real closure / I2F self-enable preparation
 
 The real I2E treatment answered the Windows token-materialization question once.
 The dedicated Service SID right assignment passed dual LSA verification and
@@ -532,7 +532,9 @@ I2E_RESIDUAL_RIGHT = ABSENT
 I2E_RERUN = FORBIDDEN
 ```
 
-I2F is the next human-authorized qualification gate. It uses the same
+At the time of this historical preparation snapshot, I2F was the next
+human-authorized qualification gate. The later real I2F closure supersedes this
+preparation-only status. It used the same
 LocalService security model with a fresh dedicated unrestricted Service SID.
 The only intentional runtime variable is native
 `AdjustTokenPrivileges(SeSystemProfilePrivilege)` from `DISABLED` to
@@ -555,7 +557,7 @@ I2F_ARTIFACT_ARCHITECTURE = x64
 I2F_STATUS = PREPARED / NOT_EXECUTED
 NEXT_GATE = HUMAN_I2F_SELF_ENABLE_QUALIFICATION_REVIEW
 
-## I2F PRE-RUN ROLLBACK SAFETY REVIEW CLOSURE
+## HISTORICAL / SUPERSEDED — I2F PRE-RUN ROLLBACK SAFETY REVIEW CLOSURE
 
 I2F_ROLLBACK_STOP_FIRST = PASS_STATIC
 I2F_PROCESS_EVIDENCE_UNKNOWN_NOT_ZERO = PASS
@@ -610,6 +612,55 @@ I2F_GATE_CONSUMED = false
 I2F_ARTIFACT_CHANGED = false
 NEXT_GATE = HUMAN_I2F_SELF_ENABLE_QUALIFICATION_REVIEW
 ```
+
+## PR22 I2F consumed-gate runtime guard closure
+
+This section supersedes the earlier I2F preparation-only status blocks in this
+README; those blocks are historical snapshots from before the real I2F gate was
+consumed.
+
+The authoritative I2F real qualification consumed its one-time gate. The
+historical wrapper is retained for plan-only, `LibraryOnly`, and the guarded
+offline pre-mutation sentinel, but its real `-ExecuteAuthorizedExperiment`
+path is permanently fail-closed before administrator checks, artifact
+validation, scope creation, SCM access, LSA mutation, token adjustment, or AMD
+execution.
+
+```text
+I2F_AUTHORITATIVE_SCOPE = f68bf4d3d36547a0ba753cff489bb6eb
+I2F_GATE_CONSUMED = true
+I2F_RERUN = FORBIDDEN
+I2F_REAL_EXECUTION_ENTRYPOINT = PERMANENTLY_FAIL_CLOSED
+I2F_REAL_RERUN_ERROR = I2F_RERUN_FORBIDDEN
+I2F_REAL_RERUN_GUARD_BEFORE_ADMIN = PASS
+I2F_REAL_RERUN_MACHINE_STATE = UNCHANGED
+I2F_REAL_RERUN_NEW_SCOPE_CREATED = false
+I2F_REAL_RERUN_SERVICE_MUTATION = 0
+I2F_REAL_RERUN_LSA_MUTATION = 0
+I2F_REAL_RERUN_TOKEN_ADJUSTMENT = 0
+I2F_REAL_RERUN_AMD_RUNTIME = 0
+I2F_PLAN_ONLY = PASS
+I2F_LIBRARY_ONLY = PASS
+I2F_OFFLINE_AUTHORIZED_SENTINEL = PASS
+I2F_RESULT = PASS_WITH_NEGATIVE_COUNTER_ACCESS_RESULT
+SE_SYSTEM_PROFILE_PRIVILEGE_ALONE_SUFFICIENT = false
+SE_SYSTEM_PROFILE_PRIVILEGE_NECESSITY = UNRESOLVED
+I2G_VARIABLE = UNRESOLVED
+I2G_HARNESS = NOT_IMPLEMENTED
+I2G_REAL_RUNTIME = 0
+PRODUCTION_ACCOUNT = UNRESOLVED
+LOCAL_SYSTEM_PRODUCTION_SELECTION = NOT_AUTHORIZED
+PRODUCTION_ADMISSION = NOT_COMPLETE
+NEXT_GATE = PR22_FINAL_CLOSURE_REVIEW
+```
+
+The real child-process rerun guard proves that a forbidden authorized
+invocation exits nonzero with `I2F_RERUN_FORBIDDEN` and the authoritative
+scope, without creating a new scope or changing service, evidence-root, or
+owned-process state. The counter-discovery evidence repair remains intact:
+spawned counter discovery is explicit while power sampling remains false.
+Any future capability experiment requires a fresh I2G task/harness and human
+authorization; I2G is not implemented or selected here.
 
 ## PR22 I2F real closure / residual differential preparation
 
@@ -679,7 +730,8 @@ proves the machine snapshot is unchanged. A guarded authorized-entry sentinel
 proves the treatment-only authorization switch survives helper loading without
 performing any service, LSA, token, or AMD operation.
 
-The future wrapper is plan-only unless explicitly authorized:
+The retired wrapper is plan-only for ordinary invocation. Its historical
+authorized path is now permanently fail-closed by the consumed-gate guard:
 
 ```powershell
 Set-Location 'F:\File\codex\codex-worktrees\ac74\resource-timeline'
@@ -694,7 +746,7 @@ The offline I2E closure-contract fixture is
 `i2e-token-materialization-final.example.json`. It is explicitly marked as an
 example and is not historical ProgramData evidence.
 
-## PR22 I2F entrypoint scope isolation closure
+## HISTORICAL / SUPERSEDED — PR22 I2F entrypoint scope isolation closure
 
 The first human I2F invocation was a confirmed no-op before experiment entry.
 The cause was structural PowerShell scope pollution: the I2F setup and cleanup

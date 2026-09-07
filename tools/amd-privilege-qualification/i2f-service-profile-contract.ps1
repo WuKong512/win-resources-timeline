@@ -13,6 +13,9 @@ $I2fRequiredRight = 'SeSystemProfilePrivilege'
 $I2fForbiddenPrivileges = @('SeProfileSingleProcessPrivilege', 'SeDebugPrivilege')
 $I2fFixedArguments = @('timechart', '--list')
 $I2fOutputSubdirectory = 'ResourceTimeline\qualification\amd-system-profile-enable'
+$I2fAuthoritativeScope = 'f68bf4d3d36547a0ba753cff489bb6eb'
+$I2fRealGateConsumed = $true
+$I2fRealRerunAllowed = $false
 
 function Get-I2fExperimentPlan {
     param([Parameter(Mandatory = $true)][string]$ArtifactSha256)
@@ -32,6 +35,10 @@ function Get-I2fExperimentPlan {
         forbidden_group_mutation = 'S-1-5-32-544'
         forbidden_privileges = $I2fForbiddenPrivileges
         artifact_sha256 = $ArtifactSha256
+        authoritative_scope = $I2fAuthoritativeScope
+        gate_consumed = $I2fRealGateConsumed
+        real_rerun = if ($I2fRealRerunAllowed) { 'ALLOWED' } else { 'FORBIDDEN' }
+        experiment_status = 'RETIRED_REAL_GATE_CONSUMED'
         rollback = [ordered]@{
             api = 'LsaRemoveAccountRights'
             all_rights = $false
