@@ -218,10 +218,11 @@ I2G_SINGLE_VARIABLE_ISOLATABLE = true
 BASE_ACCOUNT = NT AUTHORITY\LOCAL SERVICE
 BASE_ACCOUNT_SID = S-1-5-19
 BASE_SECURITY_CONTEXT = paired fresh-I2G control/treatment context; non-treatment dimensions are held constant within the experiment
-BLOCKER = I2G_HISTORICAL_CONTROL_LEAVES_NON_TREATMENT_CONFOUNDERS_UNCONTROLLED
+BLOCKER = I2G_PAIRED_PHASE_CONFIGURATION_INVARIANT_CONTRADICTS_TREATMENT_MUTATION
 BLOCKER_STATUS = CLOSED_OFFLINE
 PREVIOUS_BLOCKER_1 = I2G_BASELINE_RECONSTRUCTION_CONTRACT_INCONSISTENT / CLOSED_OFFLINE
 PREVIOUS_BLOCKER_2 = I2G_STAGED_TREATMENT_TOKEN_MISCLASSIFIED_AS_EXACT_I2F_BASELINE / CLOSED_OFFLINE
+PREVIOUS_BLOCKER_3 = I2G_HISTORICAL_CONTROL_LEAVES_NON_TREATMENT_CONFOUNDERS_UNCONTROLLED / CLOSED_OFFLINE
 I2G_BASELINE_RECONSTRUCTION_RIGHT = SeSystemProfilePrivilege
 I2G_TREATMENT_VARIABLE = SeProfileSingleProcessPrivilege
 I2G_SELECTION_CHANGED = false
@@ -428,9 +429,18 @@ TOKEN_TEARDOWN_BEFORE_POLICY_RIGHT_REMOVAL = true
 PARTIAL_FAILURE_ACCOUNTING =
   system_profile_right_added_by_run;
   profile_single_right_added_by_run;
+  control_amd_run_started; control_amd_run_completed;
+  treatment_policy_mutation_started; treatment_policy_mutation_verified;
+  treatment_amd_run_started; treatment_amd_run_completed;
   system_profile_remove_attempted; system_profile_remove_verified;
   profile_single_remove_attempted; profile_single_remove_verified;
   already_absent is recorded independently for each right
+
+CONTROL_DRIFT_CLEANUP =
+  if CONTROL drifts before ProfileSingle is assigned, stop and verify token and
+  process teardown, remove SeSystemProfilePrivilege only, verify dual readback,
+  and delete the fresh service; profile_single_right_added_by_run remains false
+  and no ProfileSingle removal is attempted
 
 TOKEN_TEARDOWN =
   service stop and process-absence proof; token dies with the stopped service
@@ -511,12 +521,25 @@ CONTROL_SERVICE_SID_TYPE = UNRESTRICTED
 TREATMENT_SERVICE_SID_TYPE = UNRESTRICTED
 CONTROL_HARNESS_SHA_EQUALS_TREATMENT = true
 NO_REBUILD_BETWEEN_PHASES = true
-NO_CODE_OR_CONFIGURATION_CHANGE_BETWEEN_PHASES = true
+NO_CODE_CHANGE_BETWEEN_PHASES = true
+NO_HARNESS_REBUILD_BETWEEN_PHASES = true
+NO_NON_TREATMENT_CONFIGURATION_CHANGE_BETWEEN_PHASES = true
+ALLOWED_TREATMENT_CONFIGURATION_DELTA = SeProfileSingleProcessPrivilege assignment to same Service SID only
+CONTROL_TO_TREATMENT_POLICY_DELTA = SeProfileSingleProcessPrivilege assignment to same Service SID only
+CONTROL_TO_TREATMENT_POLICY_DELTA_COUNT = 1
+NON_TREATMENT_CONFIGURATION_INVARIANTS = UNCHANGED
+FORBIDDEN_NON_TREATMENT_CONFIGURATION_CHANGES =
+  service name, service binary path, service account, Service SID type, start
+  mode, service command line, harness binary/SHA256, working directory,
+  environment, AMD CLI path/hash/version/signature, timeout, protocol, output
+  policy, job/process ownership, sampling mode, result classifier, ACLs,
+  registry, or AMD installation
 
 CONTROL_POLICY_RIGHTS = SeSystemProfilePrivilege only
 CONTROL_POLICY_ASSIGNMENT =
   assign SeSystemProfilePrivilege to the fresh Service SID before CONTROL;
   do not assign SeProfileSingleProcessPrivilege before CONTROL
+CONTROL_DIRECT_SERVICE_SID_RIGHTS = SeSystemProfilePrivilege
 
 I2G_CONTROL_MATERIALIZED_TOKEN =
   SeSystemProfilePrivilege = PRESENT + DISABLED;
@@ -531,7 +554,7 @@ I2G_CONTROL_FINAL_TOKEN =
 I2G_CONTROL_TOKEN = I2G-CONTROL-TOKEN.json
 CONTROL_SAMPLING = false
 CONTROL_COUNTER_DISCOVERY = timechart --list
-I2G_CONTROL_COUNTER_DISCOVERY_RUNS = 1
+PLANNED_CONTROL_COUNTER_DISCOVERY_RUNS = 1
 CONTROL_EXPECTED_RESULT = POWER_UNAVAILABLE
 CONTROL_VALIDITY =
   valid only with POWER_UNAVAILABLE, exit code 0, expected no-counters
@@ -545,14 +568,18 @@ CONTROL_DRIFT_STOP_BEFORE_TREATMENT = true
 CONTROL_DRIFT_RESULT = INVALID_NO_CAUSAL_INTERPRETATION
 
 CONTROL_TEARDOWN =
-  after CONTROL evidence, stop service; verify service PID=0; verify the
-  qualification token is gone; verify the exact owned AMD child is absent;
-  verify the broker-owned process set is empty
+  1. CONTROL AMD child finishes; 2. verify the exact owned AMD child is
+  absent; 3. stop service; 4. verify service PID=0; 5. verify the CONTROL
+  token no longer exists; 6. verify the broker-owned process set is empty;
+  7. only then mutate Service SID policy
 CONTROL_TOKEN_TEARDOWN_BEFORE_TREATMENT_POLICY_MUTATION = true
 
 TREATMENT_POLICY_RIGHTS =
   SeSystemProfilePrivilege + SeProfileSingleProcessPrivilege
 TREATMENT_POLICY_ADDITION = SeProfileSingleProcessPrivilege only
+TREATMENT_POLICY_MUTATION_GATE = CONTROL_TOKEN_TEARDOWN_BEFORE_TREATMENT_POLICY_MUTATION
+TREATMENT_DIRECT_SERVICE_SID_RIGHTS = SeSystemProfilePrivilege + SeProfileSingleProcessPrivilege
+EXACT_TREATMENT_POLICY_DELTA = SeProfileSingleProcessPrivilege added
 SERVICE_RESTART = REQUIRED_TECHNICAL_MATERIALIZATION_BOUNDARY
 SERVICE_RESTART_IS_SECOND_SCIENTIFIC_VARIABLE = false
 
@@ -567,7 +594,7 @@ I2G_TREATMENT_FINAL_TOKEN =
 I2G_TREATMENT_TOKEN = I2G-TREATMENT-TOKEN.json
 TREATMENT_SAMPLING = false
 TREATMENT_COUNTER_DISCOVERY = timechart --list
-I2G_TREATMENT_COUNTER_DISCOVERY_RUNS = 1
+PLANNED_TREATMENT_COUNTER_DISCOVERY_RUNS = 1
 
 CONTROL_TO_TREATMENT_NON_TREATMENT_INVARIANTS = UNCHANGED
   TokenUser = S-1-5-19 / LocalService; Session = 0; Architecture = x64;
@@ -576,6 +603,11 @@ CONTROL_TO_TREATMENT_NON_TREATMENT_INVARIANTS = UNCHANGED
   in both final tokens; all unrelated privilege states and groups identical;
   AMD CLI identity, operation, sampling, timeout, environment, and ownership
   policy identical
+
+CONTROL_TREATMENT_TOKEN_INVARIANT_COMPARISON =
+  PASS_EXACT_ONE_PRIVILEGE_DELTA when all unrelated token/group/account,
+  session, architecture, integrity, Administrators, and SystemProfile states
+  are equal and only ProfileSingle changes ABSENT -> PRESENT + ENABLED
 
 I2G_PAIRED_CAUSAL_TREATMENT_DELTA = SeProfileSingleProcessPrivilege ABSENT -> PRESENT + ENABLED
 I2G_TREATMENT_MATERIALIZATION_DELTA =
@@ -586,10 +618,30 @@ TREATMENT_MATERIALIZATION_AND_ACTIVATION = ONE_CAPABILITY_INTERVENTION
 SCIENTIFIC_TREATMENT_VARIABLE_COUNT = 1
 
 CONTROL_TO_TREATMENT_RUNS =
-  I2G_CONTROL_COUNTER_DISCOVERY_RUNS = 1;
-  I2G_TREATMENT_COUNTER_DISCOVERY_RUNS = 1;
-  TOTAL_I2G_COUNTER_DISCOVERY_RUNS = 2;
+  PLANNED_CONTROL_COUNTER_DISCOVERY_RUNS = 1;
+  PLANNED_TREATMENT_COUNTER_DISCOVERY_RUNS = 1;
+  PLANNED_VALID_PAIR_COUNTER_DISCOVERY_RUNS = 2;
+  MAX_CONTROL_COUNTER_DISCOVERY_RUNS = 1;
+  MAX_TREATMENT_COUNTER_DISCOVERY_RUNS = 1;
+  MAX_TOTAL_I2G_COUNTER_DISCOVERY_RUNS = 2;
   POWER_SAMPLING_RUNS = 0
+
+PLANNED_CONTROL_COUNTER_DISCOVERY_RUNS = 1
+PLANNED_TREATMENT_COUNTER_DISCOVERY_RUNS = 1
+PLANNED_VALID_PAIR_COUNTER_DISCOVERY_RUNS = 2
+MAX_CONTROL_COUNTER_DISCOVERY_RUNS = 1
+MAX_TREATMENT_COUNTER_DISCOVERY_RUNS = 1
+MAX_TOTAL_I2G_COUNTER_DISCOVERY_RUNS = 2
+ACTUAL_RUN_COUNTS =
+  record ACTUAL_CONTROL_COUNTER_DISCOVERY_RUNS,
+  ACTUAL_TREATMENT_COUNTER_DISCOVERY_RUNS, and
+  ACTUAL_TOTAL_I2G_COUNTER_DISCOVERY_RUNS from future evidence; never infer
+  counts from planned values or evidence-file presence
+CONTROL_DRIFT_EXPECTED_ACTUAL_COUNTS = control 1; treatment 0; total 1
+PRE_CONTROL_FAILURE_ACTUAL_COUNTS = 0 / 0 / 0
+CONTROL_RETRY_ALLOWED = false
+TREATMENT_RETRY_ALLOWED = false
+COUNTER_DISCOVERY_RETRY_POLICY = NO_RETRY
 
 MUST_REMAIN_ABSENT =
   SeDebugPrivilege, SeCreatePagefilePrivilege, SeCreatePermanentPrivilege,
@@ -614,7 +666,6 @@ AMD_CLI_IDENTITY =
 CONTROL_HARNESS_SHA256 = TREATMENT_HARNESS_SHA256
 FIXED_OPERATION = timechart --list
 POWER_SAMPLING_RUNS = 0
-TOTAL_I2G_COUNTER_DISCOVERY_RUNS = 2
 TIMEOUT = 30,000 ms counter-discovery bound with the existing 90,000 ms child safety cap
 FRESH_SERVICE_NAME = one fixed fresh name reused by both phases
 FRESH_SERVICE_SID = one SID derived from that name and reused by both phases
@@ -643,11 +694,13 @@ PROCESS_OWNERSHIP =
   TREATMENT tree absent before final rollback
 
 EVIDENCE_SCHEMA =
-  HISTORICAL_I2F_REFERENCE; CONTROL_POLICY_STATE; CONTROL_TOKEN;
+  HISTORICAL_I2F_REFERENCE; PLANNED_RUN_COUNTS; MAX_RUN_COUNTS;
+  ACTUAL_RUN_COUNTS; CONTROL_POLICY_STATE; CONTROL_TOKEN;
   CONTROL_AMD_IDENTITY; CONTROL_COUNTER_DISCOVERY_RESULT; CONTROL_TEARDOWN;
   TREATMENT_POLICY_MUTATION; TREATMENT_POLICY_READBACK; TREATMENT_TOKEN;
   TREATMENT_AMD_IDENTITY; TREATMENT_COUNTER_DISCOVERY_RESULT;
-  CONTROL_TREATMENT_INVARIANT_COMPARISON; PAIRED_CAUSAL_DELTA;
+  CONTROL_TREATMENT_CONFIGURATION_INVARIANT_COMPARISON;
+  CONTROL_TREATMENT_TOKEN_INVARIANT_COMPARISON; PAIRED_CAUSAL_DELTA;
   POLICY_ROLLBACK_TREATMENT; POLICY_ROLLBACK_BASELINE; FINAL_ROLLBACK
 
 INVALID_RESULT_CONTROL_DRIFT_GATE =
@@ -659,6 +712,23 @@ INVALID_RESULT_CAUSAL_GATE =
   privilege/group state, SystemProfile final state, operation, timeout,
   environment, or sampling changes; Administrators appears; treatment adds
   more than ProfileSingle; owned cleanup fails; or rollback is incomplete
+
+INVALID_CONFIGURATION_DELTA =
+  INVALID_NO_CAUSAL_INTERPRETATION if any CONTROL-to-TREATMENT configuration
+  change occurs beyond adding SeProfileSingleProcessPrivilege to the same
+  Service SID; examples include harness, service binary, environment, timeout,
+  working directory, AMD CLI, Service SID, account, ACL, registry, or any
+  additional privilege change
+
+CONTROL_TREATMENT_CONFIGURATION_INVARIANT_COMPARISON =
+  PASS_EXACT_ONE_ALLOWED_TREATMENT_CONFIGURATION_DELTA only when all
+  non-treatment configuration is unchanged and the sole delta is the
+  SeProfileSingleProcessPrivilege assignment to the same Service SID
+
+ACTUAL_RUN_COUNT_RULE =
+  a valid full pair records 1 CONTROL / 1 TREATMENT / 2 total; CONTROL drift
+  after CONTROL records 1 / 0 / 1; failure before CONTROL launch records
+  0 / 0 / 0; no retry or third discovery run is permitted
 
 RESULT_CLASSIFICATION =
   CONTROL_DRIFT, PROFILE_SINGLE_SUFFICIENT_IN_PAIRED_I2G_CONTEXT,
@@ -709,9 +779,13 @@ HISTORICAL_I2F_ROLE = PREDECESSOR_EVIDENCE_ONLY
 HISTORICAL_I2F_IS_ACTIVE_CAUSAL_CONTROL = false
 TEMPORARY_POLICY_ASSIGNMENT_COUNT = 2
 SCIENTIFIC_TREATMENT_VARIABLE_COUNT = 1
-I2G_CONTROL_COUNTER_DISCOVERY_RUNS = 1
-I2G_TREATMENT_COUNTER_DISCOVERY_RUNS = 1
-TOTAL_I2G_COUNTER_DISCOVERY_RUNS = 2
+PLANNED_CONTROL_COUNTER_DISCOVERY_RUNS = 1
+PLANNED_TREATMENT_COUNTER_DISCOVERY_RUNS = 1
+PLANNED_VALID_PAIR_COUNTER_DISCOVERY_RUNS = 2
+MAX_CONTROL_COUNTER_DISCOVERY_RUNS = 1
+MAX_TREATMENT_COUNTER_DISCOVERY_RUNS = 1
+MAX_TOTAL_I2G_COUNTER_DISCOVERY_RUNS = 2
+ACTUAL_RUN_COUNT_EVIDENCE_SCHEMA = DEFINED
 POWER_SAMPLING_RUNS = 0
 I2G_HARNESS = NOT_IMPLEMENTED
 I2G_REAL_RUNTIME = 0

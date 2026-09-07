@@ -41,10 +41,11 @@ I2G_VARIABLE_SELECTION = PASS_READ_ONLY
 I2G_SELECTION_CONFIDENCE = MEDIUM
 I2G_SINGLE_VARIABLE_ISOLATABLE = true
 I2G_SELECTION_CHANGED = false
-BLOCKER = I2G_HISTORICAL_CONTROL_LEAVES_NON_TREATMENT_CONFOUNDERS_UNCONTROLLED
+BLOCKER = I2G_PAIRED_PHASE_CONFIGURATION_INVARIANT_CONTRADICTS_TREATMENT_MUTATION
 BLOCKER_STATUS = CLOSED_OFFLINE
 PREVIOUS_BLOCKER_1 = I2G_BASELINE_RECONSTRUCTION_CONTRACT_INCONSISTENT / CLOSED_OFFLINE
 PREVIOUS_BLOCKER_2 = I2G_STAGED_TREATMENT_TOKEN_MISCLASSIFIED_AS_EXACT_I2F_BASELINE / CLOSED_OFFLINE
+PREVIOUS_BLOCKER_3 = I2G_HISTORICAL_CONTROL_LEAVES_NON_TREATMENT_CONFOUNDERS_UNCONTROLLED / CLOSED_OFFLINE
 I2G_BASELINE_RECONSTRUCTION_RIGHT = SeSystemProfilePrivilege
 I2G_TREATMENT_VARIABLE = SeProfileSingleProcessPrivilege
 I2G_EXPERIMENT_SHAPE = PAIRED_CONTROL_TREATMENT
@@ -60,9 +61,19 @@ I2G_TREATMENT_SYSTEM_PROFILE_STATE = PRESENT + ENABLED
 I2G_PAIRED_CAUSAL_TREATMENT_DELTA = SeProfileSingleProcessPrivilege ABSENT -> PRESENT + ENABLED
 I2G_TREATMENT_MATERIALIZATION_DELTA = SeProfileSingleProcessPrivilege ABSENT -> PRESENT + DISABLED
 I2G_TREATMENT_ACTIVATION_DELTA = SeProfileSingleProcessPrivilege DISABLED -> ENABLED
-I2G_CONTROL_COUNTER_DISCOVERY_RUNS = 1
-I2G_TREATMENT_COUNTER_DISCOVERY_RUNS = 1
-TOTAL_I2G_COUNTER_DISCOVERY_RUNS = 2
+NO_CODE_CHANGE_BETWEEN_PHASES = true
+NO_NON_TREATMENT_CONFIGURATION_CHANGE_BETWEEN_PHASES = true
+ALLOWED_TREATMENT_CONFIGURATION_DELTA = SeProfileSingleProcessPrivilege assignment to same Service SID only
+CONTROL_TO_TREATMENT_POLICY_DELTA_COUNT = 1
+PLANNED_CONTROL_COUNTER_DISCOVERY_RUNS = 1
+PLANNED_TREATMENT_COUNTER_DISCOVERY_RUNS = 1
+PLANNED_VALID_PAIR_COUNTER_DISCOVERY_RUNS = 2
+MAX_CONTROL_COUNTER_DISCOVERY_RUNS = 1
+MAX_TREATMENT_COUNTER_DISCOVERY_RUNS = 1
+MAX_TOTAL_I2G_COUNTER_DISCOVERY_RUNS = 2
+ACTUAL_RUN_COUNT_EVIDENCE_SCHEMA = DEFINED
+CONTROL_RETRY_ALLOWED = false
+TREATMENT_RETRY_ALLOWED = false
 POWER_SAMPLING_RUNS = 0
 CONTROL_SERVICE_NAME_EQUALS_TREATMENT = true
 CONTROL_SERVICE_SID_EQUALS_TREATMENT = true
@@ -87,12 +98,16 @@ evidence only, not the active causal control. The future experiment is a
 paired CONTROL -> TREATMENT design on one fresh service identity. CONTROL
 assigns only `SeSystemProfilePrivilege`, requires `POWER_UNAVAILABLE`, and is
 fully torn down before treatment adds `SeProfileSingleProcessPrivilege` to the
-same Service SID. Both phases run one non-sampling `timechart --list`; the
+same Service SID. A planned valid pair runs one non-sampling
+`timechart --list` in each phase; the
 paired delta is `ABSENT -> PRESENT + ENABLED`. The expected control,
 treatment, invariant comparison, drift gate, and independent rollback are
 specified in
 [`docs/upgrade/amd-i2g-variable-selection.md`](../../docs/upgrade/amd-i2g-variable-selection.md).
-No I2G harness or runtime exists.
+The only allowed CONTROL-to-TREATMENT configuration delta is assignment of
+`SeProfileSingleProcessPrivilege` to the same Service SID after CONTROL
+teardown. Planned and maximum run counts are separate from actual counts. No
+I2G harness or runtime exists.
 
 The automated path is completely synthetic. `--synthetic` exercises the
 versioned semantic protocol, bounded framing, explicit pipe-DACL policy,
