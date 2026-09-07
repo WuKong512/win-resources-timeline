@@ -2138,26 +2138,37 @@ MINIMUM_REQUIRED_CAPABILITY = UNRESOLVED_AFTER_READ_ONLY_SELECTION
 I2G_VARIABLE = SeProfileSingleProcessPrivilege
 I2G_VARIABLE_SELECTION = PASS_READ_ONLY
 I2G_SELECTION_CONFIDENCE = MEDIUM
+I2G_SELECTION_CHANGED = false
 I2G_SINGLE_VARIABLE_ISOLATABLE = true
-BLOCKER = I2G_STAGED_TREATMENT_TOKEN_MISCLASSIFIED_AS_EXACT_I2F_BASELINE
+BLOCKER = I2G_HISTORICAL_CONTROL_LEAVES_NON_TREATMENT_CONFOUNDERS_UNCONTROLLED
 BLOCKER_STATUS = CLOSED_OFFLINE
-PREVIOUS_BLOCKER = I2G_BASELINE_RECONSTRUCTION_CONTRACT_INCONSISTENT / CLOSED_OFFLINE
+PREVIOUS_BLOCKER_1 = I2G_BASELINE_RECONSTRUCTION_CONTRACT_INCONSISTENT / CLOSED_OFFLINE
+PREVIOUS_BLOCKER_2 = I2G_STAGED_TREATMENT_TOKEN_MISCLASSIFIED_AS_EXACT_I2F_BASELINE / CLOSED_OFFLINE
 I2G_BASELINE_RECONSTRUCTION_RIGHT = SeSystemProfilePrivilege
 I2G_TREATMENT_VARIABLE = SeProfileSingleProcessPrivilege
+I2G_EXPERIMENT_SHAPE = PAIRED_CONTROL_TREATMENT
+HISTORICAL_I2F_ROLE = PREDECESSOR_EVIDENCE_ONLY
+HISTORICAL_I2F_IS_ACTIVE_CAUSAL_CONTROL = false
 TEMPORARY_POLICY_ASSIGNMENT_COUNT = 2
 SCIENTIFIC_TREATMENT_VARIABLE_COUNT = 1
 HISTORICAL_I2F_PROFILE_SINGLE_STATE = ABSENT
-I2G_MATERIALIZED_PROFILE_SINGLE_STATE = PRESENT + DISABLED
-I2G_STAGED_PROFILE_SINGLE_STATE = PRESENT + DISABLED
+I2G_CONTROL_PROFILE_SINGLE_STATE = ABSENT
+I2G_CONTROL_SYSTEM_PROFILE_STATE = PRESENT + ENABLED
 I2G_TREATMENT_PROFILE_SINGLE_STATE = PRESENT + ENABLED
-I2G_NON_TREATMENT_BASELINE_INVARIANTS = EXACT_FINAL_I2F
-I2G_STAGED_TREATMENT_EXCEPTION = SeProfileSingleProcessPrivilege PRESENT + DISABLED
-STAGED_EXCEPTION_COUNT = 1
-BASELINE_RECONSTRUCTION_TOKEN_DELTA = SeSystemProfilePrivilege DISABLED -> ENABLED
+I2G_TREATMENT_SYSTEM_PROFILE_STATE = PRESENT + ENABLED
+I2G_PAIRED_CAUSAL_TREATMENT_DELTA = SeProfileSingleProcessPrivilege ABSENT -> PRESENT + ENABLED
 I2G_TREATMENT_MATERIALIZATION_DELTA = SeProfileSingleProcessPrivilege ABSENT -> PRESENT + DISABLED
 I2G_TREATMENT_ACTIVATION_DELTA = SeProfileSingleProcessPrivilege DISABLED -> ENABLED
-I2G_TOTAL_CAUSAL_TREATMENT_DELTA = SeProfileSingleProcessPrivilege ABSENT -> PRESENT + ENABLED
-NO_BASELINE_AMD_RUN = true
+I2G_CONTROL_COUNTER_DISCOVERY_RUNS = 1
+I2G_TREATMENT_COUNTER_DISCOVERY_RUNS = 1
+TOTAL_I2G_COUNTER_DISCOVERY_RUNS = 2
+POWER_SAMPLING_RUNS = 0
+CONTROL_SERVICE_NAME_EQUALS_TREATMENT = true
+CONTROL_SERVICE_SID_EQUALS_TREATMENT = true
+CONTROL_HARNESS_SHA_EQUALS_TREATMENT = true
+CONTROL_EXPECTED_RESULT = POWER_UNAVAILABLE
+CONTROL_DRIFT_STOP_BEFORE_TREATMENT = true
+CONTROL_TOKEN_TEARDOWN_BEFORE_TREATMENT_POLICY_MUTATION = true
 I2G_HARNESS = NOT_IMPLEMENTED
 I2G_REAL_RUNTIME = 0
 I2G_HARNESS_IMPLEMENTATION_AUTHORIZED = false
@@ -2171,16 +2182,15 @@ EXECUTION_PLAN_SINGLE_CURRENT_STATE = PASS
 ```
 
 The current read-only research state selects exactly one future I2G variable:
-`SeProfileSingleProcessPrivilege`. Historical I2F is the existing control
-observation with ProfileSingle `ABSENT` and power unavailable. A fresh I2G
-Service SID materializes ProfileSingle as `PRESENT + DISABLED`, reconstructs
-the final-I2F non-treatment dimensions, and then enables ProfileSingle as the
-single treatment capability. The staged token is therefore not an exact copy
-of the historical I2F token. The total causal comparison is
-`ABSENT -> PRESENT + ENABLED`; within the future run, activation remains one
-state change, `DISABLED -> ENABLED`. This does not select LocalSystem, add
-Administrators membership, enable `SeDebugPrivilege`, or admit an AMD
-provider. No baseline AMD run is planned. The design-only contract and
-normalized matrix are in
+`SeProfileSingleProcessPrivilege`. Historical I2F remains predecessor evidence
+only, not the active I2G causal control. The future design is a paired
+CONTROL -> TREATMENT experiment using the same fresh service name, Service SID,
+LocalService account, harness artifact, AMD CLI identity, protocol, timeout,
+and non-sampling `timechart --list` operation. CONTROL assigns only
+`SeSystemProfilePrivilege`, must produce `POWER_UNAVAILABLE`, and must be fully
+torn down before treatment policy mutation. Treatment then adds and enables
+`SeProfileSingleProcessPrivilege` on the same service identity. The paired
+causal delta is `ABSENT -> PRESENT + ENABLED`; the selection remains unchanged.
+The design-only contract and normalized matrix are in
 [`amd-i2g-variable-selection.md`](amd-i2g-variable-selection.md). No I2G
-harness or runtime exists.
+harness or runtime exists, and no treatment may follow CONTROL drift.

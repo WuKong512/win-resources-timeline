@@ -1601,13 +1601,21 @@ foreach ($requiredI2eCurrentStateText in @(
         'I2G_VARIABLE = SeProfileSingleProcessPrivilege',
         'I2G_VARIABLE_SELECTION = PASS_READ_ONLY',
         'I2G_SELECTION_CONFIDENCE = MEDIUM',
+        'I2G_SELECTION_CHANGED = false',
         'I2G_HARNESS = NOT_IMPLEMENTED',
         'I2G_HARNESS_IMPLEMENTATION_AUTHORIZED = false',
         'I2G_REAL_RUNTIME_AUTHORIZED = false',
         'I2G_BASELINE_RECONSTRUCTION_RIGHT = SeSystemProfilePrivilege',
         'I2G_TREATMENT_VARIABLE = SeProfileSingleProcessPrivilege',
+        'I2G_EXPERIMENT_SHAPE = PAIRED_CONTROL_TREATMENT',
+        'HISTORICAL_I2F_ROLE = PREDECESSOR_EVIDENCE_ONLY',
+        'HISTORICAL_I2F_IS_ACTIVE_CAUSAL_CONTROL = false',
         'TEMPORARY_POLICY_ASSIGNMENT_COUNT = 2',
         'SCIENTIFIC_TREATMENT_VARIABLE_COUNT = 1',
+        'I2G_CONTROL_COUNTER_DISCOVERY_RUNS = 1',
+        'I2G_TREATMENT_COUNTER_DISCOVERY_RUNS = 1',
+        'TOTAL_I2G_COUNTER_DISCOVERY_RUNS = 2',
+        'POWER_SAMPLING_RUNS = 0',
         'NEXT_GATE = I2G_HARNESS_DESIGN_AND_OFFLINE_IMPLEMENTATION_REVIEW',
         'NEXT_TASK = I2G_HARNESS_DESIGN_AND_OFFLINE_IMPLEMENTATION_REVIEW'
     )) {
@@ -1620,50 +1628,71 @@ Write-Host 'EXECUTION_PLAN_SINGLE_CURRENT_STATE=PASS'
 Write-Host 'README_CURRENT_STATE_RECONCILED=PASS'
 $i2gContractSource = Get-Content -LiteralPath $I2gSelectionDocument -Raw
 foreach ($requiredI2gContractText in @(
-        'BLOCKER = I2G_STAGED_TREATMENT_TOKEN_MISCLASSIFIED_AS_EXACT_I2F_BASELINE',
+        'BLOCKER = I2G_HISTORICAL_CONTROL_LEAVES_NON_TREATMENT_CONFOUNDERS_UNCONTROLLED',
         'BLOCKER_STATUS = CLOSED_OFFLINE',
-        'PREVIOUS_BLOCKER = I2G_BASELINE_RECONSTRUCTION_CONTRACT_INCONSISTENT / CLOSED_OFFLINE',
-        'HISTORICAL_I2F_CONTROL =',
-        'I2G_MATERIALIZED_TOKEN =',
-        'I2G_STAGED_TOKEN =',
-        'I2G_TREATMENT_TOKEN =',
-        'I2G_NON_TREATMENT_BASELINE_INVARIANTS = EXACT_FINAL_I2F',
-        'I2G_STAGED_TREATMENT_EXCEPTION = SeProfileSingleProcessPrivilege PRESENT + DISABLED',
-        'STAGED_EXCEPTION_COUNT = 1',
-        'BASELINE_RECONSTRUCTION_TOKEN_DELTA = SeSystemProfilePrivilege DISABLED -> ENABLED',
+        'PREVIOUS_BLOCKER_1 = I2G_BASELINE_RECONSTRUCTION_CONTRACT_INCONSISTENT / CLOSED_OFFLINE',
+        'PREVIOUS_BLOCKER_2 = I2G_STAGED_TREATMENT_TOKEN_MISCLASSIFIED_AS_EXACT_I2F_BASELINE / CLOSED_OFFLINE',
+        'I2G_EXPERIMENT_SHAPE = PAIRED_CONTROL_TREATMENT',
+        'HISTORICAL_I2F_REFERENCE =',
+        'HISTORICAL_I2F_ROLE = PREDECESSOR_EVIDENCE_ONLY',
+        'HISTORICAL_I2F_IS_ACTIVE_CAUSAL_CONTROL = false',
+        'CONTROL_POLICY_RIGHTS = SeSystemProfilePrivilege only',
+        'I2G_CONTROL_MATERIALIZED_TOKEN =',
+        'I2G_CONTROL_FINAL_TOKEN =',
+        'I2G_CONTROL_TOKEN = I2G-CONTROL-TOKEN.json',
+        'CONTROL_SAMPLING = false',
+        'CONTROL_COUNTER_DISCOVERY = timechart --list',
+        'I2G_CONTROL_COUNTER_DISCOVERY_RUNS = 1',
+        'CONTROL_EXPECTED_RESULT = POWER_UNAVAILABLE',
+        'CONTROL_DRIFT =',
+        'CONTROL_DRIFT_STOP_BEFORE_TREATMENT = true',
+        'CONTROL_TOKEN_TEARDOWN_BEFORE_TREATMENT_POLICY_MUTATION = true',
+        'TREATMENT_POLICY_RIGHTS =',
+        'TREATMENT_POLICY_ADDITION = SeProfileSingleProcessPrivilege only',
+        'CONTROL_SERVICE_NAME_EQUALS_TREATMENT = true',
+        'CONTROL_SERVICE_SID_EQUALS_TREATMENT = true',
+        'CONTROL_HARNESS_SHA_EQUALS_TREATMENT = true',
+        'SERVICE_RESTART = REQUIRED_TECHNICAL_MATERIALIZATION_BOUNDARY',
+        'I2G_TREATMENT_MATERIALIZED_TOKEN =',
+        'I2G_TREATMENT_FINAL_TOKEN =',
+        'I2G_TREATMENT_TOKEN = I2G-TREATMENT-TOKEN.json',
+        'TREATMENT_SAMPLING = false',
+        'TREATMENT_COUNTER_DISCOVERY = timechart --list',
+        'I2G_TREATMENT_COUNTER_DISCOVERY_RUNS = 1',
+        'CONTROL_TO_TREATMENT_NON_TREATMENT_INVARIANTS = UNCHANGED',
+        'I2G_PAIRED_CAUSAL_TREATMENT_DELTA = SeProfileSingleProcessPrivilege ABSENT -> PRESENT + ENABLED',
         'I2G_TREATMENT_MATERIALIZATION_DELTA = SeProfileSingleProcessPrivilege ABSENT -> PRESENT + DISABLED',
         'I2G_TREATMENT_ACTIVATION_DELTA = SeProfileSingleProcessPrivilege DISABLED -> ENABLED',
-        'I2G_TOTAL_CAUSAL_TREATMENT_DELTA = SeProfileSingleProcessPrivilege ABSENT -> PRESENT + ENABLED',
-        'I2G_EXACT_TREATMENT_ACTIVATION_DELTA = ONE_PRIVILEGE_STATE_CHANGE',
-        'I2G_BASELINE_RECONSTRUCTION = FINAL_I2F_NON_TREATMENT_STATE_RECONSTRUCTED',
-        'NO_BASELINE_AMD_RUN = true',
+        'TREATMENT_MATERIALIZATION_AND_ACTIVATION = ONE_CAPABILITY_INTERVENTION',
+        'TOTAL_I2G_COUNTER_DISCOVERY_RUNS = 2',
+        'POWER_SAMPLING_RUNS = 0',
+        'TOKEN_TEARDOWN_BEFORE_POLICY_RIGHT_REMOVAL = true',
         'I2G_BASELINE_POLICY_ROLLBACK = SeSystemProfilePrivilege',
         'I2G_TREATMENT_POLICY_ROLLBACK = SeProfileSingleProcessPrivilege',
-        'TOKEN_TEARDOWN_BEFORE_POLICY_RIGHT_REMOVAL = true',
-        'POLICY_ASSIGNMENT_BASELINE =',
-        'POLICY_ASSIGNMENT_TREATMENT =',
-        'TOKEN_MATERIALIZED',
-        'TOKEN_STAGED',
-        'TOKEN_TREATMENT',
-        'BASELINE_RECONSTRUCTION_DELTA',
-        'I2G_TREATMENT_MATERIALIZATION_DELTA',
-        'I2G_TREATMENT_ACTIVATION_DELTA',
-        'I2G_TOTAL_CAUSAL_TREATMENT_DELTA',
-        'POLICY_ROLLBACK_TREATMENT',
-        'POLICY_ROLLBACK_BASELINE',
-        'FULL_ROLLBACK',
-        'INVALID_RESULT_BASELINE_GATE ='
+        'CONTROL_TREATMENT_INVARIANT_COMPARISON',
+        'PAIRED_CAUSAL_DELTA',
+        'PARTIAL_FAILURE_ACCOUNTING =',
+        'INVALID_RESULT_CONTROL_DRIFT_GATE =',
+        'INVALID_RESULT_CAUSAL_GATE ='
     )) {
     if ($i2gContractSource.IndexOf($requiredI2gContractText, [StringComparison]::Ordinal) -lt 0) {
         throw "I2G baseline reconstruction contract is missing: $requiredI2gContractText"
     }
 }
-if ($i2gContractSource.IndexOf('I2G_BASELINE_RECONSTRUCTION = EXACT_FINAL_I2F_RELEVANT_STATE', [StringComparison]::Ordinal) -ge 0 -or
-    $i2gContractSource.IndexOf('EXPECTED_STAGED_TOKEN = exact final-I2F token', [StringComparison]::Ordinal) -ge 0 -or
-    $i2gContractSource.IndexOf('exact final-I2F token/group baseline', [StringComparison]::Ordinal) -ge 0) {
-    throw 'I2G staged token is still misclassified as an exact full I2F token.'
+if ($i2gContractSource -match '(?m)^NO_BASELINE_AMD_RUN = true\s*$') {
+    throw 'I2G current contract still claims that no baseline/control AMD run is required.'
 }
-Write-Host 'I2G_STAGED_TREATMENT_CAUSAL_MODEL=PASS'
+$pairedContractMarker = '## Design-only I2G paired CONTROL -> TREATMENT contract'
+$pairedContractStart = $i2gContractSource.IndexOf($pairedContractMarker, [StringComparison]::Ordinal)
+if ($pairedContractStart -lt 0) {
+    throw 'I2G paired CONTROL -> TREATMENT contract section is missing.'
+}
+$pairedContractSource = $i2gContractSource.Substring($pairedContractStart)
+if ($pairedContractSource.IndexOf('HISTORICAL_I2F_IS_ACTIVE_CAUSAL_CONTROL = true', [StringComparison]::Ordinal) -ge 0 -or
+    $pairedContractSource.IndexOf('historical I2F is the active causal control', [StringComparison]::OrdinalIgnoreCase) -ge 0) {
+    throw 'I2G paired contract still treats historical I2F as the active causal control.'
+}
+Write-Host 'I2G_PAIRED_CONTROL_TREATMENT_CONTRACT=PASS'
 function Get-I2gPrivilegeCategoryBody {
     param([string]$CategoryName)
     return [regex]::Match(

@@ -40,25 +40,36 @@ I2G_VARIABLE = SeProfileSingleProcessPrivilege
 I2G_VARIABLE_SELECTION = PASS_READ_ONLY
 I2G_SELECTION_CONFIDENCE = MEDIUM
 I2G_SINGLE_VARIABLE_ISOLATABLE = true
-BLOCKER = I2G_STAGED_TREATMENT_TOKEN_MISCLASSIFIED_AS_EXACT_I2F_BASELINE
+I2G_SELECTION_CHANGED = false
+BLOCKER = I2G_HISTORICAL_CONTROL_LEAVES_NON_TREATMENT_CONFOUNDERS_UNCONTROLLED
 BLOCKER_STATUS = CLOSED_OFFLINE
-PREVIOUS_BLOCKER = I2G_BASELINE_RECONSTRUCTION_CONTRACT_INCONSISTENT / CLOSED_OFFLINE
+PREVIOUS_BLOCKER_1 = I2G_BASELINE_RECONSTRUCTION_CONTRACT_INCONSISTENT / CLOSED_OFFLINE
+PREVIOUS_BLOCKER_2 = I2G_STAGED_TREATMENT_TOKEN_MISCLASSIFIED_AS_EXACT_I2F_BASELINE / CLOSED_OFFLINE
 I2G_BASELINE_RECONSTRUCTION_RIGHT = SeSystemProfilePrivilege
 I2G_TREATMENT_VARIABLE = SeProfileSingleProcessPrivilege
+I2G_EXPERIMENT_SHAPE = PAIRED_CONTROL_TREATMENT
+HISTORICAL_I2F_ROLE = PREDECESSOR_EVIDENCE_ONLY
+HISTORICAL_I2F_IS_ACTIVE_CAUSAL_CONTROL = false
 TEMPORARY_POLICY_ASSIGNMENT_COUNT = 2
 SCIENTIFIC_TREATMENT_VARIABLE_COUNT = 1
 HISTORICAL_I2F_PROFILE_SINGLE_STATE = ABSENT
-I2G_MATERIALIZED_PROFILE_SINGLE_STATE = PRESENT + DISABLED
-I2G_STAGED_PROFILE_SINGLE_STATE = PRESENT + DISABLED
+I2G_CONTROL_PROFILE_SINGLE_STATE = ABSENT
+I2G_CONTROL_SYSTEM_PROFILE_STATE = PRESENT + ENABLED
 I2G_TREATMENT_PROFILE_SINGLE_STATE = PRESENT + ENABLED
-I2G_NON_TREATMENT_BASELINE_INVARIANTS = EXACT_FINAL_I2F
-I2G_STAGED_TREATMENT_EXCEPTION = SeProfileSingleProcessPrivilege PRESENT + DISABLED
-STAGED_EXCEPTION_COUNT = 1
-BASELINE_RECONSTRUCTION_TOKEN_DELTA = SeSystemProfilePrivilege DISABLED -> ENABLED
+I2G_TREATMENT_SYSTEM_PROFILE_STATE = PRESENT + ENABLED
+I2G_PAIRED_CAUSAL_TREATMENT_DELTA = SeProfileSingleProcessPrivilege ABSENT -> PRESENT + ENABLED
 I2G_TREATMENT_MATERIALIZATION_DELTA = SeProfileSingleProcessPrivilege ABSENT -> PRESENT + DISABLED
 I2G_TREATMENT_ACTIVATION_DELTA = SeProfileSingleProcessPrivilege DISABLED -> ENABLED
-I2G_TOTAL_CAUSAL_TREATMENT_DELTA = SeProfileSingleProcessPrivilege ABSENT -> PRESENT + ENABLED
-NO_BASELINE_AMD_RUN = true
+I2G_CONTROL_COUNTER_DISCOVERY_RUNS = 1
+I2G_TREATMENT_COUNTER_DISCOVERY_RUNS = 1
+TOTAL_I2G_COUNTER_DISCOVERY_RUNS = 2
+POWER_SAMPLING_RUNS = 0
+CONTROL_SERVICE_NAME_EQUALS_TREATMENT = true
+CONTROL_SERVICE_SID_EQUALS_TREATMENT = true
+CONTROL_HARNESS_SHA_EQUALS_TREATMENT = true
+CONTROL_EXPECTED_RESULT = POWER_UNAVAILABLE
+CONTROL_DRIFT_STOP_BEFORE_TREATMENT = true
+CONTROL_TOKEN_TEARDOWN_BEFORE_TREATMENT_POLICY_MUTATION = true
 I2G_HARNESS = NOT_IMPLEMENTED
 I2G_REAL_RUNTIME = 0
 I2G_HARNESS_IMPLEMENTATION_AUTHORIZED = false
@@ -71,17 +82,17 @@ NEXT_TASK = I2G_HARNESS_DESIGN_AND_OFFLINE_IMPLEMENTATION_REVIEW
 README_CURRENT_STATE_RECONCILED=PASS
 ```
 
-The selected I2G treatment remains one variable even though a fresh
-qualification Service SID needs two temporary policy assignments. Historical
-I2F is the existing control with ProfileSingle `ABSENT`. The fresh service
-materializes ProfileSingle as `PRESENT + DISABLED`, reconstructs all final-I2F
-non-treatment dimensions, and enables ProfileSingle only after the staged
-token gate passes. The staged token is not an exact historical I2F token. The
-total causal delta is `ABSENT -> PRESENT + ENABLED`; the future-run activation
-delta remains `DISABLED -> ENABLED`. The expected materialized, staged, and
-treatment token states and independent rollback accounting are specified in
+The selected I2G treatment remains one variable. Historical I2F is predecessor
+evidence only, not the active causal control. The future experiment is a
+paired CONTROL -> TREATMENT design on one fresh service identity. CONTROL
+assigns only `SeSystemProfilePrivilege`, requires `POWER_UNAVAILABLE`, and is
+fully torn down before treatment adds `SeProfileSingleProcessPrivilege` to the
+same Service SID. Both phases run one non-sampling `timechart --list`; the
+paired delta is `ABSENT -> PRESENT + ENABLED`. The expected control,
+treatment, invariant comparison, drift gate, and independent rollback are
+specified in
 [`docs/upgrade/amd-i2g-variable-selection.md`](../../docs/upgrade/amd-i2g-variable-selection.md).
-No AMD CLI is launched at baseline.
+No I2G harness or runtime exists.
 
 The automated path is completely synthetic. `--synthetic` exercises the
 versioned semantic protocol, bounded framing, explicit pipe-DACL policy,

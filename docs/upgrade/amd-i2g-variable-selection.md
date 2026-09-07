@@ -217,23 +217,29 @@ I2G_SELECTION_RATIONALE = highest-scoring narrow SYSTEM-only capability with ind
 I2G_SINGLE_VARIABLE_ISOLATABLE = true
 BASE_ACCOUNT = NT AUTHORITY\LOCAL SERVICE
 BASE_ACCOUNT_SID = S-1-5-19
-BASE_SECURITY_CONTEXT = final authoritative I2F non-treatment context; ProfileSingle staged PRESENT + DISABLED
-BLOCKER = I2G_STAGED_TREATMENT_TOKEN_MISCLASSIFIED_AS_EXACT_I2F_BASELINE
+BASE_SECURITY_CONTEXT = paired fresh-I2G control/treatment context; non-treatment dimensions are held constant within the experiment
+BLOCKER = I2G_HISTORICAL_CONTROL_LEAVES_NON_TREATMENT_CONFOUNDERS_UNCONTROLLED
 BLOCKER_STATUS = CLOSED_OFFLINE
-PREVIOUS_BLOCKER = I2G_BASELINE_RECONSTRUCTION_CONTRACT_INCONSISTENT / CLOSED_OFFLINE
+PREVIOUS_BLOCKER_1 = I2G_BASELINE_RECONSTRUCTION_CONTRACT_INCONSISTENT / CLOSED_OFFLINE
+PREVIOUS_BLOCKER_2 = I2G_STAGED_TREATMENT_TOKEN_MISCLASSIFIED_AS_EXACT_I2F_BASELINE / CLOSED_OFFLINE
 I2G_BASELINE_RECONSTRUCTION_RIGHT = SeSystemProfilePrivilege
 I2G_TREATMENT_VARIABLE = SeProfileSingleProcessPrivilege
+I2G_SELECTION_CHANGED = false
+I2G_EXPERIMENT_SHAPE = PAIRED_CONTROL_TREATMENT
 TEMPORARY_POLICY_ASSIGNMENT_COUNT = 2
 SCIENTIFIC_TREATMENT_VARIABLE_COUNT = 1
 HISTORICAL_I2F_PROFILE_SINGLE_STATE = ABSENT
-I2G_MATERIALIZED_PROFILE_SINGLE_STATE = PRESENT + DISABLED
-I2G_STAGED_PROFILE_SINGLE_STATE = PRESENT + DISABLED
+I2G_CONTROL_PROFILE_SINGLE_STATE = ABSENT
 I2G_TREATMENT_PROFILE_SINGLE_STATE = PRESENT + ENABLED
-I2G_NON_TREATMENT_BASELINE_INVARIANTS = EXACT_FINAL_I2F
-I2G_STAGED_TREATMENT_EXCEPTION = SeProfileSingleProcessPrivilege PRESENT + DISABLED
-STAGED_EXCEPTION_COUNT = 1
+I2G_CONTROL_SYSTEM_PROFILE_STATE = PRESENT + ENABLED
+I2G_TREATMENT_SYSTEM_PROFILE_STATE = PRESENT + ENABLED
+CONTROL_SERVICE_NAME_EQUALS_TREATMENT = true
+CONTROL_SERVICE_SID_EQUALS_TREATMENT = true
+CONTROL_HARNESS_SHA_EQUALS_TREATMENT = true
 BASELINE_RECONSTRUCTION_ROLE = frozen final-I2F state; not a new treatment
 TREATMENT_ROLE = selected single causal capability
+HISTORICAL_I2F_ROLE = PREDECESSOR_EVIDENCE_ONLY
+HISTORICAL_I2F_IS_ACTIVE_CAUSAL_CONTROL = false
 SE_SYSTEM_PROFILE_PRIVILEGE_STATE_IN_LOGICAL_BASELINE = PRESENT + ENABLED
 SE_PROFILE_SINGLE_PROCESS_PRIVILEGE_STATE_IN_LOGICAL_BASELINE = PRESENT + DISABLED
 ADMINISTRATORS_MEMBERSHIP_MUTATION = FORBIDDEN
@@ -241,14 +247,15 @@ LOCAL_SYSTEM_AS_I2G_VARIABLE = FORBIDDEN_AS_NON_SINGLE_VARIABLE
 SE_DEBUG_PRIVILEGE_MUTATION = FORBIDDEN
 ```
 
-The review blocker was an inconsistent description of a fresh Service SID as
-receiving only `SeProfileSingleProcessPrivilege` while also requiring the
-final-I2F `SeSystemProfilePrivilege` state. It is closed by separating logical
-baseline reconstruction from the treatment variable. A fresh I2G Service SID
-must temporarily receive exactly two rights: `SeSystemProfilePrivilege` to
-reconstruct the frozen final-I2F baseline, and `SeProfileSingleProcessPrivilege`
-as the one intentional treatment capability. The two policy assignments do
-not make this a two-variable experiment.
+The earlier review blockers concerned reconstruction terminology and staged
+token misclassification; both are closed. The current blocker is that
+historical I2F cannot serve as a fully paired future control. The authoritative
+design therefore uses one fresh I2G Service SID twice: CONTROL receives only
+`SeSystemProfilePrivilege` to reconstruct the known I2F security dimension and
+perform the negative control run; after token teardown, TREATMENT adds
+`SeProfileSingleProcessPrivilege` to that same SID. The two policy changes
+remain one baseline reconstruction plus one scientific capability, not two
+causal variables.
 
 The historical I2F Service SID's policy assignment cannot persist across a
 fresh Service SID. Therefore `SeSystemProfilePrivilege = PRESENT + ENABLED`
@@ -258,7 +265,7 @@ global LocalService account. No Administrators membership, LocalSystem
 account, AMD service ACL, driver ACL, or registry ACL is part of the selected
 variable.
 
-## Design-only I2G experiment contract
+## HISTORICAL / SUPERSEDED — prior staged-only I2G contract
 
 This contract is a specification for a later implementation review. It is not
 executable code and does not create an authorization path.
@@ -359,7 +366,7 @@ I2G_TOTAL_CAUSAL_TREATMENT_DELTA = SeProfileSingleProcessPrivilege ABSENT -> PRE
 I2G_TOTAL_CAUSAL_TREATMENT = SeProfileSingleProcessPrivilege ABSENT -> PRESENT + ENABLED
 SCIENTIFIC_TREATMENT_VARIABLE_COUNT = 1
 
-NO_BASELINE_AMD_RUN = true
+SUPERSEDED_NO_BASELINE_AMD_RUN = true
 AMD_LAUNCH_GATE = baseline token gate must pass before any AMD CLI launch
 
 MUST_REMAIN_ABSENT =
@@ -469,21 +476,220 @@ ONE_TIME_GATE =
   implementation and review; this task creates no executable gate
 ```
 
+## Design-only I2G paired CONTROL -> TREATMENT contract
+
+This is the authoritative future design for a later implementation review. It
+is documentation only, does not implement a harness, and does not create an
+authorization path. Historical I2F remains predecessor evidence; the active
+causal comparison is within one fresh I2G experiment.
+
+```text
+I2G_EXPERIMENT_SHAPE = PAIRED_CONTROL_TREATMENT
+HISTORICAL_I2F_REFERENCE =
+  I2F_RESULT = POWER_UNAVAILABLE;
+  SeSystemProfilePrivilege = PRESENT + ENABLED;
+  SeProfileSingleProcessPrivilege = ABSENT
+HISTORICAL_I2F_ROLE = PREDECESSOR_EVIDENCE_ONLY
+HISTORICAL_I2F_IS_ACTIVE_CAUSAL_CONTROL = false
+
+I2G_BASE_CONTEXT =
+  one fresh experiment ID; one fresh unrestricted Service SID; one service
+  name reused across CONTROL and TREATMENT; LocalService (S-1-5-19), Session 0,
+  x64, System integrity; one qualification harness artifact; fixed working
+  directory, environment, timeout, output policy, protocol, and ownership
+  policy; all causal comparisons are within these paired phases
+
+PAIRED_CONSTANTS =
+  same experiment ID, service name, Service SID, Service SID type, account,
+  harness binary, harness SHA256, working directory, environment, AMD CLI
+  path/SHA256/architecture/version/signature, Session 0, x64, System
+  integrity, timeout, output policy, job/process ownership, cleanup semantics,
+  FIXED_OPERATION, and sampling mode
+CONTROL_SERVICE_NAME_EQUALS_TREATMENT = true
+CONTROL_SERVICE_SID_EQUALS_TREATMENT = true
+CONTROL_SERVICE_SID_TYPE = UNRESTRICTED
+TREATMENT_SERVICE_SID_TYPE = UNRESTRICTED
+CONTROL_HARNESS_SHA_EQUALS_TREATMENT = true
+NO_REBUILD_BETWEEN_PHASES = true
+NO_CODE_OR_CONFIGURATION_CHANGE_BETWEEN_PHASES = true
+
+CONTROL_POLICY_RIGHTS = SeSystemProfilePrivilege only
+CONTROL_POLICY_ASSIGNMENT =
+  assign SeSystemProfilePrivilege to the fresh Service SID before CONTROL;
+  do not assign SeProfileSingleProcessPrivilege before CONTROL
+
+I2G_CONTROL_MATERIALIZED_TOKEN =
+  SeSystemProfilePrivilege = PRESENT + DISABLED;
+  SeProfileSingleProcessPrivilege = ABSENT
+I2G_CONTROL_FINAL_TOKEN =
+  enable SeSystemProfilePrivilege only;
+  SeSystemProfilePrivilege = PRESENT + ENABLED;
+  SeProfileSingleProcessPrivilege = ABSENT;
+  all other controlled privilege, group, account, session, architecture, and
+  integrity dimensions match the final-I2F non-treatment baseline as closely
+  as the fresh paired service model permits
+I2G_CONTROL_TOKEN = I2G-CONTROL-TOKEN.json
+CONTROL_SAMPLING = false
+CONTROL_COUNTER_DISCOVERY = timechart --list
+I2G_CONTROL_COUNTER_DISCOVERY_RUNS = 1
+CONTROL_EXPECTED_RESULT = POWER_UNAVAILABLE
+CONTROL_VALIDITY =
+  valid only with POWER_UNAVAILABLE, exit code 0, expected no-counters
+  diagnostic, exact identity, sampling=false, and no owned child
+
+CONTROL_DRIFT =
+  any CONTROL result other than the preregistered valid negative result,
+  including POWER_AVAILABLE, DISCOVERY_FAILED, TOKEN_GATE_FAILED,
+  IDENTITY_MISMATCH, or TIMEOUT
+CONTROL_DRIFT_STOP_BEFORE_TREATMENT = true
+CONTROL_DRIFT_RESULT = INVALID_NO_CAUSAL_INTERPRETATION
+
+CONTROL_TEARDOWN =
+  after CONTROL evidence, stop service; verify service PID=0; verify the
+  qualification token is gone; verify the exact owned AMD child is absent;
+  verify the broker-owned process set is empty
+CONTROL_TOKEN_TEARDOWN_BEFORE_TREATMENT_POLICY_MUTATION = true
+
+TREATMENT_POLICY_RIGHTS =
+  SeSystemProfilePrivilege + SeProfileSingleProcessPrivilege
+TREATMENT_POLICY_ADDITION = SeProfileSingleProcessPrivilege only
+SERVICE_RESTART = REQUIRED_TECHNICAL_MATERIALIZATION_BOUNDARY
+SERVICE_RESTART_IS_SECOND_SCIENTIFIC_VARIABLE = false
+
+I2G_TREATMENT_MATERIALIZED_TOKEN =
+  restart the same service after CONTROL teardown and the single treatment
+  policy addition; SeSystemProfilePrivilege = PRESENT + DISABLED;
+  SeProfileSingleProcessPrivilege = PRESENT + DISABLED
+I2G_TREATMENT_FINAL_TOKEN =
+  enable SeSystemProfilePrivilege first and SeProfileSingleProcessPrivilege
+  second; SeSystemProfilePrivilege = PRESENT + ENABLED;
+  SeProfileSingleProcessPrivilege = PRESENT + ENABLED
+I2G_TREATMENT_TOKEN = I2G-TREATMENT-TOKEN.json
+TREATMENT_SAMPLING = false
+TREATMENT_COUNTER_DISCOVERY = timechart --list
+I2G_TREATMENT_COUNTER_DISCOVERY_RUNS = 1
+
+CONTROL_TO_TREATMENT_NON_TREATMENT_INVARIANTS = UNCHANGED
+  TokenUser = S-1-5-19 / LocalService; Session = 0; Architecture = x64;
+  Integrity = System; Administrators SID = ABSENT;
+  Service SID type = UNRESTRICTED; SeSystemProfilePrivilege = PRESENT + ENABLED
+  in both final tokens; all unrelated privilege states and groups identical;
+  AMD CLI identity, operation, sampling, timeout, environment, and ownership
+  policy identical
+
+I2G_PAIRED_CAUSAL_TREATMENT_DELTA = SeProfileSingleProcessPrivilege ABSENT -> PRESENT + ENABLED
+I2G_TREATMENT_MATERIALIZATION_DELTA =
+  SeProfileSingleProcessPrivilege ABSENT -> PRESENT + DISABLED
+I2G_TREATMENT_ACTIVATION_DELTA =
+  SeProfileSingleProcessPrivilege DISABLED -> ENABLED
+TREATMENT_MATERIALIZATION_AND_ACTIVATION = ONE_CAPABILITY_INTERVENTION
+SCIENTIFIC_TREATMENT_VARIABLE_COUNT = 1
+
+CONTROL_TO_TREATMENT_RUNS =
+  I2G_CONTROL_COUNTER_DISCOVERY_RUNS = 1;
+  I2G_TREATMENT_COUNTER_DISCOVERY_RUNS = 1;
+  TOTAL_I2G_COUNTER_DISCOVERY_RUNS = 2;
+  POWER_SAMPLING_RUNS = 0
+
+MUST_REMAIN_ABSENT =
+  SeDebugPrivilege, SeCreatePagefilePrivilege, SeCreatePermanentPrivilege,
+  SeCreateSymbolicLinkPrivilege, SeDelegateSessionUserImpersonatePrivilege,
+  SeIncreaseBasePriorityPrivilege, SeLockMemoryPrivilege, SeTcbPrivilege,
+  SeBackupPrivilege, SeLoadDriverPrivilege, SeManageVolumePrivilege,
+  SeRestorePrivilege, SeSecurityPrivilege, SeSystemEnvironmentPrivilege,
+  SeTakeOwnershipPrivilege
+MUST_REMAIN_DISABLED =
+  SeAuditPrivilege, SeIncreaseWorkingSetPrivilege, SeTimeZonePrivilege,
+  SeAssignPrimaryTokenPrivilege, SeIncreaseQuotaPrivilege, SeShutdownPrivilege,
+  SeSystemtimePrivilege, SeUndockPrivilege
+MUST_REMAIN_ENABLED =
+  SeChangeNotifyPrivilege, SeCreateGlobalPrivilege, SeImpersonatePrivilege;
+  SeSystemProfilePrivilege in both final tokens;
+  SeProfileSingleProcessPrivilege only in final TREATMENT
+
+AMD_CLI_IDENTITY =
+  D:\\apps\\AMDuProf\\bin\\AMDuProfCLI.exe;
+  SHA-256 D0812D64963DD98F7C339CAC72F650461F95FF84E757A99767C7981B4111FBAC;
+  x64, version 5.3.521.0, valid AMD signature
+CONTROL_HARNESS_SHA256 = TREATMENT_HARNESS_SHA256
+FIXED_OPERATION = timechart --list
+POWER_SAMPLING_RUNS = 0
+TOTAL_I2G_COUNTER_DISCOVERY_RUNS = 2
+TIMEOUT = 30,000 ms counter-discovery bound with the existing 90,000 ms child safety cap
+FRESH_SERVICE_NAME = one fixed fresh name reused by both phases
+FRESH_SERVICE_SID = one SID derived from that name and reused by both phases
+
+ROLLBACK_ORDER =
+  after TREATMENT, stop accepting work; wait/terminate the exact owned AMD
+  child if needed; verify AMD child absent; stop service; verify service PID=0,
+  effective token gone, and broker-owned processes absent; remove
+  SeProfileSingleProcessPrivilege and verify dual LSA readback; remove
+  SeSystemProfilePrivilege and verify dual LSA readback; delete the same fresh
+  qualification service; verify service absent; persist final rollback evidence
+TOKEN_TEARDOWN_BEFORE_POLICY_RIGHT_REMOVAL = true
+I2G_BASELINE_POLICY_ROLLBACK = SeSystemProfilePrivilege
+I2G_TREATMENT_POLICY_ROLLBACK = SeProfileSingleProcessPrivilege
+POLICY_ROLLBACK = exact independent removal/readback of both additions;
+  no LsaRemoveAccountRights(all=true); no global LocalService mutation
+PARTIAL_FAILURE_ACCOUNTING =
+  system_profile_right_added_by_run; profile_single_right_added_by_run;
+  system_profile_remove_attempted; system_profile_remove_verified;
+  profile_single_remove_attempted; profile_single_remove_verified;
+  already_absent is recorded independently for each right
+
+PROCESS_OWNERSHIP =
+  both phases use qualification service -> exact direct AMD CLI child ->
+  job-owned / kill-on-close; CONTROL tree absent before treatment mutation;
+  TREATMENT tree absent before final rollback
+
+EVIDENCE_SCHEMA =
+  HISTORICAL_I2F_REFERENCE; CONTROL_POLICY_STATE; CONTROL_TOKEN;
+  CONTROL_AMD_IDENTITY; CONTROL_COUNTER_DISCOVERY_RESULT; CONTROL_TEARDOWN;
+  TREATMENT_POLICY_MUTATION; TREATMENT_POLICY_READBACK; TREATMENT_TOKEN;
+  TREATMENT_AMD_IDENTITY; TREATMENT_COUNTER_DISCOVERY_RESULT;
+  CONTROL_TREATMENT_INVARIANT_COMPARISON; PAIRED_CAUSAL_DELTA;
+  POLICY_ROLLBACK_TREATMENT; POLICY_ROLLBACK_BASELINE; FINAL_ROLLBACK
+
+INVALID_RESULT_CONTROL_DRIFT_GATE =
+  INVALID_NO_CAUSAL_INTERPRETATION if CONTROL is not valid POWER_UNAVAILABLE;
+  stop before treatment on drift or operational failure
+INVALID_RESULT_CAUSAL_GATE =
+  INVALID_NO_CAUSAL_INTERPRETATION if service name/SID/SID type, harness SHA,
+  AMD CLI identity, TokenUser, session, architecture, integrity, unrelated
+  privilege/group state, SystemProfile final state, operation, timeout,
+  environment, or sampling changes; Administrators appears; treatment adds
+  more than ProfileSingle; owned cleanup fails; or rollback is incomplete
+
+RESULT_CLASSIFICATION =
+  CONTROL_DRIFT, PROFILE_SINGLE_SUFFICIENT_IN_PAIRED_I2G_CONTEXT,
+  PROFILE_SINGLE_INSUFFICIENT_IN_PAIRED_I2G_CONTEXT, DISCOVERY_FAILED,
+  TOKEN_GATE_FAILED, IDENTITY_MISMATCH, CLEANUP_FAILED, or
+  INVALID_NO_CAUSAL_INTERPRETATION
+
+ONE_TIME_GATE =
+  I2G_GATE_CONSUMED = false;
+  I2G_REAL_EXECUTION_ALLOWED = false by default;
+  separate explicit human authorization is required after offline harness
+  implementation and review; this task creates no executable gate
+```
+
 ### Future result semantics
 
 The result interpretation is preregistered:
 
-- `SeProfileSingleProcessPrivilege enabled + POWER_AVAILABLE` means that
-  introducing usable `SeProfileSingleProcessPrivilege` from historical
-  `ABSENT` to `PRESENT + ENABLED` in the preserved final-I2F non-treatment
-  context was sufficient to change counter discovery in this experiment. It
-  does not establish that enablement alone caused it, necessity, production
-  suitability, or a minimum privilege in another account/context.
-- `SeProfileSingleProcessPrivilege enabled + POWER_UNAVAILABLE` means that
-  introducing this capability from `ABSENT` to `PRESENT + ENABLED` in the
-  preserved I2F non-treatment context was insufficient. It does not prove the
-  right universally irrelevant or prove that another combination is
-  unnecessary.
+- A valid CONTROL must produce the preregistered `POWER_UNAVAILABLE` result.
+  `POWER_AVAILABLE` or any operational/identity/token drift is
+  `CONTROL_DRIFT`; treatment must not execute and the experiment has no causal
+  interpretation.
+- Only when CONTROL is valid negative, TREATMENT `POWER_AVAILABLE` means that
+  introducing usable `SeProfileSingleProcessPrivilege` from `ABSENT` to
+  `PRESENT + ENABLED` was sufficient to change counter discovery in the
+  paired fresh-I2G context. It does not establish necessity, production
+  suitability, or a minimum privilege, and does not attribute causality to
+  enablement alone outside the paired intervention.
+- When CONTROL is valid negative and TREATMENT is `POWER_UNAVAILABLE`, the
+  selected capability was insufficient in the paired fresh-I2G context. It
+  does not prove universal irrelevance.
 - Any pre/post token, identity, group, CLI, sampling, or cleanup mismatch is
   a failed/invalid qualification result and must not be interpreted as a
   causal AMD result.
@@ -494,11 +700,19 @@ The result interpretation is preregistered:
 I2G_VARIABLE = SeProfileSingleProcessPrivilege
 I2G_VARIABLE_SELECTION = PASS_READ_ONLY
 I2G_SELECTION_CONFIDENCE = MEDIUM
+I2G_SELECTION_CHANGED = false
 I2G_SINGLE_VARIABLE_ISOLATABLE = true
 I2G_BASELINE_RECONSTRUCTION_RIGHT = SeSystemProfilePrivilege
 I2G_TREATMENT_VARIABLE = SeProfileSingleProcessPrivilege
+I2G_EXPERIMENT_SHAPE = PAIRED_CONTROL_TREATMENT
+HISTORICAL_I2F_ROLE = PREDECESSOR_EVIDENCE_ONLY
+HISTORICAL_I2F_IS_ACTIVE_CAUSAL_CONTROL = false
 TEMPORARY_POLICY_ASSIGNMENT_COUNT = 2
 SCIENTIFIC_TREATMENT_VARIABLE_COUNT = 1
+I2G_CONTROL_COUNTER_DISCOVERY_RUNS = 1
+I2G_TREATMENT_COUNTER_DISCOVERY_RUNS = 1
+TOTAL_I2G_COUNTER_DISCOVERY_RUNS = 2
+POWER_SAMPLING_RUNS = 0
 I2G_HARNESS = NOT_IMPLEMENTED
 I2G_REAL_RUNTIME = 0
 I2G_HARNESS_IMPLEMENTATION_AUTHORIZED = false
@@ -510,8 +724,10 @@ PRODUCTION_ADMISSION = NOT_COMPLETE
 I1_HISTORICAL_HARNESS = OUT_OF_SCOPE
 ```
 
-A single I2G variable has been selected from read-only evidence. No I2G
-harness exists yet and no real experiment is authorized. The next task is
-offline I2G harness design/implementation followed by review. Human
-authorization for one real non-sampling I2G run can only be considered after
-that separate review passes.
+A single I2G variable remains selected from read-only evidence. Historical I2F
+is predecessor evidence only; the future causal design is a paired
+CONTROL -> TREATMENT experiment using one fresh Service SID and one unchanged
+harness artifact. No I2G harness exists yet and no real experiment is
+authorized. The next task is offline I2G harness design/implementation
+followed by review. Human authorization for the paired non-sampling runs can
+only be considered after that separate review passes.
