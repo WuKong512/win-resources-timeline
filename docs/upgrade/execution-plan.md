@@ -2233,9 +2233,11 @@ I2G_REAL_RUNTIME = 0
 I2G_OFFLINE_VALIDATION = PASS
 I2G_HARNESS_ARTIFACT_ARCHITECTURE = x64
 I2G_HARNESS_ARTIFACT_PATH = tools/amd-privilege-qualification/target/release/amd-privilege-qualification.exe
-I2G_HARNESS_ARTIFACT_SHA256 = E9437A0A5387E6C12AA4D2BC61B82AB9AC51D461005C0DBBC5CF244B410DB4A5
+I2G_HARNESS_ARTIFACT_SHA256 = 2613129D179EA2A0496AD680E68E77A79FFFBB569D0802A11AC03346E162DD80
 I2G_EXECUTION_SURFACE = SYNTHETIC_OFFLINE_FAIL_CLOSED
 I2G_SHARED_EXECUTABLE_OFFLINE_ONLY = false
+I2G_TASK_LOCAL_REAL_RUNNER = ONE_SHOT_EXACT_AUTHORIZATION_ONLY
+I2G_TASK_LOCAL_REAL_RUN_STATUS = PENDING_ENTRY_GATE
 PLANNED_CONTROL_COUNTER_DISCOVERY_RUNS = 1
 PLANNED_TREATMENT_COUNTER_DISCOVERY_RUNS = 1
 PLANNED_VALID_PAIR_COUNTER_DISCOVERY_RUNS = 2
@@ -2247,15 +2249,15 @@ NO_CODE_CHANGE_BETWEEN_PHASES = true
 NO_NON_TREATMENT_CONFIGURATION_CHANGE_BETWEEN_PHASES = true
 CONTROL_DRIFT_STOP_BEFORE_TREATMENT = true
 TOKEN_TEARDOWN_BEFORE_TREATMENT_POLICY_MUTATION = true
-NEXT_GATE = I2G_HARNESS_REVIEW_BEFORE_HUMAN_REAL_RUN_AUTHORIZATION
+NEXT_GATE = AMD_PRIVILEGE_I2G_REAL_PAIRED_QUALIFICATION_ENTRY_GATE
 ```
 
-The I2G execution surface is synthetic/offline-only and fail-closed. The shared
+The default I2G execution surface is synthetic/offline-only and fail-closed. The shared
 `amd-privilege-qualification.exe` still contains historical non-I2G entrypoints
 (`--broker`, `--system-counter-service`, `--service-profile-counter-service`,
 `--service-profile-enable-counter-service`, and `--client`), so the executable
 itself is not offline-only. The I2G wrapper validates the exact x64 release
-artifact path and authoritative SHA-256 before synthetic execution; its real
-PowerShell path and `RealWindowsI2gBackend` reject before host access. This
-milestone authorizes no AMD, service, SCM, LSA, token, ACL, registry, driver,
-device, or production operation.
+artifact path and authoritative SHA-256 before synthetic execution. The separate
+real runner is one-shot, exact-token gated, fixed to this qualification-only
+paired experiment, and does not expose a reusable production surface. Historical
+entrypoints remain unauthorized.

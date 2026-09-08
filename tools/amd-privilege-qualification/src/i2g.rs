@@ -2,9 +2,9 @@
 //!
 //! This module deliberately contains the qualification contract and a deterministic synthetic
 //! backend, not a production provider.  The state machine is written so that a future Windows
-//! backend can be plugged in without changing the scientific gates.  The current PowerShell real
-//! entrypoint is source-controlled fail-closed, so none of the host-mutating operations below are
-//! reachable from this task's real path.
+//! backend can be plugged in without changing the scientific gates.  The offline entrypoint
+//! remains fail-closed and synthetic; the separately gated real qualification helper reuses the
+//! fixed contract without exposing a production runtime.
 
 use crate::{classify_counter_discovery, COUNTER_DISCOVERY_MAX_OUTPUT_BYTES};
 use serde::{Deserialize, Serialize};
@@ -31,6 +31,7 @@ pub const I2G_FIXED_AMD_CLI_ARCHITECTURE: &str = "x64";
 pub const I2G_FIXED_AMD_ARGUMENTS: [&str; 2] = ["timechart", "--list"];
 pub const I2G_OPERATION: &str = "COUNTER_DISCOVERY";
 pub const I2G_PROTOCOL: &str = "amd-privilege-qualification/i2g/1";
+pub const I2G_REAL_OUTPUT_SUBDIRECTORY: &str = r"ResourceTimeline\qualification\amd-i2g-real";
 pub const I2G_HARNESS_SHA256_SYNTHETIC: &str = "SYNTHETIC_FROZEN_I2G_ARTIFACT";
 pub const I2G_COUNTER_DISCOVERY_TIMEOUT_MS: u64 = 30_000;
 pub const I2G_CHILD_SAFETY_CAP_MS: u64 = 90_000;
@@ -42,8 +43,8 @@ pub const I2G_SYNTHETIC_SERVICE_SID: &str = "S-1-5-80-512-724-936-1148-1360";
 
 static ATOMIC_FILE_COUNTER: AtomicU64 = AtomicU64::new(1);
 
-const CONTROL_REQUIRED_RIGHT: &str = "SeSystemProfilePrivilege";
-const TREATMENT_RIGHT: &str = "SeProfileSingleProcessPrivilege";
+pub const CONTROL_REQUIRED_RIGHT: &str = "SeSystemProfilePrivilege";
+pub const TREATMENT_RIGHT: &str = "SeProfileSingleProcessPrivilege";
 const SYNTHETIC_ENABLED_PRIVILEGES: [&str; 3] = [
     "SeChangeNotifyPrivilege",
     "SeCreateGlobalPrivilege",

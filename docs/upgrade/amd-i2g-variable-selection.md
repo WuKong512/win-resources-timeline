@@ -808,8 +808,8 @@ only be considered after that separate review passes.
 
 ## CURRENT STATE — OFFLINE IMPLEMENTATION COMPLETE
 
-The preceding sections are preserved as read-only design history. The current
-implementation is the fail-closed, synthetic-only harness in
+The preceding sections are preserved as read-only design history. The default
+implementation is the fail-closed, synthetic harness in
 `tools/amd-privilege-qualification`; see
 [`amd-i2g-harness.md`](amd-i2g-harness.md) for the complete contract.
 
@@ -830,9 +830,11 @@ I2G_REAL_RUNTIME = 0
 I2G_OFFLINE_VALIDATION = PASS
 I2G_HARNESS_ARTIFACT_ARCHITECTURE = x64
 I2G_HARNESS_ARTIFACT_PATH = tools/amd-privilege-qualification/target/release/amd-privilege-qualification.exe
-I2G_HARNESS_ARTIFACT_SHA256 = E9437A0A5387E6C12AA4D2BC61B82AB9AC51D461005C0DBBC5CF244B410DB4A5
+I2G_HARNESS_ARTIFACT_SHA256 = 2613129D179EA2A0496AD680E68E77A79FFFBB569D0802A11AC03346E162DD80
 I2G_EXECUTION_SURFACE = SYNTHETIC_OFFLINE_FAIL_CLOSED
 I2G_SHARED_EXECUTABLE_OFFLINE_ONLY = false
+I2G_TASK_LOCAL_REAL_RUNNER = ONE_SHOT_EXACT_AUTHORIZATION_ONLY
+I2G_TASK_LOCAL_REAL_RUN_STATUS = PENDING_ENTRY_GATE
 PLANNED_CONTROL_COUNTER_DISCOVERY_RUNS = 1
 PLANNED_TREATMENT_COUNTER_DISCOVERY_RUNS = 1
 PLANNED_VALID_PAIR_COUNTER_DISCOVERY_RUNS = 2
@@ -844,13 +846,12 @@ CONTROL_RETRY_ALLOWED = false
 TREATMENT_RETRY_ALLOWED = false
 CONTROL_DRIFT_STOP_BEFORE_TREATMENT = true
 TOKEN_TEARDOWN_BEFORE_TREATMENT_POLICY_MUTATION = true
-NEXT_GATE = I2G_HARNESS_REVIEW_BEFORE_HUMAN_REAL_RUN_AUTHORIZATION
+NEXT_GATE = AMD_PRIVILEGE_I2G_REAL_PAIRED_QUALIFICATION_ENTRY_GATE
 ```
 
-The implementation adds no production account selection and no real execution
-authorization. The I2G surface is synthetic/offline-only and fail-closed, while
+The implementation adds no production account selection. The default I2G surface
+is synthetic/offline-only and fail-closed, while
 the shared qualification executable still contains historical non-I2G
 entrypoints; this does not make the whole EXE offline-only and does not
-authorize those entrypoints. Any future Windows backend requires a separate
-human review and explicit authorization after this offline qualification
-milestone.
+authorize those entrypoints. The task-local real runner is one-shot and
+exact-token gated; it is not a reusable Windows backend or production integration.

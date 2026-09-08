@@ -1648,7 +1648,7 @@ foreach ($requiredI2eCurrentStateText in @(
         'MAX_TOTAL_I2G_COUNTER_DISCOVERY_RUNS = 2',
         'ACTUAL_RUN_COUNT_EVIDENCE_SCHEMA = DEFINED',
         'POWER_SAMPLING_RUNS = 0',
-        'NEXT_GATE = I2G_HARNESS_REVIEW_BEFORE_HUMAN_REAL_RUN_AUTHORIZATION'
+        'NEXT_GATE = AMD_PRIVILEGE_I2G_REAL_PAIRED_QUALIFICATION_ENTRY_GATE'
     )) {
     if ($currentDocumentation.IndexOf($requiredI2eCurrentStateText, [StringComparison]::Ordinal) -lt 0) {
         throw "I2E current-state reconciliation is missing: $requiredI2eCurrentStateText"

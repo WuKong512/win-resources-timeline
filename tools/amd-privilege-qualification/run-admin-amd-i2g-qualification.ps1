@@ -2,6 +2,7 @@
 [CmdletBinding()]
 param(
     [switch]$ExecuteAuthorizedExperiment,
+    [string]$AuthorizationToken,
     [switch]$LibraryOnly,
     [switch]$OfflineSynthetic,
     [ValidateSet(
@@ -23,14 +24,19 @@ $ErrorActionPreference = 'Stop'
 # It contains constants and pure functions only; it does not query the machine.
 . (Join-Path $PSScriptRoot 'i2g-runtime-contract.ps1')
 
-# This guard must remain the first executable branch after the pure contract.  A future
-# authorized implementation must be introduced in a separately reviewed change; this
-# entrypoint never checks elevation, SCM, LSA, tokens, ACLs, the registry, or AMD files.
+# This guard remains the first executable branch after the pure contract.  The real surface is
+# a one-shot qualification entrypoint: it requires both an exact task token and the explicit
+# task-only authorization marker, then delegates to the fixed paired runner.
 if ($ExecuteAuthorizedExperiment) {
-    Write-Error 'I2G_REAL_EXECUTION_NOT_AUTHORIZED'
-    Write-Error 'I2G_REAL_GATE_CONSUMED=false'
-    Write-Error 'I2G_HUMAN_AUTHORIZATION_RECORDED=false'
-    exit 1
+    if ($AuthorizationToken -cne 'AMD-PRIVILEGE-I2G-REAL-QUALIFICATION' -or
+        $env:I2G_REAL_RUN_AUTHORIZATION -cne 'GRANTED_FOR_THIS_TASK_ONLY') {
+        Write-Error 'I2G_REAL_EXECUTION_NOT_AUTHORIZED'
+        Write-Error 'I2G_REAL_GATE_CONSUMED=false'
+        Write-Error 'I2G_HUMAN_AUTHORIZATION_RECORDED=false'
+        exit 1
+    }
+    & (Join-Path $PSScriptRoot 'i2g-real-run.ps1') -AuthorizationToken $AuthorizationToken
+    exit ([int]$LASTEXITCODE)
 }
 
 if ($LibraryOnly) {

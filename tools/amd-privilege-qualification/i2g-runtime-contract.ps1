@@ -53,7 +53,7 @@ $I2gNoRetry = $true
 $I2gHarnessArtifactRelativePath = 'target\release\amd-privilege-qualification.exe'
 $I2gHarnessArtifactArchitecture = 'x64'
 # Replaced with the SHA-256 of the rebuilt release artifact before the wrapper is shipped.
-$I2gHarnessArtifactSha256 = 'E9437A0A5387E6C12AA4D2BC61B82AB9AC51D461005C0DBBC5CF244B410DB4A5'
+$I2gHarnessArtifactSha256 = '2613129D179EA2A0496AD680E68E77A79FFFBB569D0802A11AC03346E162DD80'
 
 $I2gRequiredEvidenceFiles = @(
     'EXPERIMENT-MANIFEST.json',

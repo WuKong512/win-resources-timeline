@@ -2,8 +2,9 @@
 
 ## 当前状态
 
-本文档是 I2G 实现后的唯一当前交接说明。此前文档中的设计快照和
-`I2G_HARNESS = NOT_IMPLEMENTED` 均为历史记录，不能当作授权。
+本文档是 I2G 实现后的当前交接说明。默认 I2G execution surface 仍是离线、合成、
+fail-closed；本任务另有一个仅限本次明确授权、固定 token、固定服务和固定 CLI 的
+一次性 real qualification runner。它不是生产 runtime，也不能被当作未来授权。
 
 ```text
 I2G_HARNESS = IMPLEMENTED_OFFLINE
@@ -22,10 +23,12 @@ I2G_OFFLINE_VALIDATION = PASS
 I2G_REAL_GATE_CONSUMED = false
 I2G_HARNESS_ARTIFACT_ARCHITECTURE = x64
 I2G_HARNESS_ARTIFACT_PATH = tools/amd-privilege-qualification/target/release/amd-privilege-qualification.exe
-I2G_HARNESS_ARTIFACT_SHA256 = E9437A0A5387E6C12AA4D2BC61B82AB9AC51D461005C0DBBC5CF244B410DB4A5
+I2G_HARNESS_ARTIFACT_SHA256 = 2613129D179EA2A0496AD680E68E77A79FFFBB569D0802A11AC03346E162DD80
 I2G_EXECUTION_SURFACE = SYNTHETIC_OFFLINE_FAIL_CLOSED
 I2G_SHARED_EXECUTABLE_OFFLINE_ONLY = false
-NEXT_GATE = I2G_HARNESS_REVIEW_BEFORE_HUMAN_REAL_RUN_AUTHORIZATION
+I2G_TASK_LOCAL_REAL_RUNNER = ONE_SHOT_EXACT_AUTHORIZATION_ONLY
+I2G_TASK_LOCAL_REAL_RUN_STATUS = PENDING_ENTRY_GATE
+NEXT_GATE = AMD_PRIVILEGE_I2G_REAL_PAIRED_QUALIFICATION_ENTRY_GATE
 ```
 
 本次交付只影响 `tools/amd-privilege-qualification` 资格工具和升级文档；不改变
@@ -153,8 +156,9 @@ artifact、missing artifact 均有回归测试。注意共享的
 `amd-privilege-qualification.exe` 仍包含历史 `--broker`、`--system-counter-service`、
 `--service-profile-counter-service`、`--service-profile-enable-counter-service` 和
 `--client` 入口；因此整个 EXE 不是 offline-only。本 milestone 只开放
-`I2G_EXECUTION_SURFACE = SYNTHETIC_OFFLINE_FAIL_CLOSED`，I2G wrapper 和
-`RealWindowsI2gBackend` 均 fail closed。
+`I2G_EXECUTION_SURFACE = SYNTHETIC_OFFLINE_FAIL_CLOSED`；另外的 real runner 只接受
+本任务 exact authorization token，并固定到 qualification-only Service SID paired
+experiment，不开放通用 executable、argv、sampling 或生产调用面。
 
 真实 I2G 开关在参数进入任何主机查询或写入前返回以下稳定标记并退出非零：
 
@@ -165,5 +169,6 @@ I2G_REAL_GATE_CONSUMED=false
 I2G_HUMAN_AUTHORIZATION_RECORDED=false
 ```
 
-因此本次实现没有、也没有隐式取得 human real-run authorization。只有独立的人审阅、
-明确授权和后续单独变更，才可以讨论 future Windows backend；本交付不会触发该步骤。
+未提供 exact task token 的 real path 仍在任何主机访问前 fail closed。历史 entrypoint
+仍不因本 runner 获得授权；本 runner 的 authorization 只由本任务 prompt 覆盖，并在
+完成、失败或中止后 consumed。

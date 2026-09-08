@@ -774,10 +774,11 @@ NEXT_GATE = HUMAN_I2F_SELF_ENABLE_QUALIFICATION_REVIEW
 
 ## CURRENT STATE — I2G OFFLINE HARNESS IMPLEMENTED
 
-The design-only handoff is superseded by the offline implementation described
-in [`docs/upgrade/amd-i2g-harness.md`](../../docs/upgrade/amd-i2g-harness.md).
-Historical I2F remains predecessor evidence only. This milestone does not
-authorize a human real run and does not touch production code or data.
+The design-only handoff is superseded by the fixed I2G contract described in
+[`docs/upgrade/amd-i2g-harness.md`](../../docs/upgrade/amd-i2g-harness.md).
+The default execution surface remains synthetic/offline/fail-closed. A separate
+one-shot real runner is task-local, exact-token gated, qualification-only, and
+does not touch production code or data.
 
 ```text
 I2G_HARNESS = IMPLEMENTED_OFFLINE
@@ -796,9 +797,11 @@ I2G_REAL_RUNTIME = 0
 I2G_OFFLINE_VALIDATION = PASS
 I2G_HARNESS_ARTIFACT_ARCHITECTURE = x64
 I2G_HARNESS_ARTIFACT_PATH = tools/amd-privilege-qualification/target/release/amd-privilege-qualification.exe
-I2G_HARNESS_ARTIFACT_SHA256 = E9437A0A5387E6C12AA4D2BC61B82AB9AC51D461005C0DBBC5CF244B410DB4A5
+I2G_HARNESS_ARTIFACT_SHA256 = 2613129D179EA2A0496AD680E68E77A79FFFBB569D0802A11AC03346E162DD80
 I2G_EXECUTION_SURFACE = SYNTHETIC_OFFLINE_FAIL_CLOSED
 I2G_SHARED_EXECUTABLE_OFFLINE_ONLY = false
+I2G_TASK_LOCAL_REAL_RUNNER = ONE_SHOT_EXACT_AUTHORIZATION_ONLY
+I2G_TASK_LOCAL_REAL_RUN_STATUS = PENDING_ENTRY_GATE
 CONTROL_POLICY_RIGHTS = SeSystemProfilePrivilege only
 TREATMENT_POLICY_DELTA = SeProfileSingleProcessPrivilege assignment to same Service SID only
 FIXED_OPERATION = timechart --list
@@ -810,25 +813,26 @@ CONTROL_RETRY_ALLOWED = false
 TREATMENT_RETRY_ALLOWED = false
 CONTROL_DRIFT_STOP_BEFORE_TREATMENT = true
 TOKEN_TEARDOWN_BEFORE_TREATMENT_POLICY_MUTATION = true
-NEXT_GATE = I2G_HARNESS_REVIEW_BEFORE_HUMAN_REAL_RUN_AUTHORIZATION
+NEXT_GATE = AMD_PRIVILEGE_I2G_REAL_PAIRED_QUALIFICATION_ENTRY_GATE
 ```
 
 `run-admin-amd-i2g-qualification.ps1` is plan-only by default and has a
 deterministic `-OfflineSynthetic` test seam. The synthetic surface validates
 the exact release artifact path, x64 PE architecture, and SHA-256 before
-launch; tampered and missing artifacts are rejected. Its real switch emits
-`I2G_REAL_EXECUTION_NOT_AUTHORIZED` before any machine access. The cleanup
-entrypoint behaves the same way with
+launch; tampered and missing artifacts are rejected. Its unauthorized real
+switch emits `I2G_REAL_EXECUTION_NOT_AUTHORIZED` before any machine access.
+The exact task-local runner is fixed to the paired qualification contract. The cleanup
+entrypoint remains permanently fail-closed with
 `I2G_REAL_CLEANUP_NOT_AUTHORIZED`. `test-i2g-harness.ps1` covers the fixed
 paired contract, atomic evidence inventory, result/cleanup separation,
 all persisted-state recovery decisions, executable recovery/no-retry behavior,
 the 20-point crash-window matrix, and synthetic fault matrix.
 
-The I2G execution surface is synthetic/offline-only and fail-closed; the shared
+The default I2G execution surface is synthetic/offline-only and fail-closed; the shared
 `amd-privilege-qualification.exe` is not itself offline-only because it retains
 historical non-I2G entrypoints (`--broker`, `--system-counter-service`,
 `--service-profile-counter-service`, `--service-profile-enable-counter-service`,
-and `--client`). This milestone does not authorize those entrypoints.
+and `--client`). This task-local runner does not authorize those entrypoints.
 
 ## HISTORICAL / SUPERSEDED — PR22 I2F consumed-gate runtime guard closure
 

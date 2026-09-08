@@ -127,6 +127,12 @@ fn main() {
                     std::process::exit(1);
                 }
             }
+            Some("--i2g-real-service") if args.len() == 1 => {
+                if let Err(error) = amd_privilege_qualification::windows::run_i2g_real_service() {
+                    eprintln!("I2G real qualification service failed: {error}");
+                    std::process::exit(1);
+                }
+            }
             Some("--client") => {
                 let operation = args.get(1).map(String::as_str).unwrap_or("get-status");
                 if !matches!(operation, "get-status" | "counter-discovery" | "start") {
@@ -174,7 +180,7 @@ fn option_string(args: &[String], name: &str) -> Option<String> {
 
 fn usage_and_exit() -> ! {
     eprintln!(
-        "usage: amd-privilege-qualification --synthetic [--evidence-root PATH] | --i2g-synthetic --scenario SCENARIO [--evidence-root PATH] | --i2g-synthetic-cleanup | --broker | --system-counter-service | --service-profile-counter-service | --service-profile-enable-counter-service | --client get-status|counter-discovery|start"
+        "usage: amd-privilege-qualification --synthetic [--evidence-root PATH] | --i2g-synthetic --scenario SCENARIO [--evidence-root PATH] | --i2g-synthetic-cleanup | --broker | --system-counter-service | --service-profile-counter-service | --service-profile-enable-counter-service | --i2g-real-service | --client get-status|counter-discovery|start"
     );
     std::process::exit(2)
 }
