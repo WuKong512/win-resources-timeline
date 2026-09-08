@@ -28,11 +28,17 @@ $ErrorActionPreference = 'Stop'
 # a one-shot qualification entrypoint: it requires both an exact task token and the explicit
 # task-only authorization marker, then delegates to the fixed paired runner.
 if ($ExecuteAuthorizedExperiment) {
+    if ($I2gRealGateConsumed) {
+        Write-Error 'I2G_REAL_EXECUTION_NOT_AUTHORIZED'
+        Write-Error 'I2G_REAL_GATE_CONSUMED=true'
+        Write-Error 'I2G_HUMAN_REAL_RUN_AUTHORIZATION=CONSUMED'
+        exit 1
+    }
     if ($AuthorizationToken -cne 'AMD-PRIVILEGE-I2G-REAL-QUALIFICATION' -or
         $env:I2G_REAL_RUN_AUTHORIZATION -cne 'GRANTED_FOR_THIS_TASK_ONLY') {
         Write-Error 'I2G_REAL_EXECUTION_NOT_AUTHORIZED'
-        Write-Error 'I2G_REAL_GATE_CONSUMED=false'
-        Write-Error 'I2G_HUMAN_AUTHORIZATION_RECORDED=false'
+        Write-Error 'I2G_REAL_GATE_CONSUMED=true'
+        Write-Error 'I2G_HUMAN_REAL_RUN_AUTHORIZATION=CONSUMED'
         exit 1
     }
     & (Join-Path $PSScriptRoot 'i2g-real-run.ps1') -AuthorizationToken $AuthorizationToken
@@ -42,7 +48,7 @@ if ($ExecuteAuthorizedExperiment) {
 if ($LibraryOnly) {
     Write-Output 'I2G_LIBRARY_ONLY=PASS'
     Write-Output 'I2G_REAL_EXECUTION_ALLOWED=false'
-    Write-Output 'I2G_REAL_GATE_CONSUMED=false'
+    Write-Output 'I2G_REAL_GATE_CONSUMED=true'
     return
 }
 
@@ -53,9 +59,9 @@ if (-not $OfflineSynthetic) {
     Write-Output "I2G_VARIABLE=$I2gVariable"
     Write-Output "I2G_EXPERIMENT_SHAPE=$I2gExperimentShape"
     Write-Output 'I2G_REAL_EXECUTION_ALLOWED=false'
-    Write-Output 'I2G_REAL_GATE_CONSUMED=false'
+    Write-Output 'I2G_REAL_GATE_CONSUMED=true'
     Write-Output 'I2G_REAL_CLEANUP_ALLOWED=false'
-    Write-Output 'I2G_HUMAN_REAL_RUN_AUTHORIZATION=NOT_GRANTED'
+    Write-Output 'I2G_HUMAN_REAL_RUN_AUTHORIZATION=CONSUMED'
     Write-Output 'I2G_REAL_RUNTIME=0'
     Write-Output 'I2G_POWER_SAMPLING_RUNS=0'
     Write-Output 'No real service, policy, token, AMD, registry, ACL, or production operation was performed.'

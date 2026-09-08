@@ -13,10 +13,10 @@ $I2gSelectionConfidence = 'MEDIUM'
 $I2gExperimentShape = 'PAIRED_CONTROL_TREATMENT'
 $I2gHistoricalI2fRole = 'PREDECESSOR_EVIDENCE_ONLY'
 $I2gHistoricalI2fIsActiveCausalControl = $false
-$I2gRealGateConsumed = $false
+$I2gRealGateConsumed = $true
 $I2gRealExecutionAllowed = $false
 $I2gRealCleanupAllowed = $false
-$I2gHumanAuthorizationRecorded = $false
+$I2gHumanAuthorizationRecorded = $true
 $I2gQualificationOnly = $true
 
 $I2gServiceName = 'ResourceTimelineAmdProfileSingleProcessQualification'

@@ -83,10 +83,10 @@ foreach ($path in @($contractPath, $setupPath, $cleanupPath, $PSCommandPath)) {
 . $contractPath
 Assert-True $I2gHarnessImplemented 'I2G harness implementation marker is not true.'
 Assert-True $I2gQualificationOnly 'I2G harness must remain qualification-only.'
-Assert-True (-not $I2gRealGateConsumed) 'I2G gate must not be consumed.'
+Assert-True $I2gRealGateConsumed 'I2G gate must be consumed after the blocked authorized attempt.'
 Assert-True (-not $I2gRealExecutionAllowed) 'I2G real execution must be forbidden.'
 Assert-True (-not $I2gRealCleanupAllowed) 'I2G real cleanup must be forbidden.'
-Assert-True (-not $I2gHumanAuthorizationRecorded) 'Human real-run authorization must be absent.'
+Assert-True $I2gHumanAuthorizationRecorded 'Consumed human authorization must be recorded.'
 Assert-True ($I2gVariable -ceq 'SeProfileSingleProcessPrivilege') 'I2G variable changed.'
 Assert-True ($I2gExperimentShape -ceq 'PAIRED_CONTROL_TREATMENT') 'I2G experiment shape changed.'
 Assert-True (Test-I2gFixedCliArguments -Arguments $I2gFixedArguments) 'Fixed CLI arguments are not stable.'
@@ -126,7 +126,8 @@ Assert-True ($plan.exit_code -eq 0) "I2G plan-only entrypoint failed: $($plan.te
 Assert-True ($plan.text.Contains('I2G_HARNESS=IMPLEMENTED_OFFLINE')) 'I2G plan marker is missing.'
 Assert-True ($plan.text.Contains('I2G_REAL_EXECUTION_ALLOWED=false')) 'I2G plan real gate is not false.'
 Assert-True ($plan.text.Contains('I2G_REAL_CLEANUP_ALLOWED=false')) 'I2G plan cleanup gate is not false.'
-Assert-True ($plan.text.Contains('I2G_HUMAN_REAL_RUN_AUTHORIZATION=NOT_GRANTED')) 'I2G authorization marker is missing.'
+Assert-True ($plan.text.Contains('I2G_REAL_GATE_CONSUMED=true')) 'I2G consumed gate marker is missing.'
+Assert-True ($plan.text.Contains('I2G_HUMAN_REAL_RUN_AUTHORIZATION=CONSUMED')) 'I2G consumed authorization marker is missing.'
 Write-Host 'I2G_PLAN_ONLY=PASS'
 
 $library = Invoke-I2gChild -Path $setupPath -Arguments @('-LibraryOnly')

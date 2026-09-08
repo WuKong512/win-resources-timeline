@@ -1626,10 +1626,11 @@ foreach ($requiredI2eCurrentStateText in @(
         'BLOCKER_STATUS = CLOSED_OFFLINE',
         'I2G_HARNESS = IMPLEMENTED_OFFLINE',
         'I2G_HARNESS_IMPLEMENTED = true',
-        'I2G_GATE_CONSUMED = false',
+        'I2G_GATE_CONSUMED = true',
+        'I2G_REAL_GATE_CONSUMED = true',
         'I2G_REAL_EXECUTION_ALLOWED = false',
         'I2G_REAL_CLEANUP_ALLOWED = false',
-        'I2G_HUMAN_REAL_RUN_AUTHORIZATION = NOT_GRANTED',
+        'I2G_HUMAN_REAL_RUN_AUTHORIZATION = CONSUMED',
         'I2G_OFFLINE_VALIDATION = PASS',
         'I2G_HARNESS_IMPLEMENTATION_AUTHORIZED = false',
         'I2G_REAL_RUNTIME_AUTHORIZED = false',
@@ -1648,7 +1649,7 @@ foreach ($requiredI2eCurrentStateText in @(
         'MAX_TOTAL_I2G_COUNTER_DISCOVERY_RUNS = 2',
         'ACTUAL_RUN_COUNT_EVIDENCE_SCHEMA = DEFINED',
         'POWER_SAMPLING_RUNS = 0',
-        'NEXT_GATE = AMD_PRIVILEGE_I2G_REAL_PAIRED_QUALIFICATION_ENTRY_GATE'
+        'NEXT_GATE = NEW_EXPLICIT_HUMAN_AUTHORIZATION_REQUIRED'
     )) {
     if ($currentDocumentation.IndexOf($requiredI2eCurrentStateText, [StringComparison]::Ordinal) -lt 0) {
         throw "I2E current-state reconciliation is missing: $requiredI2eCurrentStateText"

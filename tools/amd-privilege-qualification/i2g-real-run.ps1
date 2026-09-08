@@ -11,6 +11,11 @@ $ErrorActionPreference = 'Stop'
 # production privileged execution surface: the caller must supply the task token, the exact
 # artifact/AMD identities are pinned below, and every mutation is journaled before it occurs.
 . (Join-Path $PSScriptRoot 'i2g-runtime-contract.ps1')
+
+if ($I2gRealGateConsumed) {
+    throw 'I2G_REAL_EXECUTION_NOT_AUTHORIZED: I2G_REAL_GATE_CONSUMED=true; this task authorization is consumed.'
+}
+
 . (Join-Path $PSScriptRoot 'i2e-runtime-library.ps1')
 
 $I2gAuthorizationToken = 'AMD-PRIVILEGE-I2G-REAL-QUALIFICATION'
