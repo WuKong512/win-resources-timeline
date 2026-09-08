@@ -2277,6 +2277,13 @@ ATTEMPT1_EVIDENCE = IMMUTABLE
 NEW_REAL_RUN_AUTHORIZATION_REQUIRED = true
 ```
 
+The repair closure keeps the historical attempt immutable. The real execution
+chain is now explicitly isolated as manual launcher parent -> wrapper child ->
+runner child, and the manual launcher parent owns the final authorization and
+contract restoration. Treatment service-phase completion is an explicit state
+(`EXPLICIT_STATE`) written only after the complete treatment service lifecycle
+returns successfully; discovery completion alone is not sufficient.
+
 The default I2G execution surface is synthetic/offline-only and fail-closed. The shared
 `amd-privilege-qualification.exe` still contains historical non-I2G entrypoints
 (`--broker`, `--system-counter-service`, `--service-profile-counter-service`,

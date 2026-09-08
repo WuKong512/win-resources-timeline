@@ -63,6 +63,7 @@ $TreatmentAllowedByScientificGate = $false
 $TreatmentPolicyMutationStarted = $false
 $TreatmentPolicyMutationCompleted = $false
 $TreatmentServicePhaseStarted = $false
+$TreatmentServicePhaseCompleted = $false
 $TreatmentDiscoverySpawnIntentDurable = $false
 $TreatmentDiscoveryStarted = $false
 $TreatmentDiscoveryCompleted = $false
@@ -411,6 +412,7 @@ function Invoke-I2gServicePhase {
     if ($Phase -eq 'TREATMENT') {
         $script:I2gState.treatment_service_phase_started = $true
         $script:I2gState.treatment_service_phase_completed = $false
+        $script:TreatmentServicePhaseCompleted = $false
     }
     Set-I2gState -State $phaseState
     Invoke-I2eSc -Arguments @('start', $I2gServiceName) | Out-Null
@@ -460,10 +462,6 @@ function Invoke-I2gServicePhase {
     $stop = Stop-I2eService -ServiceName $I2gServiceName
     $serviceAfterStop = Get-I2eServiceSnapshot -ServiceName $I2gServiceName
     $processes = Get-I2gOwnedProcessCounts
-    if ($Phase -eq 'TREATMENT') {
-        $script:I2gState.treatment_service_phase_completed = $true
-        Save-I2gState
-    }
     [ordered]@{
         phase = $Phase
         stop = $stop
@@ -1205,6 +1203,9 @@ try {
     $script:I2gState.treatment_service_phase_started = $true
     Save-I2gState
     $treatmentPhase = Invoke-I2gServicePhase -Phase TREATMENT -Config $treatmentConfig
+    $TreatmentServicePhaseCompleted = $true
+    $script:I2gState.treatment_service_phase_completed = $TreatmentServicePhaseCompleted
+    Save-I2gState
     $TreatmentResult = [string]$treatmentPhase.discovery.availability
     $treatmentPreToken = Read-I2gJson -Path (Join-Path $RunRoot 'TREATMENT-TOKEN-PRE.json')
     $treatmentSystemToken = Read-I2gJson -Path (Join-Path $RunRoot 'TREATMENT-TOKEN-SYSTEMPROFILE.json')
@@ -1231,6 +1232,7 @@ try {
     $script:I2gState.treatment_policy_mutation_started = $TreatmentPolicyMutationStarted
     $script:I2gState.treatment_policy_mutation_completed = $TreatmentPolicyMutationCompleted
     $script:I2gState.treatment_service_phase_started = $TreatmentServicePhaseStarted
+    $script:I2gState.treatment_service_phase_completed = $TreatmentServicePhaseCompleted
     $script:I2gState.treatment_discovery_spawn_intent_durable = $TreatmentDiscoverySpawnIntentDurable
     $script:I2gState.treatment_discovery_started = $TreatmentDiscoveryStarted
     $script:I2gState.treatment_discovery_completed = $TreatmentDiscoveryCompleted
@@ -1254,6 +1256,7 @@ catch {
         $script:I2gState.treatment_policy_mutation_started = $TreatmentPolicyMutationStarted
         $script:I2gState.treatment_policy_mutation_completed = $TreatmentPolicyMutationCompleted
         $script:I2gState.treatment_service_phase_started = $TreatmentServicePhaseStarted
+        $script:I2gState.treatment_service_phase_completed = $TreatmentServicePhaseCompleted
         $script:I2gState.treatment_discovery_spawn_intent_durable = $TreatmentDiscoverySpawnIntentDurable
         $script:I2gState.treatment_discovery_started = $TreatmentDiscoveryStarted
         $script:I2gState.treatment_discovery_completed = $TreatmentDiscoveryCompleted
@@ -1319,6 +1322,8 @@ finally {
             treatment_policy_mutation_started = $TreatmentPolicyMutationStarted
             treatment_policy_mutation_completed = $TreatmentPolicyMutationCompleted
             treatment_service_phase_started = $TreatmentServicePhaseStarted
+            treatment_service_phase_completed = $TreatmentServicePhaseCompleted
+            treatment_service_phase_completion_source = 'EXPLICIT_STATE'
             treatment_discovery_spawn_intent_durable = $TreatmentDiscoverySpawnIntentDurable
             treatment_discovery_started = $TreatmentDiscoveryStarted
             treatment_discovery_completed = $TreatmentDiscoveryCompleted
@@ -1349,7 +1354,8 @@ finally {
             treatment_policy_mutation_started = $TreatmentPolicyMutationStarted
             treatment_policy_mutation_completed = $TreatmentPolicyMutationCompleted
             treatment_service_phase_started = $TreatmentServicePhaseStarted
-            treatment_service_phase_completed = if ($TreatmentServicePhaseStarted) { $TreatmentDiscoveryCompleted } else { $false }
+            treatment_service_phase_completed = $TreatmentServicePhaseCompleted
+            treatment_service_phase_completion_source = 'EXPLICIT_STATE'
             treatment_discovery_spawn_intent_durable = $TreatmentDiscoverySpawnIntentDurable
             treatment_discovery_started = $TreatmentDiscoveryStarted
             treatment_discovery_completed = $TreatmentDiscoveryCompleted
@@ -1404,7 +1410,8 @@ finally {
             treatment_policy_mutation_started = $TreatmentPolicyMutationStarted
             treatment_policy_mutation_completed = $TreatmentPolicyMutationCompleted
             treatment_service_phase_started = $TreatmentServicePhaseStarted
-            treatment_service_phase_completed = if ($TreatmentServicePhaseStarted) { $TreatmentDiscoveryCompleted } else { $false }
+            treatment_service_phase_completed = $TreatmentServicePhaseCompleted
+            treatment_service_phase_completion_source = 'EXPLICIT_STATE'
             treatment_discovery_spawn_intent_durable = $TreatmentDiscoverySpawnIntentDurable
             treatment_discovery_started = $TreatmentDiscoveryStarted
             treatment_discovery_completed = $TreatmentDiscoveryCompleted

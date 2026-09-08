@@ -173,6 +173,154 @@ function Invoke-I2gThrowawayContractRestoreTest {
     Write-Host 'I2G_CONTRACT_RESTORE_AFTER_CHILD_EXIT=PASS'
 }
 
+function Invoke-I2gNestedChildProcessIsolationTest {
+    $root = Join-Path $testRoot 'nested-child-process-isolation'
+    New-Item -ItemType Directory -Force -Path $root | Out-Null
+    $innerRunnerPath = Join-Path $root 'throwaway-inner-runner.ps1'
+    $wrapperChildPath = Join-Path $root 'throwaway-wrapper-child.ps1'
+    $innerRunnerSource = @'
+param(
+    [Parameter(Mandatory = $true)][int]$ExitCode,
+    [Parameter(Mandatory = $true)][string]$MarkerPath
+)
+[IO.File]::WriteAllText($MarkerPath, ("INNER_RUNNER_EXIT_CODE={0}" -f $ExitCode), [Text.UTF8Encoding]::new($false))
+exit $ExitCode
+'@
+    $wrapperChildSource = @'
+param(
+    [Parameter(Mandatory = $true)][string]$InnerRunnerPath,
+    [Parameter(Mandatory = $true)][string]$MarkerPath,
+    [Parameter(Mandatory = $true)][int]$ExitCode
+)
+$psi = New-Object System.Diagnostics.ProcessStartInfo
+$psi.FileName = Join-Path $PSHOME 'powershell.exe'
+$psi.Arguments = '-NoProfile -NonInteractive -ExecutionPolicy Bypass -File "{0}" -ExitCode {1} -MarkerPath "{2}"' -f $InnerRunnerPath.Replace('"', '\"'), $ExitCode, $MarkerPath.Replace('"', '\"')
+$psi.WorkingDirectory = Split-Path -Parent $InnerRunnerPath
+$psi.UseShellExecute = $false
+$psi.CreateNoWindow = $true
+$psi.RedirectStandardOutput = $true
+$psi.RedirectStandardError = $true
+$child = New-Object System.Diagnostics.Process
+$child.StartInfo = $psi
+if (-not $child.Start()) { exit 1 }
+$stdoutTask = $child.StandardOutput.ReadToEndAsync()
+$stderrTask = $child.StandardError.ReadToEndAsync()
+$child.WaitForExit()
+$stdout = [string]$stdoutTask.Result
+$stderr = [string]$stderrTask.Result
+if (-not [string]::IsNullOrEmpty($stdout)) { [Console]::Out.Write($stdout) }
+if (-not [string]::IsNullOrEmpty($stderr)) { [Console]::Error.Write($stderr) }
+$innerExitCode = [int]$child.ExitCode
+$child.Dispose()
+Write-Output ("WRAPPER_CHILD_EXIT_CODE={0}" -f $innerExitCode)
+exit $innerExitCode
+'@
+    [IO.File]::WriteAllText($innerRunnerPath, $innerRunnerSource, [Text.UTF8Encoding]::new($false))
+    [IO.File]::WriteAllText($wrapperChildPath, $wrapperChildSource, [Text.UTF8Encoding]::new($false))
+
+    function Invoke-ThrowawayWrapperChild {
+        param(
+            [Parameter(Mandatory = $true)][int]$ExitCode,
+            [Parameter(Mandatory = $true)][string]$MarkerPath
+        )
+        $psi = New-Object System.Diagnostics.ProcessStartInfo
+        $psi.FileName = Join-Path $PSHOME 'powershell.exe'
+        $psi.Arguments = '-NoProfile -NonInteractive -ExecutionPolicy Bypass -File "{0}" -InnerRunnerPath "{1}" -MarkerPath "{2}" -ExitCode {3}' -f
+            $wrapperChildPath.Replace('"', '\"'), $innerRunnerPath.Replace('"', '\"'), $MarkerPath.Replace('"', '\"'), $ExitCode
+        $psi.WorkingDirectory = $root
+        $psi.UseShellExecute = $false
+        $psi.CreateNoWindow = $true
+        $psi.RedirectStandardOutput = $true
+        $psi.RedirectStandardError = $true
+        $child = New-Object System.Diagnostics.Process
+        $child.StartInfo = $psi
+        if (-not $child.Start()) { throw 'Throwaway wrapper child did not start.' }
+        $stdoutTask = $child.StandardOutput.ReadToEndAsync()
+        $stderrTask = $child.StandardError.ReadToEndAsync()
+        $child.WaitForExit()
+        $stdout = [string]$stdoutTask.Result
+        $stderr = [string]$stderrTask.Result
+        if (-not [string]::IsNullOrEmpty($stdout)) { [Console]::Out.Write($stdout) }
+        if (-not [string]::IsNullOrEmpty($stderr)) { [Console]::Error.Write($stderr) }
+        $exitCodeObserved = [int]$child.ExitCode
+        $child.Dispose()
+        [pscustomobject]@{ exit_code = $exitCodeObserved }
+    }
+
+    foreach ($exitCode in @(0, 1, 2)) {
+        $destination = Join-Path $root ('contract-exit-{0}.tmp-test' -f $exitCode)
+        $overlay = Join-Path $root ('overlay-exit-{0}.tmp-test' -f $exitCode)
+        $marker = Join-Path $root ('inner-runner-exit-{0}.marker' -f $exitCode)
+        $originalBytes = [byte[]](65, 10, 66, 10)
+        $overlayBytes = [byte[]](67, 10, 68, 10)
+        [IO.File]::WriteAllBytes($destination, $originalBytes)
+        $originalHash = (Get-FileHash -LiteralPath $destination -Algorithm SHA256).Hash
+        $parentFinallyExecuted = $false
+        $wrapperChildExitCode = $null
+        try {
+            [IO.File]::WriteAllBytes($overlay, $overlayBytes)
+            $overlayBackup = Join-Path $root ('.overlay-backup-{0}-{1}' -f $exitCode, ([Guid]::NewGuid().ToString('N')))
+            [IO.File]::Replace($overlay, $destination, $overlayBackup, $true)
+            $childResult = Invoke-ThrowawayWrapperChild -ExitCode $exitCode -MarkerPath $marker
+            $wrapperChildExitCode = [int]$childResult.exit_code
+            Assert-True (Test-Path -LiteralPath $marker -PathType Leaf) "Nested child did not report inner exit $exitCode."
+            Assert-True ((Get-Content -LiteralPath $marker -Raw) -ceq "INNER_RUNNER_EXIT_CODE=$exitCode") "Nested child marker was wrong for exit $exitCode."
+        }
+        finally {
+            $parentFinallyExecuted = $true
+            $restoreTemp = Join-Path $root ('restore-exit-{0}.tmp-test' -f $exitCode)
+            $restoreBackup = Join-Path $root ('.restore-backup-{0}-{1}' -f $exitCode, ([Guid]::NewGuid().ToString('N')))
+            [IO.File]::WriteAllBytes($restoreTemp, $originalBytes)
+            [IO.File]::Replace($restoreTemp, $destination, $restoreBackup, $true)
+            if (Test-Path -LiteralPath $restoreBackup -PathType Leaf) {
+                Remove-Item -LiteralPath $restoreBackup -Force
+            }
+        }
+        $finalHash = (Get-FileHash -LiteralPath $destination -Algorithm SHA256).Hash
+        Assert-True ($wrapperChildExitCode -eq $exitCode) "Wrapper child exit code mismatch for ${exitCode}: $wrapperChildExitCode"
+        Assert-True $parentFinallyExecuted "Manual parent finally did not execute for child exit $exitCode."
+        Assert-True ($finalHash -ceq $originalHash) "Throwaway contract was not restored for child exit $exitCode."
+        Assert-True ((Get-FileHash -LiteralPath $destination -Algorithm SHA256).Hash -ceq $originalHash) "Original SHA was not restored for child exit $exitCode."
+        Remove-Item -LiteralPath $destination -Force
+        Write-Host ("I2G_NESTED_CHILD_EXIT_{0}=PASS INNER_RUNNER_EXIT_CODE={0} WRAPPER_CHILD_EXIT_CODE={0} MANUAL_PARENT_SURVIVES=YES MANUAL_PARENT_FINALLY_EXECUTES=YES CONTRACT_RESTORED=YES" -f $exitCode)
+    }
+}
+
+function Get-TestTreatmentServicePhaseState {
+    param(
+        [Parameter(Mandatory = $true)][bool]$ServicePhaseStarted,
+        [Parameter(Mandatory = $true)][bool]$DiscoveryStarted,
+        [Parameter(Mandatory = $true)][bool]$DiscoveryCompleted,
+        [Parameter(Mandatory = $true)][bool]$ServiceTeardownCompleted
+    )
+    [ordered]@{
+        treatment_service_phase_started = $ServicePhaseStarted
+        treatment_discovery_started = $DiscoveryStarted
+        treatment_discovery_completed = $DiscoveryCompleted
+        treatment_service_phase_completed = $ServicePhaseStarted -and $ServiceTeardownCompleted
+    }
+}
+
+function Invoke-I2gTreatmentServicePhaseStateTests {
+    param([Parameter(Mandatory = $true)][string]$RunnerSource)
+    Assert-True ($RunnerSource.Contains('$TreatmentServicePhaseCompleted = $false')) 'Explicit treatment service completion state is missing.'
+    Assert-True ($RunnerSource.Contains('$TreatmentServicePhaseCompleted = $true')) 'Successful treatment service completion state is missing.'
+    Assert-True ($RunnerSource.Contains("treatment_service_phase_completion_source = 'EXPLICIT_STATE'")) 'Explicit treatment completion source marker is missing.'
+    Assert-True ($RunnerSource -notmatch 'treatment_service_phase_completed\s*=\s*if\s*\(\$TreatmentServicePhaseStarted\)\s*\{\s*\$TreatmentDiscoveryCompleted') 'Treatment service completion is still derived from discovery completion.'
+
+    $neverStarted = Get-TestTreatmentServicePhaseState -ServicePhaseStarted $false -DiscoveryStarted $false -DiscoveryCompleted $false -ServiceTeardownCompleted $false
+    Assert-True (-not $neverStarted.treatment_service_phase_started -and -not $neverStarted.treatment_service_phase_completed) 'Never-started service phase state is wrong.'
+    $beforeDiscovery = Get-TestTreatmentServicePhaseState -ServicePhaseStarted $true -DiscoveryStarted $false -DiscoveryCompleted $false -ServiceTeardownCompleted $false
+    Assert-True ($beforeDiscovery.treatment_service_phase_started -and -not $beforeDiscovery.treatment_service_phase_completed) 'Failure before discovery state is wrong.'
+    $discoveryFailure = Get-TestTreatmentServicePhaseState -ServicePhaseStarted $true -DiscoveryStarted $true -DiscoveryCompleted $false -ServiceTeardownCompleted $false
+    Assert-True ($discoveryFailure.treatment_discovery_started -and -not $discoveryFailure.treatment_discovery_completed -and -not $discoveryFailure.treatment_service_phase_completed) 'Discovery failure state is wrong.'
+    $teardownFailure = Get-TestTreatmentServicePhaseState -ServicePhaseStarted $true -DiscoveryStarted $true -DiscoveryCompleted $true -ServiceTeardownCompleted $false
+    Assert-True ($teardownFailure.treatment_discovery_completed -and -not $teardownFailure.treatment_service_phase_completed) 'Teardown failure state is wrong.'
+    $complete = Get-TestTreatmentServicePhaseState -ServicePhaseStarted $true -DiscoveryStarted $true -DiscoveryCompleted $true -ServiceTeardownCompleted $true
+    Assert-True ($complete.treatment_service_phase_started -and $complete.treatment_discovery_completed -and $complete.treatment_service_phase_completed) 'Complete service phase state is wrong.'
+    Write-Host 'I2G_TREATMENT_SERVICE_PHASE_STATE_MACHINE=PASS cases=5 source=EXPLICIT_STATE'
+}
+
 foreach ($path in @($contractPath, $setupPath, $realRunnerPath, $cleanupPath, $PSCommandPath)) {
     Assert-PowerShellSyntax -Path $path
 }
@@ -239,9 +387,11 @@ Assert-True ($scientificFailureClass -ceq 'SCIENTIFIC_INVALIDATION') 'Scientific
 Assert-True ($realRunnerSource.Contains('treatment_allowed_by_scientific_gate')) 'Treatment scientific gate state is not persisted.'
 Assert-True ($realRunnerSource -notmatch '\$TreatmentRuns\s*-eq\s*0\s*\)\s*\{\s*\$TreatmentAllowed\s*=\s*\$false') 'Treatment allowed state is retroactively falsified by run count.'
 Write-Host 'I2G_TREATMENT_STATE_MACHINE=PASS'
+Invoke-I2gTreatmentServicePhaseStateTests -RunnerSource $realRunnerSource
 
 Invoke-I2gThrowawayChildExitTest
 Invoke-I2gThrowawayContractRestoreTest
+Invoke-I2gNestedChildProcessIsolationTest
 
 # The marker is intentionally before every live-operation token in both entrypoints.
 # This is a source-order regression check in addition to the child-process rejection test.

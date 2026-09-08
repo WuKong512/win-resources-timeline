@@ -851,6 +851,12 @@ non-causal scientific result. The wrapper launches the real runner in a
 separate Windows PowerShell 5.1 process so its explicit exit cannot bypass the
 parent launcher’s gate restoration.
 
+The manual launcher adds the outer process boundary: manual launcher parent ->
+Windows PowerShell 5.1 wrapper child -> Windows PowerShell 5.1 runner child.
+Treatment service-phase completion is persisted from explicit lifecycle state
+after the treatment service function returns successfully; it is never inferred
+from discovery completion alone.
+
 `run-admin-amd-i2g-qualification.ps1` is plan-only by default and has a
 deterministic `-OfflineSynthetic` test seam. The synthetic surface validates
 the exact release artifact path, x64 PE architecture, and SHA-256 before

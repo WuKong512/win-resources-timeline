@@ -70,6 +70,14 @@ cleanup failure, and `2` for an invalid or non-causal scientific result. This
 keeps the parent process alive to clear authorization state and restore the
 original contract bytes.
 
+The manual operator launcher is a second, separate process boundary: manual
+launcher parent -> Windows PowerShell 5.1 wrapper child -> Windows PowerShell
+5.1 real-runner child. The manual launcher never invokes the wrapper in-process,
+so wrapper or runner `exit` cannot bypass the launcher's `finally` restoration.
+The runner records `treatment_service_phase_completed` from explicit lifecycle
+state after `Invoke-I2gServicePhase -Phase TREATMENT` returns successfully; it
+is not derived from `treatment_discovery_completed`.
+
 本次交付只影响 `tools/amd-privilege-qualification` 资格工具和升级文档；不改变
 Resource Timeline 生产采集器、Provider、数据库、UI、安装器、开机启动或生产账户。
 没有执行 AMD CLI、服务控制管理器、LSA、ACL、注册表、令牌调整、驱动、设备或采样。
