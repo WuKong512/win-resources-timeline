@@ -805,3 +805,44 @@ harness artifact. No I2G harness exists yet and no real experiment is
 authorized. The next task is offline I2G harness design/implementation
 followed by review. Human authorization for the paired non-sampling runs can
 only be considered after that separate review passes.
+
+## CURRENT STATE — OFFLINE IMPLEMENTATION COMPLETE
+
+The preceding sections are preserved as read-only design history. The current
+implementation is the fail-closed, synthetic-only harness in
+`tools/amd-privilege-qualification`; see
+[`amd-i2g-harness.md`](amd-i2g-harness.md) for the complete contract.
+
+```text
+I2G_HARNESS = IMPLEMENTED_OFFLINE
+I2G_HARNESS_IMPLEMENTED = true
+I2G_VARIABLE = SeProfileSingleProcessPrivilege
+I2G_SELECTION_CONFIDENCE = MEDIUM
+I2G_EXPERIMENT_SHAPE = PAIRED_CONTROL_TREATMENT
+HISTORICAL_I2F_ROLE = PREDECESSOR_EVIDENCE_ONLY
+HISTORICAL_I2F_IS_ACTIVE_CAUSAL_CONTROL = false
+I2G_GATE_CONSUMED = false
+I2G_REAL_EXECUTION_ALLOWED = false
+I2G_REAL_CLEANUP_ALLOWED = false
+I2G_HUMAN_REAL_RUN_AUTHORIZATION = NOT_GRANTED
+I2G_REAL_RUNTIME = 0
+I2G_OFFLINE_VALIDATION = PASS
+I2G_HARNESS_ARTIFACT_ARCHITECTURE = x64
+I2G_HARNESS_ARTIFACT_SHA256 = D9325E47F9F68C810A1CFC29F27F80E17D8A10828390D7B8D93F1E0FEF080A90
+PLANNED_CONTROL_COUNTER_DISCOVERY_RUNS = 1
+PLANNED_TREATMENT_COUNTER_DISCOVERY_RUNS = 1
+PLANNED_VALID_PAIR_COUNTER_DISCOVERY_RUNS = 2
+MAX_CONTROL_COUNTER_DISCOVERY_RUNS = 1
+MAX_TREATMENT_COUNTER_DISCOVERY_RUNS = 1
+MAX_TOTAL_I2G_COUNTER_DISCOVERY_RUNS = 2
+POWER_SAMPLING_RUNS = 0
+CONTROL_RETRY_ALLOWED = false
+TREATMENT_RETRY_ALLOWED = false
+CONTROL_DRIFT_STOP_BEFORE_TREATMENT = true
+TOKEN_TEARDOWN_BEFORE_TREATMENT_POLICY_MUTATION = true
+NEXT_GATE = I2G_HARNESS_REVIEW_BEFORE_HUMAN_REAL_RUN_AUTHORIZATION
+```
+
+The implementation adds no production account selection and no real execution
+authorization. Any future Windows backend requires a separate human review and
+explicit authorization after this offline qualification milestone.

@@ -2209,3 +2209,44 @@ harness or runtime exists, and no treatment may follow CONTROL drift. The
 paired phase transition permits only the single `SeProfileSingleProcessPrivilege`
 assignment to the same Service SID after CONTROL token/process teardown; all
 actual run counts are recorded separately from the planned and maximum caps.
+
+## AMD CURRENT STATE RECONCILIATION — I2G IMPLEMENTED OFFLINE
+
+The previous design-only I2G block above is retained for history. The current
+implementation and handoff are defined in
+[`amd-i2g-harness.md`](amd-i2g-harness.md):
+
+```text
+I2G_HARNESS = IMPLEMENTED_OFFLINE
+I2G_HARNESS_IMPLEMENTED = true
+I2G_VARIABLE = SeProfileSingleProcessPrivilege
+I2G_SELECTION_CONFIDENCE = MEDIUM
+I2G_EXPERIMENT_SHAPE = PAIRED_CONTROL_TREATMENT
+HISTORICAL_I2F_ROLE = PREDECESSOR_EVIDENCE_ONLY
+HISTORICAL_I2F_IS_ACTIVE_CAUSAL_CONTROL = false
+I2G_GATE_CONSUMED = false
+I2G_REAL_EXECUTION_ALLOWED = false
+I2G_REAL_CLEANUP_ALLOWED = false
+I2G_HUMAN_REAL_RUN_AUTHORIZATION = NOT_GRANTED
+I2G_REAL_RUNTIME = 0
+I2G_OFFLINE_VALIDATION = PASS
+I2G_HARNESS_ARTIFACT_ARCHITECTURE = x64
+I2G_HARNESS_ARTIFACT_SHA256 = D9325E47F9F68C810A1CFC29F27F80E17D8A10828390D7B8D93F1E0FEF080A90
+PLANNED_CONTROL_COUNTER_DISCOVERY_RUNS = 1
+PLANNED_TREATMENT_COUNTER_DISCOVERY_RUNS = 1
+PLANNED_VALID_PAIR_COUNTER_DISCOVERY_RUNS = 2
+MAX_TOTAL_I2G_COUNTER_DISCOVERY_RUNS = 2
+POWER_SAMPLING_RUNS = 0
+CONTROL_RETRY_ALLOWED = false
+TREATMENT_RETRY_ALLOWED = false
+NO_CODE_CHANGE_BETWEEN_PHASES = true
+NO_NON_TREATMENT_CONFIGURATION_CHANGE_BETWEEN_PHASES = true
+CONTROL_DRIFT_STOP_BEFORE_TREATMENT = true
+TOKEN_TEARDOWN_BEFORE_TREATMENT_POLICY_MUTATION = true
+NEXT_GATE = I2G_HARNESS_REVIEW_BEFORE_HUMAN_REAL_RUN_AUTHORIZATION
+```
+
+The release qualification artifact is synthetic/offline-only. Its backend has
+a Windows seam, but the real PowerShell entrypoint rejects before host access;
+no AMD, service, LSA, token, ACL, registry, driver, device, or production
+operation is authorized by this milestone.

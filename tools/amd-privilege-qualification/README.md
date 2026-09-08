@@ -772,6 +772,51 @@ I2F_ARTIFACT_CHANGED = false
 NEXT_GATE = HUMAN_I2F_SELF_ENABLE_QUALIFICATION_REVIEW
 ```
 
+## CURRENT STATE — I2G OFFLINE HARNESS IMPLEMENTED
+
+The design-only handoff is superseded by the offline implementation described
+in [`docs/upgrade/amd-i2g-harness.md`](../../docs/upgrade/amd-i2g-harness.md).
+Historical I2F remains predecessor evidence only. This milestone does not
+authorize a human real run and does not touch production code or data.
+
+```text
+I2G_HARNESS = IMPLEMENTED_OFFLINE
+I2G_HARNESS_IMPLEMENTED = true
+I2G_VARIABLE = SeProfileSingleProcessPrivilege
+I2G_SELECTION_CONFIDENCE = MEDIUM
+I2G_EXPERIMENT_SHAPE = PAIRED_CONTROL_TREATMENT
+HISTORICAL_I2F_ROLE = PREDECESSOR_EVIDENCE_ONLY
+HISTORICAL_I2F_IS_ACTIVE_CAUSAL_CONTROL = false
+I2G_GATE_CONSUMED = false
+I2G_REAL_EXECUTION_ALLOWED = false
+I2G_REAL_CLEANUP_ALLOWED = false
+I2G_HUMAN_REAL_RUN_AUTHORIZATION = NOT_GRANTED
+I2G_REAL_RUNTIME = 0
+I2G_OFFLINE_VALIDATION = PASS
+I2G_HARNESS_ARTIFACT_ARCHITECTURE = x64
+I2G_HARNESS_ARTIFACT_SHA256 = D9325E47F9F68C810A1CFC29F27F80E17D8A10828390D7B8D93F1E0FEF080A90
+CONTROL_POLICY_RIGHTS = SeSystemProfilePrivilege only
+TREATMENT_POLICY_DELTA = SeProfileSingleProcessPrivilege assignment to same Service SID only
+FIXED_OPERATION = timechart --list
+POWER_SAMPLING_RUNS = 0
+MAX_CONTROL_COUNTER_DISCOVERY_RUNS = 1
+MAX_TREATMENT_COUNTER_DISCOVERY_RUNS = 1
+MAX_TOTAL_I2G_COUNTER_DISCOVERY_RUNS = 2
+CONTROL_RETRY_ALLOWED = false
+TREATMENT_RETRY_ALLOWED = false
+CONTROL_DRIFT_STOP_BEFORE_TREATMENT = true
+TOKEN_TEARDOWN_BEFORE_TREATMENT_POLICY_MUTATION = true
+NEXT_GATE = I2G_HARNESS_REVIEW_BEFORE_HUMAN_REAL_RUN_AUTHORIZATION
+```
+
+`run-admin-amd-i2g-qualification.ps1` is plan-only by default and has a
+deterministic `-OfflineSynthetic` test seam. Its real switch emits
+`I2G_REAL_EXECUTION_NOT_AUTHORIZED` before any machine access. The cleanup
+entrypoint behaves the same way with
+`I2G_REAL_CLEANUP_NOT_AUTHORIZED`. `test-i2g-harness.ps1` covers the fixed
+paired contract, atomic evidence inventory, result/cleanup separation,
+recovery/no-retry behavior, and synthetic fault matrix.
+
 ## HISTORICAL / SUPERSEDED — PR22 I2F consumed-gate runtime guard closure
 
 This section supersedes the earlier I2F preparation-only status blocks in this

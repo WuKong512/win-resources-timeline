@@ -12,6 +12,7 @@ use std::fmt;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
+pub mod i2g;
 pub mod package_power;
 pub mod synthetic;
 
