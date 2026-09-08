@@ -1631,6 +1631,21 @@ foreach ($requiredI2eCurrentStateText in @(
         'I2G_REAL_EXECUTION_ALLOWED = false',
         'I2G_REAL_CLEANUP_ALLOWED = false',
         'I2G_HUMAN_REAL_RUN_AUTHORIZATION = CONSUMED',
+        'I2G_REAL_RUNTIME = ATTEMPT3_COMPLETE',
+        'I2G_REAL_QUALIFICATION = PASS_AMD_PRIVILEGE_I2G_REAL_QUALIFICATION',
+        'I2G_REAL_SCIENTIFIC_RESULT = PROFILE_SINGLE_INSUFFICIENT_IN_PAIRED_I2G_CONTEXT',
+        'I2G_CAUSAL_INTERPRETATION_VALID = true',
+        'I2G_CONTROL_RESULT = POWER_UNAVAILABLE',
+        'I2G_TREATMENT_RESULT = POWER_UNAVAILABLE',
+        'I2G_CONTROL_RUNS = 1',
+        'I2G_TREATMENT_RUNS = 1',
+        'I2G_TOTAL_DISCOVERY_RUNS = 2',
+        'I2G_RETRY_OCCURRED = false',
+        'I2G_POWER_SAMPLING_RUNS = 0',
+        'I2G_ROLLBACK = PASS',
+        'I2G_FINAL_MACHINE_STATE = CLEAN',
+        'I2G_RECOVERY_REQUIRED = false',
+        'I2G_ATTEMPT3_AUTHORIZATION = CONSUMED',
         'I2G_OFFLINE_VALIDATION = PASS',
         'I2G_HARNESS_IMPLEMENTATION_AUTHORIZED = false',
         'I2G_REAL_RUNTIME_AUTHORIZED = false',
@@ -1649,7 +1664,8 @@ foreach ($requiredI2eCurrentStateText in @(
         'MAX_TOTAL_I2G_COUNTER_DISCOVERY_RUNS = 2',
         'ACTUAL_RUN_COUNT_EVIDENCE_SCHEMA = DEFINED',
         'POWER_SAMPLING_RUNS = 0',
-        'NEXT_GATE = NEW_EXPLICIT_HUMAN_AUTHORIZATION_REQUIRED'
+        'NEW_REAL_RUN_REQUIRED = false',
+        'NEXT_GATE = HUMAN_FINAL_REVIEW_BEFORE_MARKING_PR24_READY'
     )) {
     if ($currentDocumentation.IndexOf($requiredI2eCurrentStateText, [StringComparison]::Ordinal) -lt 0) {
         throw "I2E current-state reconciliation is missing: $requiredI2eCurrentStateText"

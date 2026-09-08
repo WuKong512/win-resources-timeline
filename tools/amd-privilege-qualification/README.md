@@ -8,9 +8,10 @@ provider, installer, autostart path, or database writer.
 
 I2E paired, treatment-resume, and standalone cleanup real entrypoints are
 retired and permanently fail closed. I2F experiment and cleanup real
-entrypoints are also retired. The only historical I2G real attempt is immutable
-and consumed; the current implementation work is limited to offline repair and
-regression validation. No new real authorization is granted by this document.
+entrypoints are also retired. I2G Attempt #1 and Attempt #2 remain immutable
+historical harness failures; Attempt #3 completed the one authorized paired
+qualification and its gate is consumed. No additional real authorization is
+granted by this document.
 
 ```text
 I2E_REAL_PAIRED_ENTRYPOINT = PERMANENTLY_FAIL_CLOSED
@@ -80,32 +81,55 @@ CONTROL_EXPECTED_RESULT = POWER_UNAVAILABLE
 CONTROL_DRIFT_STOP_BEFORE_TREATMENT = true
 CONTROL_TOKEN_TEARDOWN_BEFORE_TREATMENT_POLICY_MUTATION = true
 I2G_HARNESS = IMPLEMENTED_OFFLINE
-I2G_REAL_RUNTIME = ATTEMPT1_ONLY_CONSUMED
+I2G_REAL_RUNTIME = ATTEMPT3_COMPLETE
+I2G_REAL_QUALIFICATION = PASS_AMD_PRIVILEGE_I2G_REAL_QUALIFICATION
+I2G_REAL_SCIENTIFIC_RESULT = PROFILE_SINGLE_INSUFFICIENT_IN_PAIRED_I2G_CONTEXT
+I2G_CAUSAL_INTERPRETATION_VALID = true
+I2G_CONTROL_RESULT = POWER_UNAVAILABLE
+I2G_TREATMENT_RESULT = POWER_UNAVAILABLE
+I2G_CONTROL_TOKEN_GATE = PASS
+I2G_TREATMENT_TOKEN_GATE = PASS
+I2G_PAIRED_CONFIG_DELTA = PASS
+I2G_PAIRED_TOKEN_DELTA = PASS
+I2G_CONTROL_RUNS = 1
+I2G_TREATMENT_RUNS = 1
+I2G_TOTAL_DISCOVERY_RUNS = 2
+I2G_RETRY_OCCURRED = false
+I2G_POWER_SAMPLING_RUNS = 0
+I2G_ROLLBACK = PASS
+I2G_FINAL_MACHINE_STATE = CLEAN
+I2G_RECOVERY_REQUIRED = false
+I2G_ATTEMPT3_AUTHORIZATION = CONSUMED
+I2G_HUMAN_REAL_RUN_AUTHORIZATION = CONSUMED
 I2G_HARNESS_IMPLEMENTATION_AUTHORIZED = true
 I2G_REAL_RUNTIME_AUTHORIZED = false
 PRODUCTION_ACCOUNT = UNRESOLVED
 LOCAL_SYSTEM_PRODUCTION_SELECTION = NOT_AUTHORIZED
 PRODUCTION_ADMISSION = NOT_COMPLETE
-NEXT_GATE = HUMAN_REVIEW_BEFORE_ANY_NEW_REAL_RUN_AUTHORIZATION
-NEXT_TASK = AMD_I2G_REAL_ATTEMPT1_REPAIR_CLOSURE
+ATTEMPT1_AUTHORIZATION = CONSUMED
+ATTEMPT2_AUTHORIZATION = CONSUMED
+ATTEMPT3_AUTHORIZATION = CONSUMED
+ATTEMPT4_AUTHORIZATION = NOT_GRANTED
+NEW_REAL_RUN_REQUIRED = false
+NEXT_GATE = HUMAN_FINAL_REVIEW_BEFORE_MARKING_PR24_READY
+NEXT_TASK = PR24_FINAL_HUMAN_READY_REVIEW
 README_CURRENT_STATE_RECONCILED=PASS
 ```
 
 The selected I2G treatment remains one variable. Historical I2F is predecessor
-evidence only, not the active causal control. The future experiment is a
-paired CONTROL -> TREATMENT design on one fresh service identity. CONTROL
-assigns only `SeSystemProfilePrivilege`, requires `POWER_UNAVAILABLE`, and is
-fully torn down before treatment adds `SeProfileSingleProcessPrivilege` to the
-same Service SID. A planned valid pair runs one non-sampling
-`timechart --list` in each phase; the
-paired delta is `ABSENT -> PRESENT + ENABLED`. The expected control,
+evidence only, not the active causal control. Attempt #3 completed the paired
+CONTROL -> TREATMENT design on one fresh service identity. CONTROL assigned
+only `SeSystemProfilePrivilege` and returned `POWER_UNAVAILABLE`; treatment
+added `SeProfileSingleProcessPrivilege` to the same Service SID and also
+returned `POWER_UNAVAILABLE`. The valid conclusion is narrowly
+`PROFILE_SINGLE_INSUFFICIENT_IN_PAIRED_I2G_CONTEXT`. The expected control,
 treatment, invariant comparison, drift gate, and independent rollback are
 specified in
 [`docs/upgrade/amd-i2g-variable-selection.md`](../../docs/upgrade/amd-i2g-variable-selection.md).
 The only allowed CONTROL-to-TREATMENT configuration delta is assignment of
 `SeProfileSingleProcessPrivilege` to the same Service SID after CONTROL
-teardown. Planned and maximum run counts are separate from actual counts. No
-I2G harness or runtime exists.
+teardown. Attempt #3 consumed one run in each phase with no retry and no
+sampling. No further real run is required or authorized.
 
 The automated path is completely synthetic. `--synthetic` exercises the
 versioned semantic protocol, bounded framing, explicit pipe-DACL policy,
@@ -791,7 +815,25 @@ I2G_REAL_GATE_CONSUMED = true
 I2G_REAL_EXECUTION_ALLOWED = false
 I2G_REAL_CLEANUP_ALLOWED = false
 I2G_HUMAN_REAL_RUN_AUTHORIZATION = CONSUMED
-I2G_REAL_RUNTIME = ATTEMPT1_ONLY_CONSUMED
+I2G_REAL_RUNTIME = ATTEMPT3_COMPLETE
+I2G_REAL_QUALIFICATION = PASS_AMD_PRIVILEGE_I2G_REAL_QUALIFICATION
+I2G_REAL_SCIENTIFIC_RESULT = PROFILE_SINGLE_INSUFFICIENT_IN_PAIRED_I2G_CONTEXT
+I2G_CAUSAL_INTERPRETATION_VALID = true
+I2G_CONTROL_RESULT = POWER_UNAVAILABLE
+I2G_TREATMENT_RESULT = POWER_UNAVAILABLE
+I2G_CONTROL_TOKEN_GATE = PASS
+I2G_TREATMENT_TOKEN_GATE = PASS
+I2G_PAIRED_CONFIG_DELTA = PASS
+I2G_PAIRED_TOKEN_DELTA = PASS
+I2G_CONTROL_RUNS = 1
+I2G_TREATMENT_RUNS = 1
+I2G_TOTAL_DISCOVERY_RUNS = 2
+I2G_RETRY_OCCURRED = false
+I2G_POWER_SAMPLING_RUNS = 0
+I2G_ROLLBACK = PASS
+I2G_FINAL_MACHINE_STATE = CLEAN
+I2G_RECOVERY_REQUIRED = false
+I2G_ATTEMPT3_AUTHORIZATION = CONSUMED
 I2G_OFFLINE_VALIDATION = PASS
 I2G_HARNESS_ARTIFACT_ARCHITECTURE = x64
 I2G_HARNESS_ARTIFACT_PATH = tools/amd-privilege-qualification/target/release/amd-privilege-qualification.exe
@@ -799,7 +841,7 @@ I2G_HARNESS_ARTIFACT_SHA256 = 2613129D179EA2A0496AD680E68E77A79FFFBB569D0802A11A
 I2G_EXECUTION_SURFACE = SYNTHETIC_OFFLINE_FAIL_CLOSED
 I2G_SHARED_EXECUTABLE_OFFLINE_ONLY = false
 I2G_TASK_LOCAL_REAL_RUNNER = ONE_SHOT_EXACT_AUTHORIZATION_ONLY
-I2G_TASK_LOCAL_REAL_RUN_STATUS = ATTEMPT1_VALID_CONTROL_HARNESS_RUNTIME_FAILURE
+I2G_TASK_LOCAL_REAL_RUN_STATUS = PASS_AMD_PRIVILEGE_I2G_REAL_QUALIFICATION
 CONTROL_POLICY_RIGHTS = SeSystemProfilePrivilege only
 TREATMENT_POLICY_DELTA = SeProfileSingleProcessPrivilege assignment to same Service SID only
 FIXED_OPERATION = timechart --list
@@ -811,7 +853,8 @@ CONTROL_RETRY_ALLOWED = false
 TREATMENT_RETRY_ALLOWED = false
 CONTROL_DRIFT_STOP_BEFORE_TREATMENT = true
 TOKEN_TEARDOWN_BEFORE_TREATMENT_POLICY_MUTATION = true
-NEXT_GATE = HUMAN_REVIEW_BEFORE_ANY_NEW_REAL_RUN_AUTHORIZATION
+NEW_REAL_RUN_REQUIRED = false
+NEXT_GATE = HUMAN_FINAL_REVIEW_BEFORE_MARKING_PR24_READY
 ```
 
 ## HISTORICAL — AMD-I2G REAL ATTEMPT #1
@@ -841,7 +884,7 @@ ATTEMPT1_ROLLBACK = PASS
 ATTEMPT1_FINAL_MACHINE_STATE = CLEAN
 ATTEMPT1_AUTHORIZATION = CONSUMED
 ATTEMPT1_EVIDENCE = IMMUTABLE
-NEW_REAL_RUN_AUTHORIZATION_REQUIRED = true
+ATTEMPT1_NEW_REAL_RUN_AUTHORIZATION_REQUIRED = true
 ```
 
 The reviewed real wrapper now returns deterministic child-runner status codes:
@@ -868,6 +911,48 @@ entrypoint remains permanently fail-closed with
 paired contract, atomic evidence inventory, result/cleanup separation,
 all persisted-state recovery decisions, executable recovery/no-retry behavior,
 the 20-point crash-window matrix, and synthetic fault matrix.
+
+## AMD-I2G REAL ATTEMPT #3 — AUTHORITATIVE PAIRED RESULT
+
+Attempt `d6d6c33003934dc5ad2b0b79307e5b2c` is the first complete valid paired
+qualification. The raw evidence is immutable. Both fixed `timechart --list`
+discoveries returned `POWER_UNAVAILABLE` under the same LocalService + Service
+SID context; the only policy delta was `SeProfileSingleProcessPrivilege`.
+
+```text
+ATTEMPT3_RUN_ID = d6d6c33003934dc5ad2b0b79307e5b2c
+ATTEMPT3_REAL_PRIVILEGED_RUN = YES
+ATTEMPT3_REAL_CLEANUP_RUN = YES
+ATTEMPT3_CONTROL_RUNS = 1
+ATTEMPT3_TREATMENT_RUNS = 1
+ATTEMPT3_TOTAL_DISCOVERY_RUNS = 2
+ATTEMPT3_POWER_SAMPLING_RUNS = 0
+ATTEMPT3_RETRY_OCCURRED = false
+ATTEMPT3_CONTROL_RESULT = POWER_UNAVAILABLE
+ATTEMPT3_TREATMENT_RESULT = POWER_UNAVAILABLE
+ATTEMPT3_CONTROL_TOKEN_GATE = PASS
+ATTEMPT3_TREATMENT_TOKEN_GATE = PASS
+ATTEMPT3_PAIRED_CONFIG_DELTA = PASS
+ATTEMPT3_PAIRED_TOKEN_DELTA = PASS
+ATTEMPT3_TREATMENT_SERVICE_PHASE_STARTED = true
+ATTEMPT3_TREATMENT_SERVICE_PHASE_COMPLETED = true
+ATTEMPT3_TREATMENT_DISCOVERY_STARTED = true
+ATTEMPT3_TREATMENT_DISCOVERY_COMPLETED = true
+ATTEMPT3_FAILURE_CLASS = NONE
+ATTEMPT3_SCIENTIFIC_RESULT = PROFILE_SINGLE_INSUFFICIENT_IN_PAIRED_I2G_CONTEXT
+ATTEMPT3_CAUSAL_INTERPRETATION_VALID = true
+ATTEMPT3_ROLLBACK = PASS
+ATTEMPT3_FINAL_MACHINE_STATE = CLEAN
+ATTEMPT3_RECOVERY_REQUIRED = false
+ATTEMPT3_AUTHORIZATION = CONSUMED
+ATTEMPT4_AUTHORIZATION = NOT_GRANTED
+NEW_REAL_RUN_REQUIRED = false
+```
+
+The conclusion is limited to the paired I2G context and does not generalize to
+other accounts, privileges, AMD operations, or production behavior. Attempts
+#1 and #2 remain immutable historical harness failures with no causal result;
+no Attempt #4 is required or allowed.
 
 The default I2G execution surface is synthetic/offline-only and fail-closed; the shared
 `amd-privilege-qualification.exe` is not itself offline-only because it retains
