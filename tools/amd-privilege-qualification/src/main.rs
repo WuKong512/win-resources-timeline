@@ -16,6 +16,27 @@ fn main() {
                 }
             };
         let evidence_root = option_string(&args, "--evidence-root").map(std::path::PathBuf::from);
+        if scenario == amd_privilege_qualification::i2g::I2gSyntheticScenario::CrashWindowMatrix {
+            match amd_privilege_qualification::i2g::run_crash_window_matrix(
+                evidence_root.as_deref(),
+            ) {
+                Ok(summary) => {
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(&summary)
+                            .expect("I2G crash matrix serializes")
+                    );
+                    if summary.offline_validation != "PASS" {
+                        std::process::exit(1);
+                    }
+                }
+                Err(error) => {
+                    eprintln!("synthetic I2G crash recovery matrix failed: {error}");
+                    std::process::exit(1);
+                }
+            }
+            return;
+        }
         match amd_privilege_qualification::i2g::run_synthetic(scenario, evidence_root.as_deref()) {
             Ok(summary) => {
                 println!(

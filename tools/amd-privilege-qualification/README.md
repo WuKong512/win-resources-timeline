@@ -788,13 +788,17 @@ I2G_EXPERIMENT_SHAPE = PAIRED_CONTROL_TREATMENT
 HISTORICAL_I2F_ROLE = PREDECESSOR_EVIDENCE_ONLY
 HISTORICAL_I2F_IS_ACTIVE_CAUSAL_CONTROL = false
 I2G_GATE_CONSUMED = false
+I2G_REAL_GATE_CONSUMED = false
 I2G_REAL_EXECUTION_ALLOWED = false
 I2G_REAL_CLEANUP_ALLOWED = false
 I2G_HUMAN_REAL_RUN_AUTHORIZATION = NOT_GRANTED
 I2G_REAL_RUNTIME = 0
 I2G_OFFLINE_VALIDATION = PASS
 I2G_HARNESS_ARTIFACT_ARCHITECTURE = x64
-I2G_HARNESS_ARTIFACT_SHA256 = D9325E47F9F68C810A1CFC29F27F80E17D8A10828390D7B8D93F1E0FEF080A90
+I2G_HARNESS_ARTIFACT_PATH = tools/amd-privilege-qualification/target/release/amd-privilege-qualification.exe
+I2G_HARNESS_ARTIFACT_SHA256 = E9437A0A5387E6C12AA4D2BC61B82AB9AC51D461005C0DBBC5CF244B410DB4A5
+I2G_EXECUTION_SURFACE = SYNTHETIC_OFFLINE_FAIL_CLOSED
+I2G_SHARED_EXECUTABLE_OFFLINE_ONLY = false
 CONTROL_POLICY_RIGHTS = SeSystemProfilePrivilege only
 TREATMENT_POLICY_DELTA = SeProfileSingleProcessPrivilege assignment to same Service SID only
 FIXED_OPERATION = timechart --list
@@ -810,12 +814,21 @@ NEXT_GATE = I2G_HARNESS_REVIEW_BEFORE_HUMAN_REAL_RUN_AUTHORIZATION
 ```
 
 `run-admin-amd-i2g-qualification.ps1` is plan-only by default and has a
-deterministic `-OfflineSynthetic` test seam. Its real switch emits
+deterministic `-OfflineSynthetic` test seam. The synthetic surface validates
+the exact release artifact path, x64 PE architecture, and SHA-256 before
+launch; tampered and missing artifacts are rejected. Its real switch emits
 `I2G_REAL_EXECUTION_NOT_AUTHORIZED` before any machine access. The cleanup
 entrypoint behaves the same way with
 `I2G_REAL_CLEANUP_NOT_AUTHORIZED`. `test-i2g-harness.ps1` covers the fixed
 paired contract, atomic evidence inventory, result/cleanup separation,
-recovery/no-retry behavior, and synthetic fault matrix.
+all persisted-state recovery decisions, executable recovery/no-retry behavior,
+the 20-point crash-window matrix, and synthetic fault matrix.
+
+The I2G execution surface is synthetic/offline-only and fail-closed; the shared
+`amd-privilege-qualification.exe` is not itself offline-only because it retains
+historical non-I2G entrypoints (`--broker`, `--system-counter-service`,
+`--service-profile-counter-service`, `--service-profile-enable-counter-service`,
+and `--client`). This milestone does not authorize those entrypoints.
 
 ## HISTORICAL / SUPERSEDED — PR22 I2F consumed-gate runtime guard closure
 

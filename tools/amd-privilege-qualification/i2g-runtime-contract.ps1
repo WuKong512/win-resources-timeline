@@ -50,6 +50,10 @@ $I2gControlDriftStopsBeforeTreatment = $true
 $I2gTokenTeardownBeforeTreatmentPolicyMutation = $true
 $I2gTokenTeardownBeforePolicyRightRemoval = $true
 $I2gNoRetry = $true
+$I2gHarnessArtifactRelativePath = 'target\release\amd-privilege-qualification.exe'
+$I2gHarnessArtifactArchitecture = 'x64'
+# Replaced with the SHA-256 of the rebuilt release artifact before the wrapper is shipped.
+$I2gHarnessArtifactSha256 = 'E9437A0A5387E6C12AA4D2BC61B82AB9AC51D461005C0DBBC5CF244B410DB4A5'
 
 $I2gRequiredEvidenceFiles = @(
     'EXPERIMENT-MANIFEST.json',
@@ -130,10 +134,89 @@ function Get-I2gExperimentPlan {
         no_code_change_between_phases = $I2gNoCodeChangeBetweenPhases
         no_harness_rebuild_between_phases = $I2gNoHarnessRebuildBetweenPhases
         no_non_treatment_configuration_change_between_phases = $I2gNoNonTreatmentConfigurationChangeBetweenPhases
+        harness_artifact_relative_path = $I2gHarnessArtifactRelativePath
+        harness_artifact_architecture = $I2gHarnessArtifactArchitecture
+        harness_artifact_sha256 = $I2gHarnessArtifactSha256
+        i2g_execution_surface = 'SYNTHETIC_OFFLINE_FAIL_CLOSED'
+        shared_executable_contains_historical_entrypoints = $true
     }
 }
 function Get-I2gRequiredEvidenceNames {
     @($I2gRequiredEvidenceFiles)
+}
+
+function Get-I2gHarnessArtifactArchitecture {
+    param([Parameter(Mandatory = $true)][string]$Path)
+
+    $stream = $null
+    $reader = $null
+    try {
+        $stream = [System.IO.File]::OpenRead($Path)
+        $reader = New-Object System.IO.BinaryReader($stream)
+        if ($reader.ReadUInt16() -ne [uint16]0x5a4d) { return 'INVALID' }
+        $stream.Position = 0x3c
+        $peOffset = $reader.ReadInt32()
+        $stream.Position = $peOffset
+        if ($reader.ReadUInt32() -ne [uint32]0x00004550) { return 'INVALID' }
+        switch ([uint16]$reader.ReadUInt16()) {
+            ([uint16]0x8664) { return 'x64' }
+            ([uint16]0x014c) { return 'x86' }
+            default { return 'UNKNOWN' }
+        }
+    } catch {
+        return 'INVALID'
+    } finally {
+        if ($null -ne $reader) { $reader.Dispose() }
+        elseif ($null -ne $stream) { $stream.Dispose() }
+    }
+}
+
+function Test-I2gHarnessArtifactIdentity {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [string]$ExpectedPath
+    )
+
+    if ([string]::IsNullOrWhiteSpace($ExpectedPath)) {
+        $ExpectedPath = Join-Path $PSScriptRoot $I2gHarnessArtifactRelativePath
+    }
+    $expectedPath = [System.IO.Path]::GetFullPath($ExpectedPath)
+    $actualPath = [System.IO.Path]::GetFullPath($Path)
+    if (-not (Test-Path -LiteralPath $actualPath -PathType Leaf)) {
+        return [pscustomobject]@{
+            pass = $false
+            reason = 'MISSING_ARTIFACT'
+            path = $actualPath
+            expected_path = $expectedPath
+            sha256 = $null
+            architecture = $null
+        }
+    }
+    if ($actualPath -cne $expectedPath) {
+        return [pscustomobject]@{
+            pass = $false
+            reason = 'UNEXPECTED_ARTIFACT_PATH'
+            path = $actualPath
+            expected_path = $expectedPath
+            sha256 = (Get-FileHash -LiteralPath $actualPath -Algorithm SHA256).Hash
+            architecture = (Get-I2gHarnessArtifactArchitecture -Path $actualPath)
+        }
+    }
+    $hash = (Get-FileHash -LiteralPath $actualPath -Algorithm SHA256).Hash.ToUpperInvariant()
+    $architecture = Get-I2gHarnessArtifactArchitecture -Path $actualPath
+    $hashPass = $I2gHarnessArtifactSha256 -ne 'TO_BE_REBUILT' -and
+        $hash -ceq $I2gHarnessArtifactSha256
+    $architecturePass = $architecture -ceq $I2gHarnessArtifactArchitecture
+    [pscustomobject]@{
+        pass = $hashPass -and $architecturePass
+        reason = if ($hashPass -and $architecturePass) { 'PASS' } elseif (-not $hashPass) { 'SHA256_MISMATCH' } else { 'ARCHITECTURE_MISMATCH' }
+        path = $actualPath
+        expected_path = $expectedPath
+        sha256 = $hash
+        expected_sha256 = $I2gHarnessArtifactSha256
+        architecture = $architecture
+        expected_architecture = $I2gHarnessArtifactArchitecture
+    }
 }
 
 function Test-I2gFixedCliArguments {
@@ -166,6 +249,7 @@ function Get-I2gScenarioExpectation {
         'exit-nonzero' { 'DISCOVERY_FAILED'; break }
         'unexpected-preexisting-profile-right' { 'INVALID_NO_CAUSAL_INTERPRETATION'; break }
         'recovery-matrix' { 'INVALID_NO_CAUSAL_INTERPRETATION'; break }
+        'crash-window-matrix' { 'CRASH_RECOVERY_MATRIX'; break }
         default { throw "Unknown offline I2G scenario: $Scenario" }
     }
 }

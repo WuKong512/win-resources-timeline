@@ -125,17 +125,87 @@ impl I2gState {
     }
 
     pub fn can_transition_to(self, next: Self) -> bool {
+        // Recovery may reopen a failed or apparently-complete rollback when fresh machine
+        // observation proves cleanup is still required. INVALID remains unrecoverable.
+        if next == Self::RollbackRunning && self != Self::Invalid {
+            return true;
+        }
         if self.is_terminal() {
             return false;
         }
         if matches!(next, Self::Invalid | Self::Failed) {
             return true;
         }
-        if next == Self::RollbackRunning {
-            return true;
-        }
         next.rank() == self.rank() + 1
     }
+}
+
+/// A crash-safe ownership marker for one run-owned host mutation.
+///
+/// `mutation_intent_durable` is written before the mutation.  Recovery then combines that
+/// intent with a fresh machine readback.  A right/service that was already present is never
+/// inferred to be run-owned, even when the run later attempted the same mutation.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DurableOwnership {
+    pub preexisting: bool,
+    pub mutation_intent_durable: bool,
+    pub observed_present: bool,
+    pub owned_by_run: bool,
+    pub removal_intent_durable: bool,
+    pub removal_observed_absent: bool,
+}
+
+impl DurableOwnership {
+    fn capture_pre_state(&mut self, present: bool) {
+        self.preexisting = present;
+        self.observed_present = present;
+        self.owned_by_run = false;
+    }
+
+    fn begin_mutation(&mut self) {
+        self.mutation_intent_durable = true;
+        self.removal_intent_durable = false;
+        self.removal_observed_absent = false;
+    }
+
+    fn observe_after_mutation(&mut self, present: bool) {
+        self.observed_present = present;
+        self.owned_by_run = self.mutation_intent_durable && !self.preexisting && present;
+    }
+
+    fn reconcile_machine_observation(&mut self, present: bool) {
+        self.observed_present = present;
+        if self.mutation_intent_durable && !self.preexisting && present {
+            self.owned_by_run = true;
+        }
+        if !present && self.removal_observed_absent {
+            self.owned_by_run = false;
+        }
+    }
+
+    fn begin_removal(&mut self) {
+        self.removal_intent_durable = true;
+    }
+
+    fn observe_after_removal(&mut self, absent: bool) {
+        self.removal_observed_absent = absent;
+        self.observed_present = !absent;
+        if absent {
+            self.owned_by_run = false;
+        }
+    }
+}
+
+/// Durable child-spawn journal.  The spawn intent is written before launch; a later machine
+/// readback or completion evidence can therefore consume the run budget even if the count write
+/// itself was interrupted.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DurableDiscoveryLedger {
+    pub spawn_intent_durable: bool,
+    pub spawn_observed_durable: bool,
+    pub completion_observed_durable: bool,
+    pub child_pid: Option<u32>,
+    pub process_start_time: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -152,12 +222,26 @@ pub struct PersistedI2gState {
     pub service_name: String,
     pub service_sid: String,
     pub harness_sha256: String,
+    #[serde(default)]
+    pub service_ownership: DurableOwnership,
+    #[serde(default)]
+    pub system_profile_ownership: DurableOwnership,
+    #[serde(default)]
+    pub profile_single_ownership: DurableOwnership,
+    #[serde(default)]
+    pub control_discovery_ledger: DurableDiscoveryLedger,
+    #[serde(default)]
+    pub treatment_discovery_ledger: DurableDiscoveryLedger,
+    #[serde(default)]
+    pub rollback_cleanup_intent_durable: bool,
+    #[serde(default)]
+    pub rollback_step: String,
 }
 
 impl PersistedI2gState {
     pub fn new(service_name: &str, service_sid: &str, harness_sha256: &str) -> Self {
         Self {
-            schema: "amd-i2g-persisted-state/v1".to_owned(),
+            schema: "amd-i2g-persisted-state/v2".to_owned(),
             state: I2gState::Prepared,
             sequence: 0,
             actual_control_counter_discovery_runs: 0,
@@ -169,6 +253,13 @@ impl PersistedI2gState {
             service_name: service_name.to_owned(),
             service_sid: service_sid.to_owned(),
             harness_sha256: harness_sha256.to_owned(),
+            service_ownership: DurableOwnership::default(),
+            system_profile_ownership: DurableOwnership::default(),
+            profile_single_ownership: DurableOwnership::default(),
+            control_discovery_ledger: DurableDiscoveryLedger::default(),
+            treatment_discovery_ledger: DurableDiscoveryLedger::default(),
+            rollback_cleanup_intent_durable: false,
+            rollback_step: "NOT_STARTED".to_owned(),
         }
     }
 
@@ -182,6 +273,10 @@ impl PersistedI2gState {
         self.sequence = self.sequence.saturating_add(1);
         self.state = next;
         Ok(())
+    }
+
+    pub fn checkpoint(&mut self) {
+        self.sequence = self.sequence.saturating_add(1);
     }
 
     pub fn record_child_spawn(&mut self, phase: I2gPhase) -> Result<(), String> {
@@ -202,6 +297,40 @@ impl PersistedI2gState {
         *slot += 1;
         self.actual_total_counter_discovery_runs += 1;
         Ok(())
+    }
+
+    fn discovery_ledger_mut(&mut self, phase: I2gPhase) -> &mut DurableDiscoveryLedger {
+        match phase {
+            I2gPhase::Control => &mut self.control_discovery_ledger,
+            I2gPhase::Treatment => &mut self.treatment_discovery_ledger,
+        }
+    }
+
+    fn discovery_ledger(&self, phase: I2gPhase) -> &DurableDiscoveryLedger {
+        match phase {
+            I2gPhase::Control => &self.control_discovery_ledger,
+            I2gPhase::Treatment => &self.treatment_discovery_ledger,
+        }
+    }
+
+    fn begin_discovery_spawn(&mut self, phase: I2gPhase) {
+        self.discovery_ledger_mut(phase).spawn_intent_durable = true;
+    }
+
+    fn observe_discovery_spawn(
+        &mut self,
+        phase: I2gPhase,
+        child_pid: Option<u32>,
+        process_start_time: Option<u64>,
+    ) {
+        let ledger = self.discovery_ledger_mut(phase);
+        ledger.spawn_observed_durable = true;
+        ledger.child_pid = child_pid;
+        ledger.process_start_time = process_start_time;
+    }
+
+    fn observe_discovery_completion(&mut self, phase: I2gPhase) {
+        self.discovery_ledger_mut(phase).completion_observed_durable = true;
     }
 }
 
@@ -848,6 +977,7 @@ pub enum I2gSyntheticScenario {
     ExitNonzero,
     UnexpectedPreexistingProfileRight,
     RecoveryMatrix,
+    CrashWindowMatrix,
 }
 
 impl I2gSyntheticScenario {
@@ -883,6 +1013,7 @@ impl I2gSyntheticScenario {
                 Some(Self::UnexpectedPreexistingProfileRight)
             }
             "recovery-matrix" | "resume-recovery" => Some(Self::RecoveryMatrix),
+            "crash-window-matrix" | "crash-recovery-matrix" => Some(Self::CrashWindowMatrix),
             _ => None,
         }
     }
@@ -1076,6 +1207,33 @@ fn bounded_output(value: &str) -> String {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ProcessIdentity {
+    pub pid: u32,
+    pub process_start_time: u64,
+    pub role: String,
+    pub run_owned: bool,
+}
+
+impl ProcessIdentity {
+    fn discovery(phase: I2gPhase) -> Self {
+        Self {
+            pid: if phase == I2gPhase::Control {
+                4101
+            } else {
+                4201
+            },
+            process_start_time: if phase == I2gPhase::Control {
+                1001
+            } else {
+                1002
+            },
+            role: format!("{}_COUNTER_DISCOVERY", phase.as_str()),
+            run_owned: true,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct MachineObservation {
     pub service_present: bool,
     pub service_running: bool,
@@ -1083,27 +1241,163 @@ pub struct MachineObservation {
     pub token_present: bool,
     pub owned_process_count: u32,
     pub direct_service_sid_rights: Vec<String>,
+    #[serde(default)]
+    pub exact_child: Option<ProcessIdentity>,
+    #[serde(default)]
+    pub owned_processes: Vec<ProcessIdentity>,
+}
+
+impl MachineObservation {
+    fn is_quiescent(&self) -> bool {
+        !self.service_present
+            && !self.service_running
+            && self.service_pid == 0
+            && !self.token_present
+            && self.owned_process_count == 0
+            && self.exact_child.is_none()
+            && self.owned_processes.is_empty()
+    }
+
+    fn has_exact_child(&self, phase: I2gPhase) -> bool {
+        self.exact_child
+            .as_ref()
+            .is_some_and(|child| child.role == format!("{}_COUNTER_DISCOVERY", phase.as_str()))
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum RecoveryDecision {
+    NoAction,
+    ResumeTreatmentPolicy,
     ResumeControlTeardown,
-    ResumeTreatmentService,
+    ResumeTreatmentServiceOnly,
     ResumeRollback,
     Invalid,
 }
 
-pub fn reconcile_persisted_state(
-    persisted: I2gState,
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RecoveryReconciliation {
+    pub decision: RecoveryDecision,
+    pub recovered_control_counter_discovery_runs: u32,
+    pub recovered_treatment_counter_discovery_runs: u32,
+    pub recovered_total_counter_discovery_runs: u32,
+    pub inferred_service_owned_by_run: bool,
+    pub inferred_system_profile_owned_by_run: bool,
+    pub inferred_profile_single_owned_by_run: bool,
+    pub reason: String,
+}
+
+fn recover_spawn_count(
+    persisted: &mut PersistedI2gState,
+    phase: I2gPhase,
     actual: &MachineObservation,
-) -> RecoveryDecision {
-    match persisted {
-        I2gState::ControlServiceRunning => {
-            if actual.service_present && actual.service_running {
-                RecoveryDecision::ResumeControlTeardown
+) {
+    let ledger = persisted.discovery_ledger(phase).clone();
+    let proven_spawn = ledger.spawn_observed_durable
+        || ledger.completion_observed_durable
+        || actual.has_exact_child(phase);
+    if !ledger.spawn_intent_durable || !proven_spawn {
+        return;
+    }
+    let already_counted = match phase {
+        I2gPhase::Control => persisted.actual_control_counter_discovery_runs,
+        I2gPhase::Treatment => persisted.actual_treatment_counter_discovery_runs,
+    };
+    if already_counted == 0 && persisted.actual_total_counter_discovery_runs < I2G_MAX_TOTAL_RUNS {
+        match phase {
+            I2gPhase::Control => persisted.actual_control_counter_discovery_runs = 1,
+            I2gPhase::Treatment => persisted.actual_treatment_counter_discovery_runs = 1,
+        }
+        persisted.actual_total_counter_discovery_runs = persisted
+            .actual_control_counter_discovery_runs
+            .saturating_add(persisted.actual_treatment_counter_discovery_runs);
+    }
+}
+
+/// Reconcile durable intent with a fresh machine observation.  An inconsistent observation is
+/// deliberately routed to rollback, never to discovery retry.  Only the explicit `Invalid`
+/// persisted state is unrecoverable by contract; terminal clean states are `NoAction`.
+pub fn reconcile_persisted_state(
+    persisted: &mut PersistedI2gState,
+    actual: &MachineObservation,
+) -> RecoveryReconciliation {
+    persisted
+        .service_ownership
+        .reconcile_machine_observation(actual.service_present);
+    persisted
+        .system_profile_ownership
+        .reconcile_machine_observation(
+            actual
+                .direct_service_sid_rights
+                .iter()
+                .any(|right| right.eq_ignore_ascii_case(CONTROL_REQUIRED_RIGHT)),
+        );
+    persisted
+        .profile_single_ownership
+        .reconcile_machine_observation(
+            actual
+                .direct_service_sid_rights
+                .iter()
+                .any(|right| right.eq_ignore_ascii_case(TREATMENT_RIGHT)),
+        );
+    recover_spawn_count(persisted, I2gPhase::Control, actual);
+    recover_spawn_count(persisted, I2gPhase::Treatment, actual);
+    persisted.service_created = persisted.service_ownership.owned_by_run;
+    persisted.system_profile_right_added_by_run = persisted.system_profile_ownership.owned_by_run;
+    persisted.profile_single_right_added_by_run = persisted.profile_single_ownership.owned_by_run;
+
+    let rights = normalized_set(&actual.direct_service_sid_rights);
+    let control_right = rights.contains(&CONTROL_REQUIRED_RIGHT.to_ascii_lowercase());
+    let treatment_right = rights.contains(&TREATMENT_RIGHT.to_ascii_lowercase());
+    let control_teardown_ready = actual.service_present
+        && !actual.service_running
+        && actual.service_pid == 0
+        && !actual.token_present
+        && actual.exact_child.is_none()
+        && actual.owned_process_count == 0
+        && actual.owned_processes.is_empty();
+    let treatment_setup_ready = treatment_right
+        && control_right
+        && actual.service_present
+        && !actual.service_running
+        && actual.service_pid == 0
+        && !actual.token_present
+        && actual.exact_child.is_none()
+        && actual.owned_process_count == 0
+        && actual.owned_processes.is_empty();
+    let treatment_policy_owned = persisted.profile_single_ownership.mutation_intent_durable
+        && !persisted.profile_single_ownership.preexisting
+        && persisted.profile_single_ownership.owned_by_run;
+
+    let (decision, reason) = match persisted.state {
+        I2gState::Prepared => {
+            if actual.is_quiescent() && !control_right && !treatment_right {
+                (
+                    RecoveryDecision::NoAction,
+                    "prepared and machine is quiescent",
+                )
             } else {
-                RecoveryDecision::ResumeRollback
+                (
+                    RecoveryDecision::ResumeRollback,
+                    "prepared state has unexpected machine residue",
+                )
+            }
+        }
+        I2gState::ControlPolicyReady
+        | I2gState::ControlServiceRunning
+        | I2gState::ControlTokenReady
+        | I2gState::ControlDiscoveryRunning => {
+            if actual.service_present {
+                (
+                    RecoveryDecision::ResumeControlTeardown,
+                    "CONTROL state never resumes discovery; teardown/rollback is required",
+                )
+            } else {
+                (
+                    RecoveryDecision::ResumeRollback,
+                    "CONTROL service is absent or inconsistent; fail closed to rollback",
+                )
             }
         }
         I2gState::ControlComplete => {
@@ -1111,28 +1405,99 @@ pub fn reconcile_persisted_state(
                 && !actual.service_running
                 && actual.service_pid == 0
                 && !actual.token_present
+                && actual.exact_child.is_none()
                 && actual.owned_process_count == 0
+                && actual.owned_processes.is_empty()
             {
-                RecoveryDecision::ResumeControlTeardown
+                (
+                    RecoveryDecision::ResumeControlTeardown,
+                    "CONTROL completed; durable teardown evidence still needs cleanup",
+                )
             } else {
-                RecoveryDecision::ResumeRollback
+                (
+                    RecoveryDecision::ResumeRollback,
+                    "CONTROL completion and machine observation are inconsistent",
+                )
+            }
+        }
+        I2gState::ControlTeardownComplete => {
+            if !control_teardown_ready || !control_right {
+                (
+                    RecoveryDecision::ResumeRollback,
+                    "CONTROL teardown observation is incomplete or inconsistent",
+                )
+            } else if treatment_right && !treatment_policy_owned {
+                (
+                    RecoveryDecision::ResumeRollback,
+                    "TREATMENT right is present without durable run-owned policy intent",
+                )
+            } else if treatment_policy_owned {
+                (
+                    RecoveryDecision::ResumeTreatmentServiceOnly,
+                    "TREATMENT policy mutation is durable; resume service/token path only",
+                )
+            } else {
+                (
+                    RecoveryDecision::ResumeTreatmentPolicy,
+                    "CONTROL teardown is durable; resume TREATMENT policy path only",
+                )
             }
         }
         I2gState::TreatmentPolicyReady => {
-            let rights = normalized_set(&actual.direct_service_sid_rights);
-            if actual.service_present
-                && !actual.service_running
-                && rights.contains(&CONTROL_REQUIRED_RIGHT.to_ascii_lowercase())
-                && rights.contains(&TREATMENT_RIGHT.to_ascii_lowercase())
-            {
-                RecoveryDecision::ResumeTreatmentService
+            if treatment_setup_ready && treatment_policy_owned {
+                (
+                    RecoveryDecision::ResumeTreatmentServiceOnly,
+                    "TREATMENT policy is durable; resume service/token path only",
+                )
             } else {
-                RecoveryDecision::ResumeRollback
+                (
+                    RecoveryDecision::ResumeRollback,
+                    "TREATMENT policy/service observation is inconsistent",
+                )
             }
         }
-        I2gState::TreatmentComplete | I2gState::RollbackRunning => RecoveryDecision::ResumeRollback,
-        I2gState::RollbackComplete => RecoveryDecision::Invalid,
-        _ => RecoveryDecision::Invalid,
+        I2gState::TreatmentServiceRunning
+        | I2gState::TreatmentTokenReady
+        | I2gState::TreatmentDiscoveryRunning
+        | I2gState::TreatmentComplete
+        | I2gState::RollbackRunning
+        | I2gState::Failed => (
+            RecoveryDecision::ResumeRollback,
+            "in-progress or failed state resumes rollback only",
+        ),
+        I2gState::RollbackComplete => {
+            if actual.is_quiescent()
+                && !persisted.service_ownership.owned_by_run
+                && !persisted.system_profile_ownership.owned_by_run
+                && !persisted.profile_single_ownership.owned_by_run
+            {
+                (
+                    RecoveryDecision::NoAction,
+                    "rollback is durable and machine is quiescent",
+                )
+            } else {
+                (
+                    RecoveryDecision::ResumeRollback,
+                    "rollback is not durably reflected by machine observation",
+                )
+            }
+        }
+        I2gState::Invalid => (
+            RecoveryDecision::Invalid,
+            "INVALID is the only persisted state that is unrecoverable by contract",
+        ),
+    };
+
+    RecoveryReconciliation {
+        decision,
+        recovered_control_counter_discovery_runs: persisted.actual_control_counter_discovery_runs,
+        recovered_treatment_counter_discovery_runs: persisted
+            .actual_treatment_counter_discovery_runs,
+        recovered_total_counter_discovery_runs: persisted.actual_total_counter_discovery_runs,
+        inferred_service_owned_by_run: persisted.service_ownership.owned_by_run,
+        inferred_system_profile_owned_by_run: persisted.system_profile_ownership.owned_by_run,
+        inferred_profile_single_owned_by_run: persisted.profile_single_ownership.owned_by_run,
+        reason: reason.to_owned(),
     }
 }
 
@@ -1211,6 +1576,9 @@ impl fmt::Display for I2gResult {
 pub struct RollbackEvidence {
     pub cleanup_result: String,
     pub stop_accepting_work: bool,
+    pub child_was_owned: bool,
+    pub amd_child_absent: bool,
+    pub exact_child_identity_absent: bool,
     pub treatment_child_absent: bool,
     pub service_stopped: bool,
     pub service_pid_zero: bool,
@@ -1224,6 +1592,7 @@ pub struct RollbackEvidence {
     pub service_deleted: bool,
     pub service_absent: bool,
     pub owned_processes_absent: bool,
+    pub recovery_required: bool,
     pub system_profile_right_added_by_run: bool,
     pub profile_single_right_added_by_run: bool,
     pub events: Vec<String>,
@@ -1383,6 +1752,8 @@ impl I2gBackend for RealWindowsI2gBackend {
             token_present: false,
             owned_process_count: 0,
             direct_service_sid_rights: Vec::new(),
+            exact_child: None,
+            owned_processes: Vec::new(),
         }
     }
 
@@ -1424,8 +1795,30 @@ impl I2gBackend for RealWindowsI2gBackend {
     }
 
     fn discover(&mut self, phase: I2gPhase) -> DiscoveryEvidence {
-        let mut adapter = SyntheticDiscoveryAdapter::new(I2gSyntheticScenario::IdentityMismatch);
-        adapter.launch(phase)
+        DiscoveryEvidence {
+            phase,
+            operation: I2G_OPERATION.to_owned(),
+            fixed_cli_arguments: I2G_FIXED_AMD_ARGUMENTS
+                .iter()
+                .map(|value| (*value).to_owned())
+                .collect(),
+            sampling: false,
+            child_spawned: false,
+            actual_run_count_incremented: false,
+            child_pid: None,
+            process_start_time: None,
+            exit_code: None,
+            stdout: String::new(),
+            stderr: "I2G real backend is not authorized".to_owned(),
+            stdout_bounded: true,
+            stderr_bounded: true,
+            timeout: false,
+            identity_gate_pass: false,
+            owned_child: false,
+            orphan_child: false,
+            no_counters_diagnostic: false,
+            classification: "REAL_EXECUTION_NOT_AUTHORIZED".to_owned(),
+        }
     }
 
     fn mutation_assertions(&self) -> I2gMutationAssertions {
@@ -1442,6 +1835,8 @@ pub struct SyntheticBackend {
     pub service_pid: u32,
     pub token_present: bool,
     pub active_phase: Option<I2gPhase>,
+    pub exact_child: Option<ProcessIdentity>,
+    pub owned_processes: Vec<ProcessIdentity>,
     pub enabled_privileges: BTreeSet<String>,
     pub adapter: SyntheticDiscoveryAdapter,
     pub mutations: I2gMutationAssertions,
@@ -1462,6 +1857,8 @@ impl SyntheticBackend {
             service_pid: 0,
             token_present: false,
             active_phase: None,
+            exact_child: None,
+            owned_processes: Vec::new(),
             enabled_privileges: BTreeSet::new(),
             adapter: SyntheticDiscoveryAdapter::new(scenario),
             mutations: I2gMutationAssertions::default(),
@@ -1476,6 +1873,11 @@ impl SyntheticBackend {
             self.policy.direct_rights = normalized_right_vec(&self.policy.direct_rights);
             self.mutations.synthetic_policy_adds += 1;
         }
+    }
+
+    fn finish_child(&mut self) {
+        self.exact_child = None;
+        self.owned_processes.clear();
     }
 }
 
@@ -1516,6 +1918,8 @@ impl I2gBackend for SyntheticBackend {
             self.service_pid = 0;
             self.token_present = false;
             self.active_phase = None;
+            self.exact_child = None;
+            self.owned_processes.clear();
             self.enabled_privileges.clear();
             self.mutations.synthetic_service_stops += 1;
         }
@@ -1541,8 +1945,10 @@ impl I2gBackend for SyntheticBackend {
             service_running: self.service_running,
             service_pid: self.service_pid,
             token_present: self.token_present,
-            owned_process_count: 0,
+            owned_process_count: self.owned_processes.len() as u32,
             direct_service_sid_rights: normalized_right_vec(&self.policy.direct_rights),
+            exact_child: self.exact_child.clone(),
+            owned_processes: self.owned_processes.clone(),
         }
     }
 
@@ -1701,6 +2107,14 @@ impl I2gBackend for SyntheticBackend {
         let evidence = self.adapter.launch(phase);
         if evidence.child_spawned {
             self.mutations.synthetic_discovery_launches += 1;
+            let mut child = ProcessIdentity::discovery(phase);
+            child.run_owned = evidence.owned_child;
+            self.exact_child = Some(child.clone());
+            self.owned_processes = if child.run_owned {
+                vec![child]
+            } else {
+                Vec::new()
+            };
         }
         evidence
     }
@@ -1942,6 +2356,79 @@ impl RunContext {
         self.writer.write_state(&self.persisted)
     }
 
+    fn checkpoint(&mut self) -> Result<(), String> {
+        self.persisted.checkpoint();
+        self.writer.write_state(&self.persisted)
+    }
+
+    fn begin_service_mutation(&mut self, preexisting: bool) -> Result<(), String> {
+        self.persisted
+            .service_ownership
+            .capture_pre_state(preexisting);
+        self.persisted.service_ownership.begin_mutation();
+        self.checkpoint()
+    }
+
+    fn observe_service_mutation(&mut self, present: bool) -> Result<(), String> {
+        self.persisted
+            .service_ownership
+            .observe_after_mutation(present);
+        self.persisted.service_created = self.persisted.service_ownership.owned_by_run;
+        self.checkpoint()
+    }
+
+    fn begin_policy_mutation(&mut self, right: &str, preexisting: bool) -> Result<(), String> {
+        let ownership = if right.eq_ignore_ascii_case(CONTROL_REQUIRED_RIGHT) {
+            &mut self.persisted.system_profile_ownership
+        } else {
+            &mut self.persisted.profile_single_ownership
+        };
+        ownership.capture_pre_state(preexisting);
+        ownership.begin_mutation();
+        self.checkpoint()
+    }
+
+    fn observe_policy_mutation(&mut self, right: &str, present: bool) -> Result<(), String> {
+        let ownership = if right.eq_ignore_ascii_case(CONTROL_REQUIRED_RIGHT) {
+            &mut self.persisted.system_profile_ownership
+        } else {
+            &mut self.persisted.profile_single_ownership
+        };
+        ownership.observe_after_mutation(present);
+        if right.eq_ignore_ascii_case(CONTROL_REQUIRED_RIGHT) {
+            self.persisted.system_profile_right_added_by_run = ownership.owned_by_run;
+        } else {
+            self.persisted.profile_single_right_added_by_run = ownership.owned_by_run;
+        }
+        self.checkpoint()
+    }
+
+    fn begin_discovery(&mut self, phase: I2gPhase) -> Result<(), String> {
+        self.persisted.begin_discovery_spawn(phase);
+        self.checkpoint()
+    }
+
+    fn observe_discovery_spawn(
+        &mut self,
+        phase: I2gPhase,
+        discovery: &DiscoveryEvidence,
+    ) -> Result<(), String> {
+        if discovery.child_spawned {
+            self.persisted.observe_discovery_spawn(
+                phase,
+                discovery.child_pid,
+                discovery.process_start_time,
+            );
+            self.checkpoint()?;
+        }
+        Ok(())
+    }
+
+    fn observe_discovery_completion(&mut self, phase: I2gPhase) -> Result<(), String> {
+        self.persisted.observe_discovery_completion(phase);
+        self.checkpoint()
+    }
+
     fn write<T: Serialize>(&mut self, name: &str, value: &T) -> Result<(), String> {
         self.writer.write(name, value)
     }
@@ -2003,18 +2490,32 @@ fn execute_control(ctx: &mut RunContext) -> Result<(), String> {
         );
         return Ok(());
     }
+    let service_preexisting = ctx.backend.machine_observation().service_present;
+    if service_preexisting {
+        ctx.fail(
+            I2gResult::InvalidNoCausalInterpretation,
+            "UNEXPECTED_PREEXISTING_SERVICE",
+        );
+        return Ok(());
+    }
+    ctx.begin_service_mutation(service_preexisting)?;
     ctx.backend
         .service_create(&ctx.control_configuration)
         .map_err(|error| error.to_string())?;
-    ctx.persisted.service_created = true;
+    ctx.observe_service_mutation(ctx.backend.machine_observation().service_present)?;
     ctx.transition(I2gState::ControlPolicyReady)?;
+    ctx.begin_policy_mutation(
+        CONTROL_REQUIRED_RIGHT,
+        initial_policy.has_right(CONTROL_REQUIRED_RIGHT),
+    )?;
     ctx.backend
         .add_policy_right(CONTROL_REQUIRED_RIGHT)
         .map_err(|error| error.to_string())?;
     let policy_after = ctx.backend.read_policy();
-    ctx.persisted.system_profile_right_added_by_run = !initial_policy
-        .has_right(CONTROL_REQUIRED_RIGHT)
-        && policy_after.has_right(CONTROL_REQUIRED_RIGHT);
+    ctx.observe_policy_mutation(
+        CONTROL_REQUIRED_RIGHT,
+        policy_after.has_right(CONTROL_REQUIRED_RIGHT),
+    )?;
     ctx.check(
         "CONTROL_POLICY_EXACT_RIGHT",
         policy_after.direct_rights.len() == 1 && policy_after.has_right(CONTROL_REQUIRED_RIGHT),
@@ -2087,10 +2588,15 @@ fn execute_control(ctx: &mut RunContext) -> Result<(), String> {
         return Ok(());
     }
     ctx.transition(I2gState::ControlDiscoveryRunning)?;
+    ctx.begin_discovery(I2gPhase::Control)?;
     let discovery = ctx.backend.discover(I2gPhase::Control);
+    ctx.observe_discovery_spawn(I2gPhase::Control, &discovery)?;
     if discovery.child_spawned {
         ctx.persisted.record_child_spawn(I2gPhase::Control)?;
+        ctx.checkpoint()?;
     }
+    ctx.backend.finish_child();
+    ctx.observe_discovery_completion(I2gPhase::Control)?;
     ctx.write("CONTROL-DISCOVERY.json", &discovery)?;
     let valid_negative = discovery.classification == "POWER_UNAVAILABLE"
         && discovery.identity_gate_pass
@@ -2117,21 +2623,29 @@ fn execute_control(ctx: &mut RunContext) -> Result<(), String> {
         ctx.treatment_allowed = false;
     }
     ctx.transition(I2gState::ControlComplete)?;
+    let child_was_owned = discovery.child_spawned && discovery.owned_child;
     let _ = ctx.backend.service_stop();
     let observation = ctx.backend.machine_observation();
     let teardown_pass = !observation.service_running
         && observation.service_pid == 0
         && !observation.token_present
-        && observation.owned_process_count == 0;
+        && observation.owned_process_count == 0
+        && observation.exact_child.is_none()
+        && observation.owned_processes.is_empty();
+    let amd_child_absent = observation.exact_child.is_none()
+        && observation.owned_process_count == 0
+        && observation.owned_processes.is_empty();
     ctx.write(
         "CONTROL-TEARDOWN.json",
         &json!({
             "control_teardown": if teardown_pass { "PASS" } else { "FAILED" },
-            "amd_child_absent": !discovery.child_spawned || discovery.owned_child,
+            "child_was_owned": child_was_owned,
+            "amd_child_absent": amd_child_absent,
             "service_stopped": !observation.service_running,
             "service_pid": observation.service_pid,
             "control_token_gone": !observation.token_present,
             "owned_process_tree_empty": observation.owned_process_count == 0,
+            "exact_child_identity_absent": observation.exact_child.is_none(),
         }),
     )?;
     ctx.check(
@@ -2160,15 +2674,16 @@ fn execute_treatment(ctx: &mut RunContext) -> Result<(), String> {
         return Ok(());
     }
     let before = ctx.backend.read_policy();
+    ctx.begin_policy_mutation(TREATMENT_RIGHT, before.has_right(TREATMENT_RIGHT))?;
     ctx.backend
         .add_policy_right(TREATMENT_RIGHT)
         .map_err(|error| error.to_string())?;
+    let after_add = ctx.backend.read_policy();
+    ctx.observe_policy_mutation(TREATMENT_RIGHT, after_add.has_right(TREATMENT_RIGHT))?;
     if ctx.backend.scenario == I2gSyntheticScenario::ConfigDeltaFailure {
         ctx.backend.inject_extra_configuration_right();
     }
     let after = ctx.backend.read_policy();
-    ctx.persisted.profile_single_right_added_by_run =
-        !before.has_right(TREATMENT_RIGHT) && after.has_right(TREATMENT_RIGHT);
     let policy_comparison = compare_policy_delta(&before, &after);
     ctx.treatment_configuration.direct_service_sid_rights = after.direct_rights.clone();
     ctx.write("TREATMENT-POLICY.json", &json!({
@@ -2306,10 +2821,15 @@ fn execute_treatment(ctx: &mut RunContext) -> Result<(), String> {
     }
     ctx.treatment_allowed = true;
     ctx.transition(I2gState::TreatmentDiscoveryRunning)?;
+    ctx.begin_discovery(I2gPhase::Treatment)?;
     let discovery = ctx.backend.discover(I2gPhase::Treatment);
+    ctx.observe_discovery_spawn(I2gPhase::Treatment, &discovery)?;
     if discovery.child_spawned {
         ctx.persisted.record_child_spawn(I2gPhase::Treatment)?;
+        ctx.checkpoint()?;
     }
+    ctx.backend.finish_child();
+    ctx.observe_discovery_completion(I2gPhase::Treatment)?;
     ctx.write(
         "TREATMENT-AMD-IDENTITY.json",
         &ctx.backend.amd_identity(I2gPhase::Treatment),
@@ -2336,29 +2856,78 @@ fn execute_rollback(ctx: &mut RunContext) -> Result<RollbackEvidence, String> {
     }
     let mut events = vec!["STOP_ACCEPTING_WORK".to_owned()];
     let mut cleanup_ok = true;
+    ctx.persisted.rollback_cleanup_intent_durable = true;
+    ctx.persisted.rollback_step = "ROLLBACK_STARTED".to_owned();
+    ctx.checkpoint()?;
+
+    let before_child_cleanup = ctx.backend.machine_observation();
+    let child_was_owned = before_child_cleanup
+        .exact_child
+        .as_ref()
+        .is_some_and(|child| child.run_owned);
     events.push("TREATMENT_CHILD_FINISHED_OR_KILLED_EXACT_OWNER".to_owned());
+    ctx.backend.finish_child();
+    let after_child_cleanup = ctx.backend.machine_observation();
+    let exact_child_identity_absent = after_child_cleanup.exact_child.is_none();
+    let amd_child_absent = exact_child_identity_absent
+        && after_child_cleanup.owned_process_count == 0
+        && after_child_cleanup.owned_processes.is_empty();
+    ctx.persisted.rollback_step = "CHILD_CLEANUP_OBSERVED".to_owned();
+    ctx.checkpoint()?;
     events.push("AMD_CHILD_ABSENT".to_owned());
     let _ = ctx.backend.service_stop();
     let stopped = ctx.backend.machine_observation();
     let service_stopped = !stopped.service_running;
     let service_pid_zero = stopped.service_pid == 0;
     let token_gone = !stopped.token_present;
-    let owned_process_tree_empty = stopped.owned_process_count == 0;
-    cleanup_ok &= service_stopped && service_pid_zero && token_gone && owned_process_tree_empty;
+    let owned_process_tree_empty = stopped.owned_process_count == 0
+        && stopped.owned_processes.is_empty()
+        && stopped.exact_child.is_none();
+    cleanup_ok &= service_stopped
+        && service_pid_zero
+        && token_gone
+        && owned_process_tree_empty
+        && amd_child_absent;
+    ctx.persisted.rollback_step = "SERVICE_STOP_OBSERVED".to_owned();
+    ctx.checkpoint()?;
     events.push("SERVICE_STOPPED".to_owned());
     events.push("SERVICE_PID_ZERO_AND_TOKEN_GONE".to_owned());
     events.push("OWNED_PROCESS_TREE_EMPTY".to_owned());
     events.push("INSPECT_DIRECT_SERVICE_SID_RIGHTS".to_owned());
 
-    let profile_owned = ctx.persisted.profile_single_right_added_by_run;
+    let policy = ctx.backend.read_policy();
+    ctx.persisted
+        .service_ownership
+        .reconcile_machine_observation(stopped.service_present);
+    ctx.persisted
+        .system_profile_ownership
+        .reconcile_machine_observation(policy.has_right(CONTROL_REQUIRED_RIGHT));
+    ctx.persisted
+        .profile_single_ownership
+        .reconcile_machine_observation(policy.has_right(TREATMENT_RIGHT));
+    ctx.persisted.service_created = ctx.persisted.service_ownership.owned_by_run;
+    ctx.persisted.system_profile_right_added_by_run =
+        ctx.persisted.system_profile_ownership.owned_by_run;
+    ctx.persisted.profile_single_right_added_by_run =
+        ctx.persisted.profile_single_ownership.owned_by_run;
+
+    let profile_owned = ctx.persisted.profile_single_ownership.owned_by_run;
     let mut profile_attempted = false;
     let mut profile_verified = !profile_owned;
     if profile_owned {
         profile_attempted = true;
+        ctx.persisted.profile_single_ownership.begin_removal();
+        ctx.persisted.rollback_step = "PROFILE_SINGLE_REMOVE_INTENT".to_owned();
+        ctx.checkpoint()?;
         match ctx.backend.remove_policy_right(TREATMENT_RIGHT) {
             Ok(()) => {
                 let rights = ctx.backend.read_policy();
                 profile_verified = !rights.has_right(TREATMENT_RIGHT);
+                ctx.persisted
+                    .profile_single_ownership
+                    .observe_after_removal(profile_verified);
+                ctx.persisted.rollback_step = "PROFILE_SINGLE_REMOVE_OBSERVED".to_owned();
+                ctx.checkpoint()?;
                 events.push("REMOVE_PROFILE_SINGLE_DUAL_READBACK".to_owned());
             }
             Err(error) => {
@@ -2372,15 +2941,23 @@ fn execute_rollback(ctx: &mut RunContext) -> Result<RollbackEvidence, String> {
     }
     cleanup_ok &= profile_verified;
 
-    let system_owned = ctx.persisted.system_profile_right_added_by_run;
+    let system_owned = ctx.persisted.system_profile_ownership.owned_by_run;
     let mut system_attempted = false;
     let mut system_verified = !system_owned;
     if system_owned {
         system_attempted = true;
+        ctx.persisted.system_profile_ownership.begin_removal();
+        ctx.persisted.rollback_step = "SYSTEM_PROFILE_REMOVE_INTENT".to_owned();
+        ctx.checkpoint()?;
         match ctx.backend.remove_policy_right(CONTROL_REQUIRED_RIGHT) {
             Ok(()) => {
                 let rights = ctx.backend.read_policy();
                 system_verified = !rights.has_right(CONTROL_REQUIRED_RIGHT);
+                ctx.persisted
+                    .system_profile_ownership
+                    .observe_after_removal(system_verified);
+                ctx.persisted.rollback_step = "SYSTEM_PROFILE_REMOVE_OBSERVED".to_owned();
+                ctx.checkpoint()?;
                 events.push("REMOVE_SYSTEM_PROFILE_DUAL_READBACK".to_owned());
             }
             Err(error) => {
@@ -2394,8 +2971,18 @@ fn execute_rollback(ctx: &mut RunContext) -> Result<RollbackEvidence, String> {
     }
     cleanup_ok &= system_verified;
 
-    let service_deleted = if ctx.persisted.service_created {
-        ctx.backend.service_delete().is_ok()
+    let service_owned = ctx.persisted.service_ownership.owned_by_run;
+    let service_deleted = if service_owned {
+        ctx.persisted.rollback_step = "SERVICE_DELETE_INTENT".to_owned();
+        ctx.checkpoint()?;
+        let deleted = ctx.backend.service_delete().is_ok();
+        let service_present = ctx.backend.machine_observation().service_present;
+        ctx.persisted
+            .service_ownership
+            .observe_after_removal(!service_present);
+        ctx.persisted.rollback_step = "SERVICE_DELETE_OBSERVED".to_owned();
+        ctx.checkpoint()?;
+        deleted
     } else {
         true
     };
@@ -2418,7 +3005,10 @@ fn execute_rollback(ctx: &mut RunContext) -> Result<RollbackEvidence, String> {
     Ok(RollbackEvidence {
         cleanup_result: if cleanup_ok { "PASS" } else { "FAILED" }.to_owned(),
         stop_accepting_work: true,
-        treatment_child_absent: true,
+        child_was_owned,
+        amd_child_absent,
+        exact_child_identity_absent,
+        treatment_child_absent: amd_child_absent,
         service_stopped,
         service_pid_zero,
         token_gone,
@@ -2430,7 +3020,8 @@ fn execute_rollback(ctx: &mut RunContext) -> Result<RollbackEvidence, String> {
         system_profile_remove_verified: system_verified,
         service_deleted,
         service_absent,
-        owned_processes_absent: true,
+        owned_processes_absent: owned_process_tree_empty,
+        recovery_required: !cleanup_ok,
         system_profile_right_added_by_run: system_owned,
         profile_single_right_added_by_run: profile_owned,
         events,
@@ -2461,14 +3052,169 @@ fn required_evidence_files() -> [&'static str; 19] {
     ]
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RecoveryExecutionSummary {
+    pub schema: String,
+    pub persisted_state: I2gState,
+    pub decision: RecoveryDecision,
+    pub recovery_required: bool,
+    pub discovery_relaunched: bool,
+    pub control_counter_discovery_runs: u32,
+    pub treatment_counter_discovery_runs: u32,
+    pub total_counter_discovery_runs: u32,
+    pub cleanup_result: String,
+    pub causal_interpretation_valid: bool,
+    pub reason: String,
+    pub rollback: Option<RollbackEvidence>,
+}
+
+/// Load only the latest durable state record.  This function never treats an evidence result as
+/// authority for host state; callers must immediately obtain a fresh `MachineObservation` from
+/// the backend and reconcile both sources.
+pub fn load_latest_persisted_state(root: &Path) -> Result<PersistedI2gState, String> {
+    let mut states = Vec::new();
+    let entries = fs::read_dir(root).map_err(|error| format!("read persisted state: {error}"))?;
+    for entry in entries {
+        let entry = entry.map_err(|error| format!("read persisted state entry: {error}"))?;
+        let name = entry.file_name().to_string_lossy().to_string();
+        if !name.starts_with("STATE-") || !name.ends_with(".json") {
+            continue;
+        }
+        let state: PersistedI2gState = serde_json::from_slice(
+            &fs::read(entry.path()).map_err(|error| format!("read {name}: {error}"))?,
+        )
+        .map_err(|error| format!("parse {name}: {error}"))?;
+        states.push(state);
+    }
+    states
+        .into_iter()
+        .max_by_key(|state| state.sequence)
+        .ok_or_else(|| "no durable I2G state record found".to_owned())
+}
+
+fn context_from_recovery(
+    persisted: PersistedI2gState,
+    backend: SyntheticBackend,
+    evidence_root: &Path,
+) -> RunContext {
+    let mut context = RunContext::new(I2gSyntheticScenario::Happy, Some(evidence_root));
+    context.persisted = persisted;
+    context.backend = backend;
+    context
+}
+
+fn resume_treatment_without_discovery(ctx: &mut RunContext) -> Result<(), String> {
+    if ctx.persisted.state == I2gState::ControlTeardownComplete {
+        let current = ctx.backend.read_policy();
+        if !current.has_right(TREATMENT_RIGHT) {
+            ctx.begin_policy_mutation(TREATMENT_RIGHT, false)?;
+            ctx.backend
+                .add_policy_right(TREATMENT_RIGHT)
+                .map_err(|error| error.to_string())?;
+            let after = ctx.backend.read_policy();
+            ctx.observe_policy_mutation(TREATMENT_RIGHT, after.has_right(TREATMENT_RIGHT))?;
+        }
+        ctx.transition(I2gState::TreatmentPolicyReady)?;
+    }
+    if ctx.persisted.state == I2gState::TreatmentPolicyReady {
+        if !ctx.backend.service_running {
+            ctx.backend
+                .service_start(I2gPhase::Treatment)
+                .map_err(|error| error.to_string())?;
+        }
+        ctx.transition(I2gState::TreatmentServiceRunning)?;
+        // Recovery may materialize a new treatment token, but it must not launch discovery.
+        if ctx.backend.token_present {
+            ctx.transition(I2gState::TreatmentTokenReady)?;
+        }
+    }
+    Ok(())
+}
+
+/// Execute the recovery seam against a synthetic backend after a simulated process restart.
+/// The backend is the machine world; the state file is the durable run journal.  No discovery
+/// method is called on this path.
+pub fn execute_synthetic_recovery(
+    evidence_root: &Path,
+    backend: &mut SyntheticBackend,
+) -> Result<RecoveryExecutionSummary, String> {
+    let persisted = load_latest_persisted_state(evidence_root)?;
+    let initial_state = persisted.state;
+    let launches_before = backend.adapter.launches;
+    let mut context = context_from_recovery(persisted, backend.clone(), evidence_root);
+    let observation = context.backend.machine_observation();
+    let reconciliation = reconcile_persisted_state(&mut context.persisted, &observation);
+    context.checkpoint()?;
+
+    let rollback = match reconciliation.decision {
+        RecoveryDecision::NoAction => None,
+        RecoveryDecision::Invalid => None,
+        RecoveryDecision::ResumeTreatmentPolicy | RecoveryDecision::ResumeTreatmentServiceOnly => {
+            resume_treatment_without_discovery(&mut context)?;
+            Some(execute_rollback(&mut context)?)
+        }
+        RecoveryDecision::ResumeControlTeardown | RecoveryDecision::ResumeRollback => {
+            Some(execute_rollback(&mut context)?)
+        }
+    };
+    *backend = context.backend.clone();
+    let discovery_relaunched = backend.adapter.launches != launches_before;
+    let cleanup_result = rollback
+        .as_ref()
+        .map(|value| value.cleanup_result.clone())
+        .unwrap_or_else(|| {
+            if reconciliation.decision == RecoveryDecision::Invalid {
+                "FAILED".to_owned()
+            } else {
+                "PASS".to_owned()
+            }
+        });
+    // A recovered/crashed pair is never scientifically admissible merely because cleanup passed.
+    // The recovery seam is teardown/resume infrastructure, not a discovery completion proof.
+    let causal_interpretation_valid = false;
+    let recovery_required = reconciliation.decision != RecoveryDecision::NoAction
+        || rollback
+            .as_ref()
+            .is_some_and(|value| value.recovery_required);
+    let summary = RecoveryExecutionSummary {
+        schema: "amd-i2g-recovery-execution/v1".to_owned(),
+        persisted_state: initial_state,
+        decision: reconciliation.decision,
+        recovery_required,
+        discovery_relaunched,
+        control_counter_discovery_runs: context.persisted.actual_control_counter_discovery_runs,
+        treatment_counter_discovery_runs: context.persisted.actual_treatment_counter_discovery_runs,
+        total_counter_discovery_runs: context.persisted.actual_total_counter_discovery_runs,
+        cleanup_result,
+        causal_interpretation_valid,
+        reason: reconciliation.reason,
+        rollback,
+    };
+    atomic_write_json(&evidence_root.join("RECOVERY-SUMMARY.json"), &summary)
+        .map_err(|error| format!("RECOVERY-SUMMARY.json: {error}"))?;
+    Ok(summary)
+}
+
 fn execute_recovery_matrix() -> Vec<I2gCheck> {
-    let clean = MachineObservation {
+    let quiescent = MachineObservation {
+        service_present: false,
+        service_running: false,
+        service_pid: 0,
+        token_present: false,
+        owned_process_count: 0,
+        direct_service_sid_rights: Vec::new(),
+        exact_child: None,
+        owned_processes: Vec::new(),
+    };
+    let service_ready = MachineObservation {
         service_present: true,
         service_running: false,
         service_pid: 0,
         token_present: false,
         owned_process_count: 0,
         direct_service_sid_rights: vec![CONTROL_REQUIRED_RIGHT.to_owned()],
+        exact_child: None,
+        owned_processes: Vec::new(),
     };
     let running = MachineObservation {
         service_present: true,
@@ -2477,57 +3223,723 @@ fn execute_recovery_matrix() -> Vec<I2gCheck> {
         token_present: true,
         owned_process_count: 1,
         direct_service_sid_rights: vec![CONTROL_REQUIRED_RIGHT.to_owned()],
+        exact_child: Some(ProcessIdentity::discovery(I2gPhase::Control)),
+        owned_processes: vec![ProcessIdentity::discovery(I2gPhase::Control)],
     };
     let treatment_rights = MachineObservation {
         direct_service_sid_rights: vec![
             CONTROL_REQUIRED_RIGHT.to_owned(),
             TREATMENT_RIGHT.to_owned(),
         ],
-        ..clean.clone()
+        ..service_ready.clone()
     };
-    let cases = [
+    let cases = vec![
+        (
+            I2gState::Prepared,
+            quiescent.clone(),
+            RecoveryDecision::NoAction,
+            "RECOVERY_PREPARED",
+        ),
+        (
+            I2gState::Prepared,
+            running.clone(),
+            RecoveryDecision::ResumeRollback,
+            "RECOVERY_PREPARED_RESIDUE",
+        ),
+        (
+            I2gState::ControlPolicyReady,
+            service_ready.clone(),
+            RecoveryDecision::ResumeControlTeardown,
+            "RECOVERY_CONTROL_POLICY_READY",
+        ),
         (
             I2gState::ControlServiceRunning,
-            running,
+            running.clone(),
             RecoveryDecision::ResumeControlTeardown,
             "RECOVERY_CONTROL_SERVICE_RUNNING",
         ),
         (
+            I2gState::ControlTokenReady,
+            running.clone(),
+            RecoveryDecision::ResumeControlTeardown,
+            "RECOVERY_CONTROL_TOKEN_READY",
+        ),
+        (
+            I2gState::ControlDiscoveryRunning,
+            running.clone(),
+            RecoveryDecision::ResumeControlTeardown,
+            "RECOVERY_CONTROL_DISCOVERY_RUNNING",
+        ),
+        (
             I2gState::ControlComplete,
-            clean.clone(),
+            service_ready.clone(),
             RecoveryDecision::ResumeControlTeardown,
             "RECOVERY_CONTROL_COMPLETE",
         ),
         (
+            I2gState::ControlTeardownComplete,
+            service_ready.clone(),
+            RecoveryDecision::ResumeTreatmentPolicy,
+            "RECOVERY_CONTROL_TEARDOWN_COMPLETE",
+        ),
+        (
             I2gState::TreatmentPolicyReady,
-            treatment_rights,
-            RecoveryDecision::ResumeTreatmentService,
+            treatment_rights.clone(),
+            RecoveryDecision::ResumeTreatmentServiceOnly,
             "RECOVERY_TREATMENT_POLICY_READY",
         ),
         (
+            I2gState::TreatmentServiceRunning,
+            running.clone(),
+            RecoveryDecision::ResumeRollback,
+            "RECOVERY_TREATMENT_SERVICE_RUNNING",
+        ),
+        (
+            I2gState::TreatmentTokenReady,
+            running.clone(),
+            RecoveryDecision::ResumeRollback,
+            "RECOVERY_TREATMENT_TOKEN_READY",
+        ),
+        (
+            I2gState::TreatmentDiscoveryRunning,
+            running.clone(),
+            RecoveryDecision::ResumeRollback,
+            "RECOVERY_TREATMENT_DISCOVERY_RUNNING",
+        ),
+        (
             I2gState::TreatmentComplete,
-            clean.clone(),
+            quiescent.clone(),
             RecoveryDecision::ResumeRollback,
             "RECOVERY_TREATMENT_COMPLETE",
         ),
         (
             I2gState::RollbackRunning,
-            clean,
+            quiescent.clone(),
             RecoveryDecision::ResumeRollback,
             "RECOVERY_ROLLBACK_RUNNING",
+        ),
+        (
+            I2gState::RollbackComplete,
+            quiescent.clone(),
+            RecoveryDecision::NoAction,
+            "RECOVERY_ROLLBACK_COMPLETE",
+        ),
+        (
+            I2gState::Failed,
+            quiescent.clone(),
+            RecoveryDecision::ResumeRollback,
+            "RECOVERY_FAILED",
+        ),
+        (
+            I2gState::Invalid,
+            quiescent,
+            RecoveryDecision::Invalid,
+            "RECOVERY_INVALID",
         ),
     ];
     cases
         .into_iter()
         .map(|(state, observation, expected, name)| {
-            let actual = reconcile_persisted_state(state, &observation);
-            if actual == expected {
-                I2gCheck::pass(name, format!("decision={actual:?}"))
+            let mut persisted = PersistedI2gState::new(
+                I2G_SERVICE_NAME,
+                I2G_SYNTHETIC_SERVICE_SID,
+                I2G_HARNESS_SHA256_SYNTHETIC,
+            );
+            persisted.state = state;
+            if state == I2gState::TreatmentPolicyReady {
+                persisted.profile_single_ownership.mutation_intent_durable = true;
+                persisted.profile_single_ownership.owned_by_run = true;
+            }
+            let reconciliation = reconcile_persisted_state(&mut persisted, &observation);
+            if reconciliation.decision == expected {
+                I2gCheck::pass(name, format!("decision={:?}", reconciliation.decision))
             } else {
-                I2gCheck::fail(name, format!("expected={expected:?} actual={actual:?}"))
+                I2gCheck::fail(
+                    name,
+                    format!("expected={expected:?} actual={:?}", reconciliation.decision),
+                )
             }
         })
         .collect()
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum I2gCrashPoint {
+    ControlAfterServiceCreateBeforeOwnershipPersistence,
+    ControlAfterSystemProfileAddBeforeOwnershipPersistence,
+    ControlAfterServiceStart,
+    ControlAfterTokenMaterialization,
+    ControlAfterSystemProfileEnable,
+    ControlAfterDiscoveryChildSpawnBeforeRunCountPersistence,
+    ControlAfterDiscoveryExitBeforeResultPersistence,
+    ControlDuringTeardown,
+    TreatmentAfterProfileSingleAddBeforeOwnershipPersistence,
+    TreatmentAfterServiceStart,
+    TreatmentAfterTokenMaterialization,
+    TreatmentAfterSystemProfileEnable,
+    TreatmentAfterProfileSingleEnable,
+    TreatmentAfterDiscoveryChildSpawnBeforeRunCountPersistence,
+    TreatmentAfterDiscoveryExitBeforeResultPersistence,
+    RollbackAfterChildCleanupBeforeServiceStop,
+    RollbackAfterServiceStopBeforeRightRemoval,
+    RollbackAfterProfileSingleRemoveBeforeDurableCleanupState,
+    RollbackAfterSystemProfileRemoveBeforeDurableCleanupState,
+    RollbackAfterServiceDeleteBeforeFinalSummary,
+}
+
+impl I2gCrashPoint {
+    pub const fn all() -> [Self; 20] {
+        [
+            Self::ControlAfterServiceCreateBeforeOwnershipPersistence,
+            Self::ControlAfterSystemProfileAddBeforeOwnershipPersistence,
+            Self::ControlAfterServiceStart,
+            Self::ControlAfterTokenMaterialization,
+            Self::ControlAfterSystemProfileEnable,
+            Self::ControlAfterDiscoveryChildSpawnBeforeRunCountPersistence,
+            Self::ControlAfterDiscoveryExitBeforeResultPersistence,
+            Self::ControlDuringTeardown,
+            Self::TreatmentAfterProfileSingleAddBeforeOwnershipPersistence,
+            Self::TreatmentAfterServiceStart,
+            Self::TreatmentAfterTokenMaterialization,
+            Self::TreatmentAfterSystemProfileEnable,
+            Self::TreatmentAfterProfileSingleEnable,
+            Self::TreatmentAfterDiscoveryChildSpawnBeforeRunCountPersistence,
+            Self::TreatmentAfterDiscoveryExitBeforeResultPersistence,
+            Self::RollbackAfterChildCleanupBeforeServiceStop,
+            Self::RollbackAfterServiceStopBeforeRightRemoval,
+            Self::RollbackAfterProfileSingleRemoveBeforeDurableCleanupState,
+            Self::RollbackAfterSystemProfileRemoveBeforeDurableCleanupState,
+            Self::RollbackAfterServiceDeleteBeforeFinalSummary,
+        ]
+    }
+
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::ControlAfterServiceCreateBeforeOwnershipPersistence => {
+                "CONTROL_AFTER_SERVICE_CREATE_BEFORE_OWNERSHIP_PERSISTENCE"
+            }
+            Self::ControlAfterSystemProfileAddBeforeOwnershipPersistence => {
+                "CONTROL_AFTER_SYSTEM_PROFILE_ADD_BEFORE_OWNERSHIP_PERSISTENCE"
+            }
+            Self::ControlAfterServiceStart => "CONTROL_AFTER_SERVICE_START",
+            Self::ControlAfterTokenMaterialization => "CONTROL_AFTER_TOKEN_MATERIALIZATION",
+            Self::ControlAfterSystemProfileEnable => "CONTROL_AFTER_SYSTEM_PROFILE_ENABLE",
+            Self::ControlAfterDiscoveryChildSpawnBeforeRunCountPersistence => {
+                "CONTROL_AFTER_DISCOVERY_CHILD_SPAWN_BEFORE_RUN_COUNT_PERSISTENCE"
+            }
+            Self::ControlAfterDiscoveryExitBeforeResultPersistence => {
+                "CONTROL_AFTER_DISCOVERY_EXIT_BEFORE_RESULT_PERSISTENCE"
+            }
+            Self::ControlDuringTeardown => "CONTROL_DURING_TEARDOWN",
+            Self::TreatmentAfterProfileSingleAddBeforeOwnershipPersistence => {
+                "TREATMENT_AFTER_PROFILE_SINGLE_ADD_BEFORE_OWNERSHIP_PERSISTENCE"
+            }
+            Self::TreatmentAfterServiceStart => "TREATMENT_AFTER_SERVICE_START",
+            Self::TreatmentAfterTokenMaterialization => "TREATMENT_AFTER_TOKEN_MATERIALIZATION",
+            Self::TreatmentAfterSystemProfileEnable => "TREATMENT_AFTER_SYSTEM_PROFILE_ENABLE",
+            Self::TreatmentAfterProfileSingleEnable => "TREATMENT_AFTER_PROFILE_SINGLE_ENABLE",
+            Self::TreatmentAfterDiscoveryChildSpawnBeforeRunCountPersistence => {
+                "TREATMENT_AFTER_DISCOVERY_CHILD_SPAWN_BEFORE_RUN_COUNT_PERSISTENCE"
+            }
+            Self::TreatmentAfterDiscoveryExitBeforeResultPersistence => {
+                "TREATMENT_AFTER_DISCOVERY_EXIT_BEFORE_RESULT_PERSISTENCE"
+            }
+            Self::RollbackAfterChildCleanupBeforeServiceStop => {
+                "ROLLBACK_AFTER_CHILD_CLEANUP_BEFORE_SERVICE_STOP"
+            }
+            Self::RollbackAfterServiceStopBeforeRightRemoval => {
+                "ROLLBACK_AFTER_SERVICE_STOP_BEFORE_RIGHT_REMOVAL"
+            }
+            Self::RollbackAfterProfileSingleRemoveBeforeDurableCleanupState => {
+                "ROLLBACK_AFTER_PROFILE_SINGLE_REMOVE_BEFORE_DURABLE_CLEANUP_STATE"
+            }
+            Self::RollbackAfterSystemProfileRemoveBeforeDurableCleanupState => {
+                "ROLLBACK_AFTER_SYSTEM_PROFILE_REMOVE_BEFORE_DURABLE_CLEANUP_STATE"
+            }
+            Self::RollbackAfterServiceDeleteBeforeFinalSummary => {
+                "ROLLBACK_AFTER_SERVICE_DELETE_BEFORE_FINAL_SUMMARY"
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CrashWindowCase {
+    pub crash_point: String,
+    pub recovery_decision: RecoveryDecision,
+    pub recovery_required: bool,
+    pub discovery_relaunched: bool,
+    pub control_counter_discovery_runs: u32,
+    pub treatment_counter_discovery_runs: u32,
+    pub total_counter_discovery_runs: u32,
+    pub no_power_sampling: bool,
+    pub preexisting_right_safety: bool,
+    pub run_owned_rights_recovered: bool,
+    pub service_ownership_recovered: bool,
+    pub child_process_absent: bool,
+    pub cleanup_result: String,
+    pub causal_interpretation_valid: bool,
+    pub pass: bool,
+    pub detail: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CrashWindowMatrixSummary {
+    pub schema: String,
+    pub offline_validation: String,
+    pub cases: Vec<CrashWindowCase>,
+}
+
+struct CrashFixture {
+    backend: SyntheticBackend,
+    persisted: PersistedI2gState,
+    root: PathBuf,
+}
+
+impl CrashFixture {
+    fn new(root: &Path) -> Result<Self, String> {
+        fs::create_dir_all(root).map_err(|error| format!("create crash fixture: {error}"))?;
+        let persisted = PersistedI2gState::new(
+            I2G_SERVICE_NAME,
+            I2G_SYNTHETIC_SERVICE_SID,
+            I2G_HARNESS_SHA256_SYNTHETIC,
+        );
+        atomic_write_json(&root.join("STATE-0000.json"), &persisted)
+            .map_err(|error| format!("initial crash state: {error}"))?;
+        Ok(Self {
+            backend: SyntheticBackend::new(I2gSyntheticScenario::Happy),
+            persisted,
+            root: root.to_path_buf(),
+        })
+    }
+
+    fn checkpoint(&mut self) -> Result<(), String> {
+        self.persisted.checkpoint();
+        atomic_write_json(
+            &self
+                .root
+                .join(format!("STATE-{:04}.json", self.persisted.sequence)),
+            &self.persisted,
+        )
+        .map_err(|error| format!("crash checkpoint: {error}"))
+    }
+
+    fn transition(&mut self, next: I2gState) -> Result<(), String> {
+        self.persisted.transition(next)?;
+        atomic_write_json(
+            &self
+                .root
+                .join(format!("STATE-{:04}.json", self.persisted.sequence)),
+            &self.persisted,
+        )
+        .map_err(|error| format!("crash transition: {error}"))
+    }
+
+    fn begin_service_mutation(&mut self) -> Result<(), String> {
+        self.persisted.service_ownership.capture_pre_state(false);
+        self.persisted.service_ownership.begin_mutation();
+        self.checkpoint()
+    }
+
+    fn observe_service_mutation(&mut self) -> Result<(), String> {
+        self.persisted
+            .service_ownership
+            .observe_after_mutation(self.backend.service_present);
+        self.persisted.service_created = self.persisted.service_ownership.owned_by_run;
+        self.checkpoint()
+    }
+
+    fn begin_right_mutation(&mut self, right: &str) -> Result<(), String> {
+        let ownership = if right.eq_ignore_ascii_case(CONTROL_REQUIRED_RIGHT) {
+            &mut self.persisted.system_profile_ownership
+        } else {
+            &mut self.persisted.profile_single_ownership
+        };
+        ownership.capture_pre_state(false);
+        ownership.begin_mutation();
+        self.checkpoint()
+    }
+
+    fn observe_right_mutation(&mut self, right: &str) -> Result<(), String> {
+        let present = self.backend.policy.has_right(right);
+        let owned = {
+            let ownership = if right.eq_ignore_ascii_case(CONTROL_REQUIRED_RIGHT) {
+                &mut self.persisted.system_profile_ownership
+            } else {
+                &mut self.persisted.profile_single_ownership
+            };
+            ownership.observe_after_mutation(present);
+            ownership.owned_by_run
+        };
+        if right.eq_ignore_ascii_case(CONTROL_REQUIRED_RIGHT) {
+            self.persisted.system_profile_right_added_by_run = owned;
+        } else {
+            self.persisted.profile_single_right_added_by_run = owned;
+        }
+        self.checkpoint()
+    }
+
+    fn prepare_control_durable(&mut self) -> Result<(), String> {
+        self.begin_service_mutation()?;
+        self.backend
+            .service_create(&I2gConfiguration::control(I2G_SYNTHETIC_SERVICE_SID))
+            .map_err(|error| error.to_string())?;
+        self.observe_service_mutation()?;
+        self.transition(I2gState::ControlPolicyReady)?;
+        self.begin_right_mutation(CONTROL_REQUIRED_RIGHT)?;
+        self.backend
+            .add_policy_right(CONTROL_REQUIRED_RIGHT)
+            .map_err(|error| error.to_string())?;
+        self.observe_right_mutation(CONTROL_REQUIRED_RIGHT)
+    }
+
+    fn prepare_treatment_policy(&mut self) -> Result<(), String> {
+        self.prepare_control_durable()?;
+        self.backend
+            .service_start(I2gPhase::Control)
+            .map_err(|error| error.to_string())?;
+        self.transition(I2gState::ControlServiceRunning)?;
+        self.transition(I2gState::ControlTokenReady)?;
+        self.transition(I2gState::ControlDiscoveryRunning)?;
+        self.backend
+            .service_stop()
+            .map_err(|error| error.to_string())?;
+        self.transition(I2gState::ControlComplete)?;
+        self.transition(I2gState::ControlTeardownComplete)
+    }
+
+    fn prepare_treatment_running(&mut self) -> Result<(), String> {
+        self.prepare_treatment_policy()?;
+        self.begin_right_mutation(TREATMENT_RIGHT)?;
+        self.backend
+            .add_policy_right(TREATMENT_RIGHT)
+            .map_err(|error| error.to_string())?;
+        self.observe_right_mutation(TREATMENT_RIGHT)?;
+        self.transition(I2gState::TreatmentPolicyReady)?;
+        self.backend
+            .service_start(I2gPhase::Treatment)
+            .map_err(|error| error.to_string())?;
+        self.transition(I2gState::TreatmentServiceRunning)
+    }
+
+    fn prepare_discovery_running(&mut self) -> Result<(), String> {
+        self.prepare_treatment_running()?;
+        self.transition(I2gState::TreatmentTokenReady)?;
+        self.transition(I2gState::TreatmentDiscoveryRunning)?;
+        self.persisted.begin_discovery_spawn(I2gPhase::Treatment);
+        self.checkpoint()?;
+        let discovery = self.backend.discover(I2gPhase::Treatment);
+        if discovery.child_spawned {
+            self.persisted.observe_discovery_spawn(
+                I2gPhase::Treatment,
+                discovery.child_pid,
+                discovery.process_start_time,
+            );
+            self.checkpoint()?;
+            self.persisted.record_child_spawn(I2gPhase::Treatment)?;
+            self.checkpoint()?;
+        }
+        Ok(())
+    }
+
+    fn simulate(&mut self, point: I2gCrashPoint) -> Result<(), String> {
+        use I2gCrashPoint::*;
+        match point {
+            ControlAfterServiceCreateBeforeOwnershipPersistence => {
+                self.begin_service_mutation()?;
+                self.backend
+                    .service_create(&I2gConfiguration::control(I2G_SYNTHETIC_SERVICE_SID))
+                    .map_err(|error| error.to_string())?;
+            }
+            ControlAfterSystemProfileAddBeforeOwnershipPersistence => {
+                self.prepare_control_durable()?;
+                self.begin_right_mutation(CONTROL_REQUIRED_RIGHT)?;
+                self.backend
+                    .add_policy_right(CONTROL_REQUIRED_RIGHT)
+                    .map_err(|error| error.to_string())?;
+            }
+            ControlAfterServiceStart => {
+                self.prepare_control_durable()?;
+                self.backend
+                    .service_start(I2gPhase::Control)
+                    .map_err(|error| error.to_string())?;
+            }
+            ControlAfterTokenMaterialization => {
+                self.prepare_control_durable()?;
+                self.backend
+                    .service_start(I2gPhase::Control)
+                    .map_err(|error| error.to_string())?;
+                self.transition(I2gState::ControlServiceRunning)?;
+            }
+            ControlAfterSystemProfileEnable => {
+                self.prepare_control_durable()?;
+                self.backend
+                    .service_start(I2gPhase::Control)
+                    .map_err(|error| error.to_string())?;
+                self.transition(I2gState::ControlServiceRunning)?;
+                self.backend
+                    .adjust_token_privilege(I2gPhase::Control, CONTROL_REQUIRED_RIGHT);
+            }
+            ControlAfterDiscoveryChildSpawnBeforeRunCountPersistence => {
+                self.prepare_control_durable()?;
+                self.backend
+                    .service_start(I2gPhase::Control)
+                    .map_err(|error| error.to_string())?;
+                self.transition(I2gState::ControlServiceRunning)?;
+                self.transition(I2gState::ControlTokenReady)?;
+                self.transition(I2gState::ControlDiscoveryRunning)?;
+                self.persisted.begin_discovery_spawn(I2gPhase::Control);
+                self.checkpoint()?;
+                self.backend.discover(I2gPhase::Control);
+            }
+            ControlAfterDiscoveryExitBeforeResultPersistence => {
+                self.prepare_control_durable()?;
+                self.backend
+                    .service_start(I2gPhase::Control)
+                    .map_err(|error| error.to_string())?;
+                self.transition(I2gState::ControlServiceRunning)?;
+                self.transition(I2gState::ControlTokenReady)?;
+                self.transition(I2gState::ControlDiscoveryRunning)?;
+                self.persisted.begin_discovery_spawn(I2gPhase::Control);
+                self.checkpoint()?;
+                let discovery = self.backend.discover(I2gPhase::Control);
+                self.persisted.observe_discovery_spawn(
+                    I2gPhase::Control,
+                    discovery.child_pid,
+                    discovery.process_start_time,
+                );
+                self.checkpoint()?;
+                self.persisted.record_child_spawn(I2gPhase::Control)?;
+                self.checkpoint()?;
+                self.backend.finish_child();
+            }
+            ControlDuringTeardown => {
+                self.prepare_control_durable()?;
+                self.backend
+                    .service_start(I2gPhase::Control)
+                    .map_err(|error| error.to_string())?;
+                self.transition(I2gState::ControlServiceRunning)?;
+                self.transition(I2gState::ControlTokenReady)?;
+                self.transition(I2gState::ControlDiscoveryRunning)?;
+                self.transition(I2gState::ControlComplete)?;
+                self.backend
+                    .service_stop()
+                    .map_err(|error| error.to_string())?;
+            }
+            TreatmentAfterProfileSingleAddBeforeOwnershipPersistence => {
+                self.prepare_treatment_policy()?;
+                self.begin_right_mutation(TREATMENT_RIGHT)?;
+                self.backend
+                    .add_policy_right(TREATMENT_RIGHT)
+                    .map_err(|error| error.to_string())?;
+            }
+            TreatmentAfterServiceStart => {
+                self.prepare_treatment_policy()?;
+                self.begin_right_mutation(TREATMENT_RIGHT)?;
+                self.backend
+                    .add_policy_right(TREATMENT_RIGHT)
+                    .map_err(|error| error.to_string())?;
+                self.observe_right_mutation(TREATMENT_RIGHT)?;
+                self.transition(I2gState::TreatmentPolicyReady)?;
+                self.backend
+                    .service_start(I2gPhase::Treatment)
+                    .map_err(|error| error.to_string())?;
+            }
+            TreatmentAfterTokenMaterialization => {
+                self.simulate(TreatmentAfterServiceStart)?;
+                self.transition(I2gState::TreatmentServiceRunning)?;
+            }
+            TreatmentAfterSystemProfileEnable => {
+                self.simulate(TreatmentAfterServiceStart)?;
+                self.transition(I2gState::TreatmentServiceRunning)?;
+                self.backend
+                    .adjust_token_privilege(I2gPhase::Treatment, CONTROL_REQUIRED_RIGHT);
+            }
+            TreatmentAfterProfileSingleEnable => {
+                self.simulate(TreatmentAfterSystemProfileEnable)?;
+                self.backend
+                    .adjust_token_privilege(I2gPhase::Treatment, TREATMENT_RIGHT);
+            }
+            TreatmentAfterDiscoveryChildSpawnBeforeRunCountPersistence => {
+                self.simulate(TreatmentAfterProfileSingleEnable)?;
+                self.transition(I2gState::TreatmentTokenReady)?;
+                self.transition(I2gState::TreatmentDiscoveryRunning)?;
+                self.persisted.begin_discovery_spawn(I2gPhase::Treatment);
+                self.checkpoint()?;
+                self.backend.discover(I2gPhase::Treatment);
+            }
+            TreatmentAfterDiscoveryExitBeforeResultPersistence => {
+                self.simulate(TreatmentAfterProfileSingleEnable)?;
+                self.transition(I2gState::TreatmentTokenReady)?;
+                self.transition(I2gState::TreatmentDiscoveryRunning)?;
+                self.persisted.begin_discovery_spawn(I2gPhase::Treatment);
+                self.checkpoint()?;
+                let discovery = self.backend.discover(I2gPhase::Treatment);
+                self.persisted.observe_discovery_spawn(
+                    I2gPhase::Treatment,
+                    discovery.child_pid,
+                    discovery.process_start_time,
+                );
+                self.checkpoint()?;
+                self.persisted.record_child_spawn(I2gPhase::Treatment)?;
+                self.checkpoint()?;
+                self.backend.finish_child();
+            }
+            RollbackAfterChildCleanupBeforeServiceStop => {
+                self.prepare_discovery_running()?;
+                self.transition(I2gState::RollbackRunning)?;
+                self.backend.finish_child();
+            }
+            RollbackAfterServiceStopBeforeRightRemoval => {
+                self.prepare_discovery_running()?;
+                self.transition(I2gState::RollbackRunning)?;
+                self.backend.finish_child();
+                self.backend
+                    .service_stop()
+                    .map_err(|error| error.to_string())?;
+            }
+            RollbackAfterProfileSingleRemoveBeforeDurableCleanupState => {
+                self.prepare_discovery_running()?;
+                self.transition(I2gState::RollbackRunning)?;
+                self.backend.finish_child();
+                self.backend
+                    .service_stop()
+                    .map_err(|error| error.to_string())?;
+                self.persisted.profile_single_ownership.begin_removal();
+                self.checkpoint()?;
+                self.backend
+                    .remove_policy_right(TREATMENT_RIGHT)
+                    .map_err(|error| error.to_string())?;
+            }
+            RollbackAfterSystemProfileRemoveBeforeDurableCleanupState => {
+                self.simulate(RollbackAfterProfileSingleRemoveBeforeDurableCleanupState)?;
+                self.persisted
+                    .profile_single_ownership
+                    .observe_after_removal(true);
+                self.checkpoint()?;
+                self.persisted.system_profile_ownership.begin_removal();
+                self.checkpoint()?;
+                self.backend
+                    .remove_policy_right(CONTROL_REQUIRED_RIGHT)
+                    .map_err(|error| error.to_string())?;
+            }
+            RollbackAfterServiceDeleteBeforeFinalSummary => {
+                self.simulate(RollbackAfterSystemProfileRemoveBeforeDurableCleanupState)?;
+                self.persisted
+                    .system_profile_ownership
+                    .observe_after_removal(true);
+                self.checkpoint()?;
+                self.persisted.service_ownership.begin_removal();
+                self.checkpoint()?;
+                self.backend
+                    .service_delete()
+                    .map_err(|error| error.to_string())?;
+            }
+        }
+        Ok(())
+    }
+}
+
+fn verify_preexisting_right_safety() -> Result<bool, String> {
+    let root = std::env::temp_dir().join(format!(
+        "amd-i2g-preexisting-right-{}",
+        ATOMIC_FILE_COUNTER.fetch_add(1, Ordering::Relaxed)
+    ));
+    fs::create_dir_all(&root).map_err(|error| format!("pre-existing fixture: {error}"))?;
+    let mut backend = SyntheticBackend::new(I2gSyntheticScenario::Happy);
+    backend
+        .policy
+        .direct_rights
+        .push(CONTROL_REQUIRED_RIGHT.to_owned());
+    backend.policy.preexisting_system_profile_right = true;
+    let mut persisted = PersistedI2gState::new(
+        I2G_SERVICE_NAME,
+        I2G_SYNTHETIC_SERVICE_SID,
+        I2G_HARNESS_SHA256_SYNTHETIC,
+    );
+    persisted.state = I2gState::RollbackRunning;
+    persisted.system_profile_ownership.capture_pre_state(true);
+    atomic_write_json(&root.join("STATE-0000.json"), &persisted)
+        .map_err(|error| format!("pre-existing state: {error}"))?;
+    let result = execute_synthetic_recovery(&root, &mut backend)?;
+    let preserved = backend.policy.has_right(CONTROL_REQUIRED_RIGHT)
+        && result.cleanup_result == "PASS"
+        && !result
+            .rollback
+            .as_ref()
+            .is_some_and(|rollback| rollback.system_profile_remove_attempted);
+    let _ = fs::remove_dir_all(&root);
+    Ok(preserved)
+}
+
+pub fn run_crash_window_matrix(
+    evidence_root: Option<&Path>,
+) -> Result<CrashWindowMatrixSummary, String> {
+    let root = evidence_root
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| std::env::temp_dir().join("amd-i2g-crash-window-matrix"));
+    fs::create_dir_all(&root).map_err(|error| format!("create crash matrix root: {error}"))?;
+    let mut cases = Vec::new();
+    for point in I2gCrashPoint::all() {
+        let case_root = root.join(point.as_str());
+        let mut fixture = CrashFixture::new(&case_root)?;
+        fixture.simulate(point)?;
+        let mut backend = fixture.backend;
+        let recovery = execute_synthetic_recovery(&case_root, &mut backend)?;
+        let preexisting_right_safety = verify_preexisting_right_safety()?;
+        let run_owned_rights_recovered = !backend.policy.has_right(CONTROL_REQUIRED_RIGHT)
+            && !backend.policy.has_right(TREATMENT_RIGHT);
+        let service_ownership_recovered =
+            !backend.service_present && !backend.service_running && backend.service_pid == 0;
+        let child_process_absent = backend.exact_child.is_none()
+            && backend.owned_processes.is_empty()
+            && backend.machine_observation().owned_process_count == 0;
+        let no_power_sampling = backend.mutations.real_power_sampling == 0;
+        let max_runs = recovery.control_counter_discovery_runs <= I2G_MAX_CONTROL_RUNS
+            && recovery.treatment_counter_discovery_runs <= I2G_MAX_TREATMENT_RUNS
+            && recovery.total_counter_discovery_runs <= I2G_MAX_TOTAL_RUNS;
+        let pass = recovery.recovery_required
+            && !recovery.discovery_relaunched
+            && max_runs
+            && no_power_sampling
+            && preexisting_right_safety
+            && run_owned_rights_recovered
+            && service_ownership_recovered
+            && child_process_absent
+            && recovery.cleanup_result == "PASS"
+            && !recovery.causal_interpretation_valid;
+        cases.push(CrashWindowCase {
+            crash_point: point.as_str().to_owned(),
+            recovery_decision: recovery.decision,
+            recovery_required: recovery.recovery_required,
+            discovery_relaunched: recovery.discovery_relaunched,
+            control_counter_discovery_runs: recovery.control_counter_discovery_runs,
+            treatment_counter_discovery_runs: recovery.treatment_counter_discovery_runs,
+            total_counter_discovery_runs: recovery.total_counter_discovery_runs,
+            no_power_sampling,
+            preexisting_right_safety,
+            run_owned_rights_recovered,
+            service_ownership_recovered,
+            child_process_absent,
+            cleanup_result: recovery.cleanup_result,
+            causal_interpretation_valid: recovery.causal_interpretation_valid,
+            pass,
+            detail: recovery.reason,
+        });
+    }
+    let summary = CrashWindowMatrixSummary {
+        schema: "amd-i2g-crash-window-matrix/v1".to_owned(),
+        offline_validation: if cases.iter().all(|case| case.pass) {
+            "PASS".to_owned()
+        } else {
+            "FAIL".to_owned()
+        },
+        cases,
+    };
+    atomic_write_json(&root.join("CRASH-WINDOW-MATRIX.json"), &summary)
+        .map_err(|error| format!("CRASH-WINDOW-MATRIX.json: {error}"))?;
+    Ok(summary)
 }
 
 pub fn run_synthetic(
@@ -2810,7 +4222,7 @@ fn scenario_expected_result(
         I2gSyntheticScenario::UnexpectedPreexistingProfileRight => {
             result == I2gResult::InvalidNoCausalInterpretation
         }
-        I2gSyntheticScenario::RecoveryMatrix => false,
+        I2gSyntheticScenario::RecoveryMatrix | I2gSyntheticScenario::CrashWindowMatrix => false,
     }
 }
 
@@ -2820,6 +4232,9 @@ fn run_recovery_matrix_summary(evidence_root: Option<&Path>) -> Result<I2gSummar
     let rollback = RollbackEvidence {
         cleanup_result: "PASS".to_owned(),
         stop_accepting_work: true,
+        child_was_owned: false,
+        amd_child_absent: true,
+        exact_child_identity_absent: true,
         treatment_child_absent: true,
         service_stopped: true,
         service_pid_zero: true,
@@ -2833,6 +4248,7 @@ fn run_recovery_matrix_summary(evidence_root: Option<&Path>) -> Result<I2gSummar
         service_deleted: false,
         service_absent: true,
         owned_processes_absent: true,
+        recovery_required: false,
         system_profile_right_added_by_run: false,
         profile_single_right_added_by_run: false,
         events: vec!["SYNTHETIC_RECOVERY_ONLY_NO_DISCOVERY_RUN".to_owned()],
@@ -2965,6 +4381,22 @@ mod tests {
         assert!(state.transition(I2gState::RollbackRunning).is_ok());
         assert!(state.transition(I2gState::RollbackComplete).is_ok());
         assert!(state.transition(I2gState::Prepared).is_err());
+
+        let mut failed = PersistedI2gState::new(
+            I2G_SERVICE_NAME,
+            I2G_SYNTHETIC_SERVICE_SID,
+            I2G_HARNESS_SHA256_SYNTHETIC,
+        );
+        failed.state = I2gState::Failed;
+        assert!(failed.transition(I2gState::RollbackRunning).is_ok());
+
+        let mut completed = PersistedI2gState::new(
+            I2G_SERVICE_NAME,
+            I2G_SYNTHETIC_SERVICE_SID,
+            I2G_HARNESS_SHA256_SYNTHETIC,
+        );
+        completed.state = I2gState::RollbackComplete;
+        assert!(completed.transition(I2gState::RollbackRunning).is_ok());
     }
 
     #[test]
@@ -3131,9 +4563,17 @@ mod tests {
             token_present: false,
             owned_process_count: 0,
             direct_service_sid_rights: vec![CONTROL_REQUIRED_RIGHT.to_owned()],
+            exact_child: None,
+            owned_processes: Vec::new(),
         };
+        let mut persisted = PersistedI2gState::new(
+            I2G_SERVICE_NAME,
+            I2G_SYNTHETIC_SERVICE_SID,
+            I2G_HARNESS_SHA256_SYNTHETIC,
+        );
+        persisted.state = I2gState::ControlComplete;
         assert_eq!(
-            reconcile_persisted_state(I2gState::ControlComplete, &actual),
+            reconcile_persisted_state(&mut persisted, &actual).decision,
             RecoveryDecision::ResumeControlTeardown
         );
         let inconsistent = MachineObservation {
@@ -3144,9 +4584,177 @@ mod tests {
             ..actual
         };
         assert_eq!(
-            reconcile_persisted_state(I2gState::ControlComplete, &inconsistent),
+            reconcile_persisted_state(&mut persisted, &inconsistent).decision,
             RecoveryDecision::ResumeRollback
         );
+    }
+
+    #[test]
+    fn recovery_resumes_durable_treatment_policy_without_discovery() {
+        let actual = MachineObservation {
+            service_present: true,
+            service_running: false,
+            service_pid: 0,
+            token_present: false,
+            owned_process_count: 0,
+            direct_service_sid_rights: vec![
+                CONTROL_REQUIRED_RIGHT.to_owned(),
+                TREATMENT_RIGHT.to_owned(),
+            ],
+            exact_child: None,
+            owned_processes: Vec::new(),
+        };
+        let mut persisted = PersistedI2gState::new(
+            I2G_SERVICE_NAME,
+            I2G_SYNTHETIC_SERVICE_SID,
+            I2G_HARNESS_SHA256_SYNTHETIC,
+        );
+        persisted.state = I2gState::TreatmentPolicyReady;
+        persisted.profile_single_ownership.mutation_intent_durable = true;
+        persisted.profile_single_ownership.owned_by_run = true;
+        assert_eq!(
+            reconcile_persisted_state(&mut persisted, &actual).decision,
+            RecoveryDecision::ResumeTreatmentServiceOnly
+        );
+
+        let mut preexisting = persisted.clone();
+        preexisting.profile_single_ownership.preexisting = true;
+        preexisting.profile_single_ownership.owned_by_run = false;
+        assert_eq!(
+            reconcile_persisted_state(&mut preexisting, &actual).decision,
+            RecoveryDecision::ResumeRollback
+        );
+    }
+
+    #[test]
+    fn rollback_complete_with_run_owned_rights_requires_recovery() {
+        let actual = MachineObservation {
+            service_present: false,
+            service_running: false,
+            service_pid: 0,
+            token_present: false,
+            owned_process_count: 0,
+            direct_service_sid_rights: vec![CONTROL_REQUIRED_RIGHT.to_owned()],
+            exact_child: None,
+            owned_processes: Vec::new(),
+        };
+        let mut persisted = PersistedI2gState::new(
+            I2G_SERVICE_NAME,
+            I2G_SYNTHETIC_SERVICE_SID,
+            I2G_HARNESS_SHA256_SYNTHETIC,
+        );
+        persisted.state = I2gState::RollbackComplete;
+        persisted.system_profile_ownership.mutation_intent_durable = true;
+        assert_eq!(
+            reconcile_persisted_state(&mut persisted, &actual).decision,
+            RecoveryDecision::ResumeRollback
+        );
+    }
+
+    #[test]
+    fn recovery_consumes_spawn_budget_from_durable_journal() {
+        let running = MachineObservation {
+            service_present: true,
+            service_running: true,
+            service_pid: 3001,
+            token_present: true,
+            owned_process_count: 1,
+            direct_service_sid_rights: vec![CONTROL_REQUIRED_RIGHT.to_owned()],
+            exact_child: Some(ProcessIdentity::discovery(I2gPhase::Control)),
+            owned_processes: vec![ProcessIdentity::discovery(I2gPhase::Control)],
+        };
+        let mut persisted = PersistedI2gState::new(
+            I2G_SERVICE_NAME,
+            I2G_SYNTHETIC_SERVICE_SID,
+            I2G_HARNESS_SHA256_SYNTHETIC,
+        );
+        persisted.state = I2gState::ControlDiscoveryRunning;
+        persisted.control_discovery_ledger.spawn_intent_durable = true;
+        persisted.control_discovery_ledger.spawn_observed_durable = true;
+        let reconciliation = reconcile_persisted_state(&mut persisted, &running);
+        assert_eq!(
+            reconciliation.recovered_control_counter_discovery_runs,
+            I2G_MAX_CONTROL_RUNS
+        );
+        assert_eq!(reconciliation.recovered_total_counter_discovery_runs, 1);
+        assert_eq!(
+            reconciliation.decision,
+            RecoveryDecision::ResumeControlTeardown
+        );
+
+        let completed = MachineObservation {
+            exact_child: None,
+            owned_processes: Vec::new(),
+            service_running: false,
+            service_pid: 0,
+            token_present: false,
+            owned_process_count: 0,
+            ..running.clone()
+        };
+        let mut completed_persisted = persisted.clone();
+        completed_persisted.actual_control_counter_discovery_runs = 0;
+        completed_persisted.actual_total_counter_discovery_runs = 0;
+        completed_persisted
+            .control_discovery_ledger
+            .completion_observed_durable = true;
+        let completed_reconciliation =
+            reconcile_persisted_state(&mut completed_persisted, &completed);
+        assert_eq!(
+            completed_reconciliation.recovered_control_counter_discovery_runs,
+            I2G_MAX_CONTROL_RUNS
+        );
+    }
+
+    #[test]
+    fn executable_recovery_reopens_failed_cleanup_without_discovery() {
+        let root = std::env::temp_dir().join(format!(
+            "i2g-recovery-failed-{}-{}",
+            std::process::id(),
+            ATOMIC_FILE_COUNTER.fetch_add(1, Ordering::Relaxed)
+        ));
+        fs::create_dir_all(&root).expect("create recovery fixture");
+        let mut persisted = PersistedI2gState::new(
+            I2G_SERVICE_NAME,
+            I2G_SYNTHETIC_SERVICE_SID,
+            I2G_HARNESS_SHA256_SYNTHETIC,
+        );
+        persisted.state = I2gState::Failed;
+        persisted.service_ownership.mutation_intent_durable = true;
+        persisted.system_profile_ownership.mutation_intent_durable = true;
+        persisted.profile_single_ownership.mutation_intent_durable = true;
+        atomic_write_json(&root.join("STATE-0000.json"), &persisted)
+            .expect("write failed recovery state");
+
+        let mut backend = SyntheticBackend::new(I2gSyntheticScenario::Happy);
+        backend.service_present = true;
+        backend.service_running = true;
+        backend.service_pid = 3002;
+        backend.token_present = true;
+        backend.policy.direct_rights.extend([
+            CONTROL_REQUIRED_RIGHT.to_owned(),
+            TREATMENT_RIGHT.to_owned(),
+        ]);
+        let summary = execute_synthetic_recovery(&root, &mut backend)
+            .expect("failed recovery should execute rollback");
+        assert_eq!(summary.decision, RecoveryDecision::ResumeRollback);
+        assert!(summary.recovery_required);
+        assert!(!summary.discovery_relaunched);
+        assert_eq!(summary.cleanup_result, "PASS");
+        assert!(!backend.service_present);
+        assert!(!backend.policy.has_right(CONTROL_REQUIRED_RIGHT));
+        assert!(!backend.policy.has_right(TREATMENT_RIGHT));
+        assert!(!summary.causal_interpretation_valid);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn real_backend_discovery_is_fail_closed_without_spawn() {
+        let mut backend = RealWindowsI2gBackend;
+        let evidence = backend.discover(I2gPhase::Control);
+        assert!(!evidence.child_spawned);
+        assert!(!evidence.actual_run_count_incremented);
+        assert!(!evidence.identity_gate_pass);
+        assert_eq!(evidence.classification, "REAL_EXECUTION_NOT_AUTHORIZED");
     }
 
     #[test]

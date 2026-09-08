@@ -19,8 +19,12 @@ I2G_REAL_CLEANUP_ALLOWED = false
 I2G_HUMAN_REAL_RUN_AUTHORIZATION = NOT_GRANTED
 I2G_REAL_RUNTIME = 0
 I2G_OFFLINE_VALIDATION = PASS
+I2G_REAL_GATE_CONSUMED = false
 I2G_HARNESS_ARTIFACT_ARCHITECTURE = x64
-I2G_HARNESS_ARTIFACT_SHA256 = D9325E47F9F68C810A1CFC29F27F80E17D8A10828390D7B8D93F1E0FEF080A90
+I2G_HARNESS_ARTIFACT_PATH = tools/amd-privilege-qualification/target/release/amd-privilege-qualification.exe
+I2G_HARNESS_ARTIFACT_SHA256 = E9437A0A5387E6C12AA4D2BC61B82AB9AC51D461005C0DBBC5CF244B410DB4A5
+I2G_EXECUTION_SURFACE = SYNTHETIC_OFFLINE_FAIL_CLOSED
+I2G_SHARED_EXECUTABLE_OFFLINE_ONLY = false
 NEXT_GATE = I2G_HARNESS_REVIEW_BEFORE_HUMAN_REAL_RUN_AUTHORIZATION
 ```
 
@@ -83,7 +87,8 @@ TREATMENT_RETRY_ALLOWED = false
 ControlTokenReady -> ControlDiscoveryRunning -> ControlComplete ->
 ControlTeardownComplete -> TreatmentPolicyReady -> TreatmentServiceRunning ->
 TreatmentTokenReady -> TreatmentDiscoveryRunning -> TreatmentComplete ->
-RollbackRunning -> RollbackComplete`；不可恢复的失败进入 `Failed`。实际 discovery
+RollbackRunning -> RollbackComplete`；清理失败进入 `Failed`，该状态只能由 recovery
+重新进入 rollback；只有 `Invalid` 按契约不可恢复。实际 discovery
 计数只有在固定子进程成功 spawn 后增加，spawn failure 不计数；非零退出仍然计一次。
 
 每个 evidence JSON 使用临时文件 `create_new`、写入、flush、同步、关闭、目标不存在检查、
@@ -108,9 +113,26 @@ ROLLBACK.json                  FINAL-SUMMARY.json
 确认 PID=0，再分别做双读回的精确权利移除，最后删除同一个服务并确认服务和 owned process
 均不存在。禁止 `all=true`、全局 LocalService 修改和 Administrators 修改。
 
-已持久化的中间状态必须通过 machine observation 恢复，而不是仅凭 evidence 文件判断：
-服务运行时继续 control teardown，treatment policy 已就绪时继续 treatment，treatment
-完成或 rollback 中断时继续 rollback。恢复不重新 discovery，不重试，不增加 run cap。
+已持久化的中间状态必须通过 machine observation 恢复，而不是仅凭 evidence 文件判断。
+`Prepared`、全部 CONTROL/TREATMENT 中间态、`ControlTeardownComplete`、
+`RollbackRunning`、`Failed` 和 `RollbackComplete` 均有明确 reconciliation；只有契约上
+不可恢复的 `Invalid` 才返回 `RecoveryDecision::Invalid`。不一致的主机状态一律
+fail closed 到 rollback/cleanup。`ControlTeardownComplete` 可恢复到 policy path，
+`TreatmentPolicyReady` 可恢复到 service/token-only path，但任何 recovery 都不会重新
+launch discovery，也不会 retry。
+
+每个 service/right mutation 都先 durable 写入 write-ahead intent，再用 fresh machine
+readback 推导 ownership。`preexisting=true` 永远不可被推导为 run-owned；当 pre-state
+absent、intent 已 durable、machine readback 显示 mutation 成功时，即使 added-by-run
+字段尚未来得及落盘，recovery 仍会安全识别并回滚。每个 discovery phase 也先 durable
+写入 spawn intent；child identity、completion journal 或仍存活的 exact child 足以消耗
+该 phase 的唯一 run budget，crash 后不会把 count 恢复为零并重新 launch。
+
+`execute_synthetic_recovery()` 会 load 最新 `STATE-*.json`、重新取得 synthetic
+machine observation、调用 reconciliation，然后只执行 teardown/rollback 或
+treatment-service-only resume；该 executable seam 不调用 discovery。20 个固定
+crash-window（CONTROL 8、TREATMENT 7、ROLLBACK 5）均验证 cleanup、ownership、child
+absence、no-retry、run caps 和 `causal_interpretation_valid=false`。
 
 ## 离线验证入口
 
@@ -125,7 +147,16 @@ ownership、timeout、identity、spawn、nonzero exit、pre-existing right、cle
 recovery/no-retry 场景。Rust backend trait 保留未来 Windows seam，但当前
 `RealWindowsI2gBackend` 和 PowerShell real 分支均 fail closed。
 
-真实开关在参数进入任何主机查询或写入前返回以下稳定标记并退出非零：
+正式 offline wrapper 只接受精确的 release artifact path，并在 synthetic execution
+前校验 PE architecture=`x64` 和 authoritative SHA-256；正确 artifact、tampered
+artifact、missing artifact 均有回归测试。注意共享的
+`amd-privilege-qualification.exe` 仍包含历史 `--broker`、`--system-counter-service`、
+`--service-profile-counter-service`、`--service-profile-enable-counter-service` 和
+`--client` 入口；因此整个 EXE 不是 offline-only。本 milestone 只开放
+`I2G_EXECUTION_SURFACE = SYNTHETIC_OFFLINE_FAIL_CLOSED`，I2G wrapper 和
+`RealWindowsI2gBackend` 均 fail closed。
+
+真实 I2G 开关在参数进入任何主机查询或写入前返回以下稳定标记并退出非零：
 
 ```text
 I2G_REAL_EXECUTION_NOT_AUTHORIZED

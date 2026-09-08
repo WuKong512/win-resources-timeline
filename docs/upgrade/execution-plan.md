@@ -2225,13 +2225,17 @@ I2G_EXPERIMENT_SHAPE = PAIRED_CONTROL_TREATMENT
 HISTORICAL_I2F_ROLE = PREDECESSOR_EVIDENCE_ONLY
 HISTORICAL_I2F_IS_ACTIVE_CAUSAL_CONTROL = false
 I2G_GATE_CONSUMED = false
+I2G_REAL_GATE_CONSUMED = false
 I2G_REAL_EXECUTION_ALLOWED = false
 I2G_REAL_CLEANUP_ALLOWED = false
 I2G_HUMAN_REAL_RUN_AUTHORIZATION = NOT_GRANTED
 I2G_REAL_RUNTIME = 0
 I2G_OFFLINE_VALIDATION = PASS
 I2G_HARNESS_ARTIFACT_ARCHITECTURE = x64
-I2G_HARNESS_ARTIFACT_SHA256 = D9325E47F9F68C810A1CFC29F27F80E17D8A10828390D7B8D93F1E0FEF080A90
+I2G_HARNESS_ARTIFACT_PATH = tools/amd-privilege-qualification/target/release/amd-privilege-qualification.exe
+I2G_HARNESS_ARTIFACT_SHA256 = E9437A0A5387E6C12AA4D2BC61B82AB9AC51D461005C0DBBC5CF244B410DB4A5
+I2G_EXECUTION_SURFACE = SYNTHETIC_OFFLINE_FAIL_CLOSED
+I2G_SHARED_EXECUTABLE_OFFLINE_ONLY = false
 PLANNED_CONTROL_COUNTER_DISCOVERY_RUNS = 1
 PLANNED_TREATMENT_COUNTER_DISCOVERY_RUNS = 1
 PLANNED_VALID_PAIR_COUNTER_DISCOVERY_RUNS = 2
@@ -2246,7 +2250,12 @@ TOKEN_TEARDOWN_BEFORE_TREATMENT_POLICY_MUTATION = true
 NEXT_GATE = I2G_HARNESS_REVIEW_BEFORE_HUMAN_REAL_RUN_AUTHORIZATION
 ```
 
-The release qualification artifact is synthetic/offline-only. Its backend has
-a Windows seam, but the real PowerShell entrypoint rejects before host access;
-no AMD, service, LSA, token, ACL, registry, driver, device, or production
-operation is authorized by this milestone.
+The I2G execution surface is synthetic/offline-only and fail-closed. The shared
+`amd-privilege-qualification.exe` still contains historical non-I2G entrypoints
+(`--broker`, `--system-counter-service`, `--service-profile-counter-service`,
+`--service-profile-enable-counter-service`, and `--client`), so the executable
+itself is not offline-only. The I2G wrapper validates the exact x64 release
+artifact path and authoritative SHA-256 before synthetic execution; its real
+PowerShell path and `RealWindowsI2gBackend` reject before host access. This
+milestone authorizes no AMD, service, SCM, LSA, token, ACL, registry, driver,
+device, or production operation.

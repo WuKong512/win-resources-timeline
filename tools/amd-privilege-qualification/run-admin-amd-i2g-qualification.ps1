@@ -10,7 +10,7 @@ param(
         'materialization-failure', 'system-profile-regression', 'process-ownership-failure',
         'control-timeout', 'treatment-timeout', 'cleanup-failure', 'identity-mismatch',
         'spawn-failure', 'exit-nonzero', 'unexpected-preexisting-profile-right',
-        'recovery-matrix'
+        'recovery-matrix', 'crash-window-matrix'
     )]
     [string]$OfflineSyntheticScenario = 'happy',
     [string]$EvidenceRoot
@@ -58,9 +58,10 @@ if (-not $OfflineSynthetic) {
 
 # The synthetic branch is a fixed semantic intent.  It has no arbitrary executable, argument,
 # working-directory, environment, sampling, or live evidence-root surface.
-$artifactPath = Join-Path $PSScriptRoot 'target\release\amd-privilege-qualification.exe'
-if (-not (Test-Path -LiteralPath $artifactPath -PathType Leaf)) {
-    throw "Missing offline qualification artifact: $artifactPath"
+$artifactPath = Join-Path $PSScriptRoot $I2gHarnessArtifactRelativePath
+$artifactIdentity = Test-I2gHarnessArtifactIdentity -Path $artifactPath
+if (-not $artifactIdentity.pass) {
+    throw "I2G_ARTIFACT_IDENTITY_REJECTED reason=$($artifactIdentity.reason) path=$artifactPath"
 }
 
 $arguments = @('--i2g-synthetic', '--scenario', $OfflineSyntheticScenario)

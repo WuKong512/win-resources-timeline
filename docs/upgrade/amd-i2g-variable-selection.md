@@ -822,13 +822,17 @@ I2G_EXPERIMENT_SHAPE = PAIRED_CONTROL_TREATMENT
 HISTORICAL_I2F_ROLE = PREDECESSOR_EVIDENCE_ONLY
 HISTORICAL_I2F_IS_ACTIVE_CAUSAL_CONTROL = false
 I2G_GATE_CONSUMED = false
+I2G_REAL_GATE_CONSUMED = false
 I2G_REAL_EXECUTION_ALLOWED = false
 I2G_REAL_CLEANUP_ALLOWED = false
 I2G_HUMAN_REAL_RUN_AUTHORIZATION = NOT_GRANTED
 I2G_REAL_RUNTIME = 0
 I2G_OFFLINE_VALIDATION = PASS
 I2G_HARNESS_ARTIFACT_ARCHITECTURE = x64
-I2G_HARNESS_ARTIFACT_SHA256 = D9325E47F9F68C810A1CFC29F27F80E17D8A10828390D7B8D93F1E0FEF080A90
+I2G_HARNESS_ARTIFACT_PATH = tools/amd-privilege-qualification/target/release/amd-privilege-qualification.exe
+I2G_HARNESS_ARTIFACT_SHA256 = E9437A0A5387E6C12AA4D2BC61B82AB9AC51D461005C0DBBC5CF244B410DB4A5
+I2G_EXECUTION_SURFACE = SYNTHETIC_OFFLINE_FAIL_CLOSED
+I2G_SHARED_EXECUTABLE_OFFLINE_ONLY = false
 PLANNED_CONTROL_COUNTER_DISCOVERY_RUNS = 1
 PLANNED_TREATMENT_COUNTER_DISCOVERY_RUNS = 1
 PLANNED_VALID_PAIR_COUNTER_DISCOVERY_RUNS = 2
@@ -844,5 +848,9 @@ NEXT_GATE = I2G_HARNESS_REVIEW_BEFORE_HUMAN_REAL_RUN_AUTHORIZATION
 ```
 
 The implementation adds no production account selection and no real execution
-authorization. Any future Windows backend requires a separate human review and
-explicit authorization after this offline qualification milestone.
+authorization. The I2G surface is synthetic/offline-only and fail-closed, while
+the shared qualification executable still contains historical non-I2G
+entrypoints; this does not make the whole EXE offline-only and does not
+authorize those entrypoints. Any future Windows backend requires a separate
+human review and explicit authorization after this offline qualification
+milestone.

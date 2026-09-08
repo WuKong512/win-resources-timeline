@@ -1,11 +1,15 @@
 #requires -Version 5.1
 [CmdletBinding()]
 param(
-    [string]$ToolRoot = $PSScriptRoot
+    [string]$ToolRoot = ''
 )
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+
+if ([string]::IsNullOrWhiteSpace($ToolRoot)) {
+    $ToolRoot = Split-Path -Parent $PSCommandPath
+}
 
 $contractPath = Join-Path $ToolRoot 'i2g-runtime-contract.ps1'
 $setupPath = Join-Path $ToolRoot 'run-admin-amd-i2g-qualification.ps1'
@@ -150,6 +154,20 @@ Write-Host 'I2G_REAL_EXECUTION_AND_CLEANUP_REJECTED=PASS'
 Assert-True (Test-Path -LiteralPath $releaseBinary -PathType Leaf) "Build the release qualification artifact before running I2G tests: $releaseBinary"
 New-Item -ItemType Directory -Force -Path $testRoot | Out-Null
 
+$artifactIdentity = Test-I2gHarnessArtifactIdentity -Path $releaseBinary
+Assert-True ([bool]$artifactIdentity.pass) "Release artifact identity rejected: $($artifactIdentity | ConvertTo-Json -Compress)"
+Assert-True ([string]$artifactIdentity.architecture -ceq 'x64') 'Release artifact architecture is not x64.'
+$tamperedArtifact = Join-Path $testRoot 'tampered-amd-privilege-qualification.exe'
+Copy-Item -LiteralPath $releaseBinary -Destination $tamperedArtifact
+$tamperedBytes = [System.IO.File]::ReadAllBytes($tamperedArtifact)
+$tamperedBytes[0] = $tamperedBytes[0] -bxor 0xff
+[System.IO.File]::WriteAllBytes($tamperedArtifact, $tamperedBytes)
+$tamperedIdentity = Test-I2gHarnessArtifactIdentity -Path $tamperedArtifact -ExpectedPath $tamperedArtifact
+Assert-True (-not [bool]$tamperedIdentity.pass -and [string]$tamperedIdentity.reason -ceq 'SHA256_MISMATCH') 'Tampered artifact was accepted.'
+$missingIdentity = Test-I2gHarnessArtifactIdentity -Path (Join-Path $testRoot 'missing-artifact.exe')
+Assert-True (-not [bool]$missingIdentity.pass -and [string]$missingIdentity.reason -ceq 'MISSING_ARTIFACT') 'Missing artifact was accepted.'
+Write-Host 'I2G_ARTIFACT_IDENTITY_GATE=PASS'
+
 $scenarioCases = @(
     [pscustomobject]@{ name = 'happy'; expected = 'PROFILE_SINGLE_SUFFICIENT_IN_PAIRED_I2G_CONTEXT'; control = 1; treatment = 1; total = 2; cleanup = 'PASS'; treatment_allowed = $true },
     [pscustomobject]@{ name = 'negative'; expected = 'PROFILE_SINGLE_INSUFFICIENT_IN_PAIRED_I2G_CONTEXT'; control = 1; treatment = 1; total = 2; cleanup = 'PASS'; treatment_allowed = $true },
@@ -215,6 +233,32 @@ try {
     Assert-True ([string]$recovery.summary.offline_validation -ceq 'PASS') 'Recovery matrix failed.'
     Assert-True ([int]$recovery.summary.actual_total_counter_discovery_runs -eq 0) 'Recovery matrix launched discovery.'
     Write-Host 'I2G_RECOVERY_NO_RETRY_MATRIX=PASS'
+
+    $crashMatrixRoot = Join-Path $testRoot 'crash-window-matrix'
+    $crashMatrixRun = Invoke-I2gChild -Path $setupPath -Arguments @(
+        '-OfflineSynthetic', '-OfflineSyntheticScenario', 'crash-window-matrix',
+        '-EvidenceRoot', $crashMatrixRoot
+    )
+    Assert-True ($crashMatrixRun.exit_code -eq 0) "Crash-window matrix failed: $($crashMatrixRun.text)"
+    $crashMatrix = $crashMatrixRun.text | ConvertFrom-Json
+    Assert-True ([string]$crashMatrix.offline_validation -ceq 'PASS') 'Crash-window matrix was not PASS.'
+    Assert-True (@($crashMatrix.cases).Count -eq 20) 'Crash-window matrix does not cover all 20 required points.'
+    foreach ($case in @($crashMatrix.cases)) {
+        Assert-True ([bool]$case.pass) "Crash-window case failed: $($case.crash_point)"
+        Assert-True ([bool]$case.recovery_required) "$($case.crash_point): recovery was not required."
+        Assert-True (-not [bool]$case.discovery_relaunched) "$($case.crash_point): discovery relaunched."
+        Assert-True ([int]$case.control_counter_discovery_runs -le $I2gMaxControlRuns) "$($case.crash_point): control cap exceeded."
+        Assert-True ([int]$case.treatment_counter_discovery_runs -le $I2gMaxTreatmentRuns) "$($case.crash_point): treatment cap exceeded."
+        Assert-True ([int]$case.total_counter_discovery_runs -le $I2gMaxTotalRuns) "$($case.crash_point): total cap exceeded."
+        Assert-True ([bool]$case.no_power_sampling) "$($case.crash_point): power sampling occurred."
+        Assert-True ([bool]$case.preexisting_right_safety) "$($case.crash_point): pre-existing right safety failed."
+        Assert-True ([bool]$case.run_owned_rights_recovered) "$($case.crash_point): run-owned right remained."
+        Assert-True ([bool]$case.service_ownership_recovered) "$($case.crash_point): service ownership recovery failed."
+        Assert-True ([bool]$case.child_process_absent) "$($case.crash_point): child process remained."
+        Assert-True ([string]$case.cleanup_result -ceq 'PASS') "$($case.crash_point): cleanup result was not PASS."
+        Assert-True (-not [bool]$case.causal_interpretation_valid) "$($case.crash_point): crashed path was causally admissible."
+    }
+    Write-Host 'I2G_CRASH_WINDOW_RECOVERY_MATRIX=PASS cases=20'
 
     $cleanupOffline = Invoke-I2gChild -Path $cleanupPath -Arguments @('-OfflineSynthetic')
     Assert-True ($cleanupOffline.exit_code -eq 0) "I2G offline cleanup failed: $($cleanupOffline.text)"

@@ -35,9 +35,10 @@ if (-not $OfflineSynthetic) {
     return
 }
 
-$artifactPath = Join-Path $PSScriptRoot 'target\release\amd-privilege-qualification.exe'
-if (-not (Test-Path -LiteralPath $artifactPath -PathType Leaf)) {
-    throw "Missing offline qualification artifact: $artifactPath"
+$artifactPath = Join-Path $PSScriptRoot $I2gHarnessArtifactRelativePath
+$artifactIdentity = Test-I2gHarnessArtifactIdentity -Path $artifactPath
+if (-not $artifactIdentity.pass) {
+    throw "I2G_ARTIFACT_IDENTITY_REJECTED reason=$($artifactIdentity.reason) path=$artifactPath"
 }
 & $artifactPath --i2g-synthetic-cleanup
 $childExitCode = [int]$LASTEXITCODE
