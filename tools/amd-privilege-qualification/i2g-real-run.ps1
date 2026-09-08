@@ -1346,6 +1346,11 @@ finally {
             configuration_delta_pass = $PairedConfigPass
             token_delta_pass = $PairedTokenPass
             treatment_allowed_by_scientific_gate = $TreatmentAllowedByScientificGate
+            treatment_policy_mutation_started = $TreatmentPolicyMutationStarted
+            treatment_policy_mutation_completed = $TreatmentPolicyMutationCompleted
+            treatment_service_phase_started = $TreatmentServicePhaseStarted
+            treatment_service_phase_completed = if ($TreatmentServicePhaseStarted) { $TreatmentDiscoveryCompleted } else { $false }
+            treatment_discovery_spawn_intent_durable = $TreatmentDiscoverySpawnIntentDurable
             treatment_discovery_started = $TreatmentDiscoveryStarted
             treatment_discovery_completed = $TreatmentDiscoveryCompleted
             failure_class = $FailureClass
@@ -1399,6 +1404,7 @@ finally {
             treatment_policy_mutation_started = $TreatmentPolicyMutationStarted
             treatment_policy_mutation_completed = $TreatmentPolicyMutationCompleted
             treatment_service_phase_started = $TreatmentServicePhaseStarted
+            treatment_service_phase_completed = if ($TreatmentServicePhaseStarted) { $TreatmentDiscoveryCompleted } else { $false }
             treatment_discovery_spawn_intent_durable = $TreatmentDiscoverySpawnIntentDurable
             treatment_discovery_started = $TreatmentDiscoveryStarted
             treatment_discovery_completed = $TreatmentDiscoveryCompleted
