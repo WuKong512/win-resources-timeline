@@ -13,6 +13,7 @@ if ([string]::IsNullOrWhiteSpace($ToolRoot)) {
 
 $contractPath = Join-Path $ToolRoot 'i2g-runtime-contract.ps1'
 $setupPath = Join-Path $ToolRoot 'run-admin-amd-i2g-qualification.ps1'
+$realRunnerPath = Join-Path $ToolRoot 'i2g-real-run.ps1'
 $cleanupPath = Join-Path $ToolRoot 'cleanup-admin-amd-i2g-qualification.ps1'
 $manifestPath = Join-Path $ToolRoot 'Cargo.toml'
 $releaseBinary = Join-Path $ToolRoot 'target\release\amd-privilege-qualification.exe'
@@ -76,7 +77,103 @@ function Invoke-I2gScenario {
     [pscustomobject]@{ process = $result; summary = $summary }
 }
 
-foreach ($path in @($contractPath, $setupPath, $cleanupPath, $PSCommandPath)) {
+function Get-I2gFunctionDefinitionText {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)][string]$Name
+    )
+    $parseErrors = $null
+    $tokens = $null
+    $ast = [System.Management.Automation.Language.Parser]::ParseFile($Path, [ref]$tokens, [ref]$parseErrors)
+    Assert-True ($parseErrors.Count -eq 0) "Cannot parse $Path while extracting $Name."
+    $definition = $ast.Find({
+        param($candidate)
+        $candidate -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
+            $candidate.Name -ceq $Name
+    }, $true)
+    Assert-True ($null -ne $definition) "Function definition not found: $Name"
+    [string]$definition.Extent.Text
+}
+
+function Invoke-I2gThrowawayChildExitTest {
+    $childPath = Join-Path $testRoot 'throwaway-child-exit-2.ps1'
+    [IO.File]::WriteAllText($childPath, "exit 2`r`n", [Text.UTF8Encoding]::new($false))
+    $childExitCode = $null
+    $parentFinallyExecuted = $false
+    try {
+        $psi = New-Object System.Diagnostics.ProcessStartInfo
+        $psi.FileName = Join-Path $PSHOME 'powershell.exe'
+        $psi.Arguments = '-NoProfile -NonInteractive -ExecutionPolicy Bypass -File "{0}"' -f $childPath
+        $psi.WorkingDirectory = $testRoot
+        $psi.UseShellExecute = $false
+        $psi.CreateNoWindow = $true
+        $child = New-Object System.Diagnostics.Process
+        $child.StartInfo = $psi
+        Assert-True $child.Start() 'Throwaway child did not start.'
+        $child.WaitForExit()
+        $childExitCode = [int]$child.ExitCode
+        $child.Dispose()
+    } finally {
+        $parentFinallyExecuted = $true
+    }
+    $parentSurvives = $true
+    Assert-True ($childExitCode -eq 2) "Throwaway child exit code was not 2: $childExitCode"
+    Assert-True $parentSurvives 'Parent did not survive the child exit.'
+    Assert-True $parentFinallyExecuted 'Parent finally block did not execute.'
+    Write-Host 'I2G_CHILD_EXIT_CODE=2 PARENT_SURVIVES=YES PARENT_FINALLY_EXECUTES=YES'
+}
+
+function Invoke-I2gThrowawayContractRestoreTest {
+    $root = Join-Path $testRoot 'throwaway-contract-restore'
+    New-Item -ItemType Directory -Force -Path $root | Out-Null
+    $destination = Join-Path $root 'contract.tmp-test'
+    $replacement = Join-Path $root 'replacement.tmp-test'
+    $replacementBackup = Join-Path $root ('.replace-backup-{0}' -f ([Guid]::NewGuid().ToString('N')))
+    $originalBytes = [byte[]](65, 10, 66, 10)
+    $replacementBytes = [byte[]](67, 10, 68, 10)
+    [IO.File]::WriteAllBytes($destination, $originalBytes)
+    [IO.File]::WriteAllBytes($replacement, $replacementBytes)
+    $originalHash = (Get-FileHash -LiteralPath $destination -Algorithm SHA256).Hash
+    $parentFinallyExecuted = $false
+    $childExitCode = $null
+    try {
+        Assert-True (-not (Test-Path -LiteralPath $replacementBackup -PathType Leaf)) 'Throwaway replacement backup already exists.'
+        [IO.File]::Replace($replacement, $destination, $replacementBackup, $true)
+        Assert-True ((Get-FileHash -LiteralPath $destination -Algorithm SHA256).Hash -ne $originalHash) 'Throwaway overlay did not change destination.'
+        Assert-True ((Get-FileHash -LiteralPath $replacementBackup -Algorithm SHA256).Hash -ceq $originalHash) 'Throwaway replacement backup did not preserve original bytes.'
+        $psi = New-Object System.Diagnostics.ProcessStartInfo
+        $psi.FileName = Join-Path $PSHOME 'powershell.exe'
+        $psi.Arguments = '-NoProfile -NonInteractive -Command "exit 2"'
+        $psi.WorkingDirectory = $root
+        $psi.UseShellExecute = $false
+        $psi.CreateNoWindow = $true
+        $child = New-Object System.Diagnostics.Process
+        $child.StartInfo = $psi
+        Assert-True $child.Start() 'Throwaway restore child did not start.'
+        $child.WaitForExit()
+        $childExitCode = [int]$child.ExitCode
+        $child.Dispose()
+    } finally {
+        $parentFinallyExecuted = $true
+        if (Test-Path -LiteralPath $destination -PathType Leaf) {
+            $restoreTemp = Join-Path $root 'restore-original.tmp-test'
+            $restoreBackup = Join-Path $root ('.restore-backup-{0}' -f ([Guid]::NewGuid().ToString('N')))
+            [IO.File]::WriteAllBytes($restoreTemp, $originalBytes)
+            [IO.File]::Replace($restoreTemp, $destination, $restoreBackup, $true)
+            if ((Get-FileHash -LiteralPath $destination -Algorithm SHA256).Hash -ceq $originalHash -and
+                (Test-Path -LiteralPath $restoreBackup -PathType Leaf)) {
+                Remove-Item -LiteralPath $restoreBackup -Force
+            }
+        }
+    }
+    $finalHash = (Get-FileHash -LiteralPath $destination -Algorithm SHA256).Hash
+    Assert-True ($childExitCode -eq 2) "Throwaway restore child exit code was not 2: $childExitCode"
+    Assert-True $parentFinallyExecuted 'Throwaway restore parent finally did not execute.'
+    Assert-True ($finalHash -ceq $originalHash) 'Throwaway contract bytes were not restored.'
+    Write-Host 'I2G_CONTRACT_RESTORE_AFTER_CHILD_EXIT=PASS'
+}
+
+foreach ($path in @($contractPath, $setupPath, $realRunnerPath, $cleanupPath, $PSCommandPath)) {
     Assert-PowerShellSyntax -Path $path
 }
 
@@ -94,10 +191,72 @@ Assert-True (-not (Test-I2gFixedCliArguments -Arguments @('timechart', '--list',
 Assert-True ((Get-I2gRequiredEvidenceNames).Count -ge 19) 'Required evidence inventory is incomplete.'
 Write-Host 'I2G_PURE_CONTRACT=PASS'
 
+New-Item -ItemType Directory -Force -Path $testRoot | Out-Null
+$realRunnerSource = Get-Content -LiteralPath $realRunnerPath -Raw
+Assert-True ([regex]::Matches($realRunnerSource, '(?i)\.Clone\s*\(').Count -eq 0) 'OrderedDictionary clone call remains in the I2G real runner.'
+$offlineConfigFunction = [ScriptBlock]::Create((Get-I2gFunctionDefinitionText -Path $realRunnerPath -Name 'New-I2gTreatmentConfig'))
+. $offlineConfigFunction
+$offlineControlConfig = [ordered]@{
+    schema = 'amd-i2g-real-service-config/v1'
+    qualification_only = $true
+    service_name = 'offline-service'
+    service_account = 'NT AUTHORITY\LocalService'
+    service_account_sid = 'S-1-5-19'
+    service_sid = 'S-1-5-80-offline'
+    scope = 'offline-run'
+    output_root = 'offline-root'
+    phase = 'CONTROL'
+    expected_profile_single_process_privilege = $false
+    expected_amd_cli_path = 'D:\apps\AMDuProf\bin\AMDuProfCLI.exe'
+    expected_amd_cli_sha256 = 'D0812D64963DD98F7C339CAC72F650461F95FF84E757A99767C7981B4111FBAC'
+    expected_amd_cli_version = '5.3.521.0'
+    expected_amd_cli_architecture = 'x64'
+    harness_artifact_sha256 = 'offline-artifact'
+}
+$offlineTreatmentConfig = New-I2gTreatmentConfig -ControlConfig $offlineControlConfig
+$allowedConfigDelta = @('phase', 'expected_profile_single_process_privilege')
+foreach ($configKey in $offlineControlConfig.Keys) {
+    if ($configKey -notin $allowedConfigDelta) {
+        Assert-True ([string]$offlineControlConfig[$configKey] -ceq [string]$offlineTreatmentConfig[$configKey]) "Unexpected CONTROL/TREATMENT config delta: $configKey"
+    }
+}
+Assert-True ([string]$offlineTreatmentConfig.phase -ceq 'TREATMENT') 'Treatment config phase was not set.'
+Assert-True ([bool]$offlineTreatmentConfig.expected_profile_single_process_privilege) 'Treatment config variable delta was not set.'
+Write-Host 'I2G_ORDERED_DICTIONARY_CLONE_CALLS=0'
+Write-Host 'I2G_TREATMENT_CONFIG_BUILD=PASS CONTROL_CONFIG_UNCHANGED=PASS PAIRED_CONFIG_DELTA=PASS'
+
+$offlinePlaceholderFunction = [ScriptBlock]::Create((Get-I2gFunctionDefinitionText -Path $realRunnerPath -Name 'Get-I2gTreatmentPlaceholderReason'))
+. $offlinePlaceholderFunction
+$offlineFailureFunction = [ScriptBlock]::Create((Get-I2gFunctionDefinitionText -Path $realRunnerPath -Name 'Resolve-I2gFailureClass'))
+. $offlineFailureFunction
+Assert-True ((Get-I2gTreatmentPlaceholderReason -TreatmentAllowedByScientificGate $false -TreatmentDiscoveryStarted $false -TreatmentDiscoveryCompleted $false -HarnessRuntimeFailure $false) -ceq 'NOT_ALLOWED_BY_SCIENTIFIC_GATE') 'Scientific gate rejection reason is wrong.'
+Assert-True ((Get-I2gTreatmentPlaceholderReason -TreatmentAllowedByScientificGate $true -TreatmentDiscoveryStarted $false -TreatmentDiscoveryCompleted $false -HarnessRuntimeFailure $true) -ceq 'ALLOWED_BUT_NOT_STARTED_DUE_TO_HARNESS_FAILURE') 'Allowed-but-not-started reason is wrong.'
+Assert-True ((Get-I2gTreatmentPlaceholderReason -TreatmentAllowedByScientificGate $true -TreatmentDiscoveryStarted $true -TreatmentDiscoveryCompleted $false -HarnessRuntimeFailure $true) -ceq 'STARTED_BUT_EVIDENCE_NOT_COMPLETED') 'Started-but-incomplete reason is wrong.'
+$runtimeFailureClass = Resolve-I2gFailureClass -ErrorMessage 'Method invocation failed because OrderedDictionary has no usable clone method.' -TreatmentAllowedByScientificGate $true -ControlRuns 1 -ControlResult 'POWER_UNAVAILABLE'
+$scientificFailureClass = Resolve-I2gFailureClass -ErrorMessage 'CONTROL_DRIFT: baseline was not stable.' -TreatmentAllowedByScientificGate $false -ControlRuns 1 -ControlResult 'POWER_AVAILABLE'
+Assert-True ($runtimeFailureClass -ceq 'HARNESS_RUNTIME_ERROR') 'Harness runtime failure was classified as scientific invalidation.'
+Assert-True ($scientificFailureClass -ceq 'SCIENTIFIC_INVALIDATION') 'Scientific invalidation was classified as harness runtime failure.'
+Assert-True ($realRunnerSource.Contains('treatment_allowed_by_scientific_gate')) 'Treatment scientific gate state is not persisted.'
+Assert-True ($realRunnerSource -notmatch '\$TreatmentRuns\s*-eq\s*0\s*\)\s*\{\s*\$TreatmentAllowed\s*=\s*\$false') 'Treatment allowed state is retroactively falsified by run count.'
+Write-Host 'I2G_TREATMENT_STATE_MACHINE=PASS'
+
+Invoke-I2gThrowawayChildExitTest
+Invoke-I2gThrowawayContractRestoreTest
+
 # The marker is intentionally before every live-operation token in both entrypoints.
 # This is a source-order regression check in addition to the child-process rejection test.
 $setupSource = Get-Content -LiteralPath $setupPath -Raw
 $cleanupSource = Get-Content -LiteralPath $cleanupPath -Raw
+$realBranchEnd = $setupSource.IndexOf('if ($LibraryOnly)', [StringComparison]::Ordinal)
+Assert-True ($realBranchEnd -gt 0) 'I2G real branch boundary is missing.'
+$realBranchSource = $setupSource.Substring(0, $realBranchEnd)
+Assert-True ($realBranchSource.Contains('System.Diagnostics.ProcessStartInfo')) 'I2G real wrapper is not isolated in a child process.'
+Assert-True ($realBranchSource.Contains('ReadToEndAsync')) 'I2G real child output is not captured deterministically.'
+Assert-True (-not [regex]::IsMatch($realBranchSource, '&\s*\(Join-Path[^\r\n]+i2g-real-run\.ps1')) 'I2G real runner is invoked in the wrapper host.'
+Assert-True (-not $realBranchSource.Contains('LASTEXITCODE')) 'Real wrapper branch propagates a stale LASTEXITCODE.'
+Assert-True ([regex]::Matches($realBranchSource, 'Invoke-I2gRealRunnerChild\s*-AuthorizationToken').Count -eq 1) 'Real wrapper invocation site count is not one.'
+Write-Host 'I2G_REAL_WRAPPER_EXECUTION_ISOLATED_CHILD_PROCESS=PASS'
+Write-Host 'I2G_WRAPPER_INVOCATION_SITE_COUNT=1 STALE_LASTEXITCODE_PROPAGATION=NONE'
 function Assert-RealGuardOrdering {
     param(
         [Parameter(Mandatory = $true)][string]$Source,

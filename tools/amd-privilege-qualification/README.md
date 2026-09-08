@@ -8,11 +8,9 @@ provider, installer, autostart path, or database writer.
 
 I2E paired, treatment-resume, and standalone cleanup real entrypoints are
 retired and permanently fail closed. I2F experiment and cleanup real
-entrypoints are also retired. All historical real gates are consumed; only
-plan-only, `LibraryOnly`, synthetic validation, and explicitly guarded offline
-sentinels remain available. No production account is selected. The read-only
-residual SYSTEM-versus-I2F review selected `SeProfileSingleProcessPrivilege`;
-the next gate is design and offline implementation review of the I2G harness.
+entrypoints are also retired. The only historical I2G real attempt is immutable
+and consumed; the current implementation work is limited to offline repair and
+regression validation. No new real authorization is granted by this document.
 
 ```text
 I2E_REAL_PAIRED_ENTRYPOINT = PERMANENTLY_FAIL_CLOSED
@@ -81,15 +79,15 @@ CONTROL_HARNESS_SHA_EQUALS_TREATMENT = true
 CONTROL_EXPECTED_RESULT = POWER_UNAVAILABLE
 CONTROL_DRIFT_STOP_BEFORE_TREATMENT = true
 CONTROL_TOKEN_TEARDOWN_BEFORE_TREATMENT_POLICY_MUTATION = true
-I2G_HARNESS = NOT_IMPLEMENTED
-I2G_REAL_RUNTIME = 0
-I2G_HARNESS_IMPLEMENTATION_AUTHORIZED = false
+I2G_HARNESS = IMPLEMENTED_OFFLINE
+I2G_REAL_RUNTIME = ATTEMPT1_ONLY_CONSUMED
+I2G_HARNESS_IMPLEMENTATION_AUTHORIZED = true
 I2G_REAL_RUNTIME_AUTHORIZED = false
 PRODUCTION_ACCOUNT = UNRESOLVED
 LOCAL_SYSTEM_PRODUCTION_SELECTION = NOT_AUTHORIZED
 PRODUCTION_ADMISSION = NOT_COMPLETE
-NEXT_GATE = I2G_HARNESS_DESIGN_AND_OFFLINE_IMPLEMENTATION_REVIEW
-NEXT_TASK = I2G_HARNESS_DESIGN_AND_OFFLINE_IMPLEMENTATION_REVIEW
+NEXT_GATE = HUMAN_REVIEW_BEFORE_ANY_NEW_REAL_RUN_AUTHORIZATION
+NEXT_TASK = AMD_I2G_REAL_ATTEMPT1_REPAIR_CLOSURE
 README_CURRENT_STATE_RECONCILED=PASS
 ```
 
@@ -793,7 +791,7 @@ I2G_REAL_GATE_CONSUMED = true
 I2G_REAL_EXECUTION_ALLOWED = false
 I2G_REAL_CLEANUP_ALLOWED = false
 I2G_HUMAN_REAL_RUN_AUTHORIZATION = CONSUMED
-I2G_REAL_RUNTIME = 0
+I2G_REAL_RUNTIME = ATTEMPT1_ONLY_CONSUMED
 I2G_OFFLINE_VALIDATION = PASS
 I2G_HARNESS_ARTIFACT_ARCHITECTURE = x64
 I2G_HARNESS_ARTIFACT_PATH = tools/amd-privilege-qualification/target/release/amd-privilege-qualification.exe
@@ -801,7 +799,7 @@ I2G_HARNESS_ARTIFACT_SHA256 = 2613129D179EA2A0496AD680E68E77A79FFFBB569D0802A11A
 I2G_EXECUTION_SURFACE = SYNTHETIC_OFFLINE_FAIL_CLOSED
 I2G_SHARED_EXECUTABLE_OFFLINE_ONLY = false
 I2G_TASK_LOCAL_REAL_RUNNER = ONE_SHOT_EXACT_AUTHORIZATION_ONLY
-I2G_TASK_LOCAL_REAL_RUN_STATUS = BLOCKED_NOT_ELEVATED_AUTHORIZATION_CONSUMED
+I2G_TASK_LOCAL_REAL_RUN_STATUS = ATTEMPT1_VALID_CONTROL_HARNESS_RUNTIME_FAILURE
 CONTROL_POLICY_RIGHTS = SeSystemProfilePrivilege only
 TREATMENT_POLICY_DELTA = SeProfileSingleProcessPrivilege assignment to same Service SID only
 FIXED_OPERATION = timechart --list
@@ -813,8 +811,45 @@ CONTROL_RETRY_ALLOWED = false
 TREATMENT_RETRY_ALLOWED = false
 CONTROL_DRIFT_STOP_BEFORE_TREATMENT = true
 TOKEN_TEARDOWN_BEFORE_TREATMENT_POLICY_MUTATION = true
-NEXT_GATE = NEW_EXPLICIT_HUMAN_AUTHORIZATION_REQUIRED
+NEXT_GATE = HUMAN_REVIEW_BEFORE_ANY_NEW_REAL_RUN_AUTHORIZATION
 ```
+
+## HISTORICAL — AMD-I2G REAL ATTEMPT #1
+
+Run `9ae1e7898f6b4a438f1acc41b76c2715` is immutable historical evidence. It
+produced a valid CONTROL baseline (`POWER_UNAVAILABLE`, one discovery run),
+then failed in harness setup while constructing the TREATMENT configuration:
+Windows PowerShell attempted to call a missing clone method on an
+`OrderedDictionary`. TREATMENT discovery did not run, rollback passed, the
+machine was clean, and the authorization was consumed. This is a harness
+runtime failure, not a scientific treatment rejection; no causal interpretation
+was obtained. The repair uses an explicit configuration copy, preserves the
+scientific-gate state separately from execution progress, and isolates the
+reviewed real runner in a child `powershell.exe` process so the parent can
+always restore its gate in `finally`. Any future real run requires new explicit
+human authorization after review.
+
+```text
+ATTEMPT1_CONTROL_RUNS = 1
+ATTEMPT1_TREATMENT_RUNS = 0
+ATTEMPT1_CONTROL_RESULT = POWER_UNAVAILABLE
+ATTEMPT1_TREATMENT_DISCOVERY = NOT_RUN
+ATTEMPT1_HARNESS_RUNTIME_FAILURE = true
+ATTEMPT1_FAILURE_CLASS = HARNESS_RUNTIME_ERROR
+ATTEMPT1_CAUSAL_INTERPRETATION_VALID = false
+ATTEMPT1_ROLLBACK = PASS
+ATTEMPT1_FINAL_MACHINE_STATE = CLEAN
+ATTEMPT1_AUTHORIZATION = CONSUMED
+ATTEMPT1_EVIDENCE = IMMUTABLE
+NEW_REAL_RUN_AUTHORIZATION_REQUIRED = true
+```
+
+The reviewed real wrapper now returns deterministic child-runner status codes:
+`0` means a complete paired qualification with a scientific result, `1` means
+blocked/harness/runtime/cleanup failure, and `2` means an invalid or
+non-causal scientific result. The wrapper launches the real runner in a
+separate Windows PowerShell 5.1 process so its explicit exit cannot bypass the
+parent launcher’s gate restoration.
 
 `run-admin-amd-i2g-qualification.ps1` is plan-only by default and has a
 deterministic `-OfflineSynthetic` test seam. The synthetic surface validates

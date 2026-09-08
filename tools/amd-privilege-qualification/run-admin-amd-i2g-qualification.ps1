@@ -41,8 +41,68 @@ if ($ExecuteAuthorizedExperiment) {
         Write-Error 'I2G_HUMAN_REAL_RUN_AUTHORIZATION=CONSUMED'
         exit 1
     }
-    & (Join-Path $PSScriptRoot 'i2g-real-run.ps1') -AuthorizationToken $AuthorizationToken
-    exit ([int]$LASTEXITCODE)
+
+    function Invoke-I2gRealRunnerChild {
+        param([Parameter(Mandatory = $true)][string]$AuthorizationToken)
+
+        # Exit-code contract for the real qualification surface:
+        #   0 = complete paired qualification with a scientific result
+        #   1 = blocked, harness/runtime failure, or cleanup failure
+        #   2 = invalid/no causal scientific result
+        # The runner is isolated because it owns an explicit exit path.  This wrapper
+        # must remain alive long enough for its caller to restore the authorization gate.
+        $runnerPath = Join-Path $PSScriptRoot 'i2g-real-run.ps1'
+        $powershellPath = Join-Path $PSHOME 'powershell.exe'
+        if (-not (Test-Path -LiteralPath $runnerPath -PathType Leaf)) {
+            throw "I2G real runner is missing: $runnerPath"
+        }
+        if (-not (Test-Path -LiteralPath $powershellPath -PathType Leaf)) {
+            throw "Windows PowerShell 5.1 executable is missing: $powershellPath"
+        }
+
+        $escapedRunnerPath = $runnerPath.Replace('"', '\"')
+        $psi = New-Object System.Diagnostics.ProcessStartInfo
+        $psi.FileName = $powershellPath
+        $psi.Arguments = '-NoProfile -NonInteractive -ExecutionPolicy Bypass -File "{0}" -AuthorizationToken "{1}"' -f $escapedRunnerPath, $AuthorizationToken
+        $psi.WorkingDirectory = $PSScriptRoot
+        $psi.UseShellExecute = $false
+        $psi.CreateNoWindow = $true
+        $psi.RedirectStandardOutput = $true
+        $psi.RedirectStandardError = $true
+        $psi.EnvironmentVariables['I2G_REAL_RUN_AUTHORIZATION'] = 'GRANTED_FOR_THIS_TASK_ONLY'
+
+        $process = New-Object System.Diagnostics.Process
+        $process.StartInfo = $psi
+        if (-not $process.Start()) {
+            throw 'I2G real runner child process failed to start.'
+        }
+        $stdoutTask = $process.StandardOutput.ReadToEndAsync()
+        $stderrTask = $process.StandardError.ReadToEndAsync()
+        $process.WaitForExit()
+        $stdout = [string]$stdoutTask.Result
+        $stderr = [string]$stderrTask.Result
+        if (-not [string]::IsNullOrEmpty($stdout)) { [Console]::Out.Write($stdout) }
+        if (-not [string]::IsNullOrEmpty($stderr)) { [Console]::Error.Write($stderr) }
+        $childExitCode = [int]$process.ExitCode
+        $combinedOutput = $stdout + [Environment]::NewLine + $stderr
+        $resultMatches = [regex]::Matches($combinedOutput, '"result"\s*:\s*"([^"]+)"')
+        $resultName = if ($resultMatches.Count -gt 0) { $resultMatches[$resultMatches.Count - 1].Groups[1].Value } else { $null }
+
+        if ($resultName -in @('PASS_AMD_PRIVILEGE_I2G_REAL_QUALIFICATION')) { return 0 }
+        if ($resultName -in @('INVALID_NO_CAUSAL_INTERPRETATION')) { return 2 }
+        if ($resultName -in @('BLOCKED', 'BLOCKED_HARNESS_RUNTIME_ERROR')) { return 1 }
+        if ($childExitCode -eq 2) { return 2 }
+        return 1
+    }
+
+    try {
+        $realRunnerExitCode = Invoke-I2gRealRunnerChild -AuthorizationToken $AuthorizationToken
+        exit ([int]$realRunnerExitCode)
+    }
+    catch {
+        Write-Error ('I2G_REAL_RUNNER_CHILD_FAILURE: ' + $_.Exception.Message)
+        exit 1
+    }
 }
 
 if ($LibraryOnly) {

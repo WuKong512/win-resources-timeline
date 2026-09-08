@@ -59,6 +59,16 @@ $TreatmentResult = 'NOT_RUN'
 $PairedResult = 'INVALID_NO_CAUSAL_INTERPRETATION'
 $CausalInterpretationValid = $false
 $TreatmentAllowed = $false
+$TreatmentAllowedByScientificGate = $false
+$TreatmentPolicyMutationStarted = $false
+$TreatmentPolicyMutationCompleted = $false
+$TreatmentServicePhaseStarted = $false
+$TreatmentDiscoverySpawnIntentDurable = $false
+$TreatmentDiscoveryStarted = $false
+$TreatmentDiscoveryCompleted = $false
+$HarnessRuntimeFailure = $false
+$FailureClass = 'NONE'
+$ScientificResult = 'NOT_OBTAINED'
 $PrimaryError = $null
 $CleanupError = $null
 $Rollback = $null
@@ -126,6 +136,70 @@ function Set-I2gState {
     param([Parameter(Mandatory = $true)][string]$State)
     $script:I2gState.state = $State
     Save-I2gState
+}
+
+function New-I2gTreatmentConfig {
+    param([Parameter(Mandatory = $true)]$ControlConfig)
+
+    # OrderedDictionary has no usable clone method in Windows PowerShell 5.1.  Keep this
+    # copy explicit so the paired configuration remains auditable and deterministic.
+    [ordered]@{
+        schema = $ControlConfig.schema
+        qualification_only = $ControlConfig.qualification_only
+        service_name = $ControlConfig.service_name
+        service_account = $ControlConfig.service_account
+        service_account_sid = $ControlConfig.service_account_sid
+        service_sid = $ControlConfig.service_sid
+        scope = $ControlConfig.scope
+        output_root = $ControlConfig.output_root
+        phase = 'TREATMENT'
+        expected_profile_single_process_privilege = $true
+        expected_amd_cli_path = $ControlConfig.expected_amd_cli_path
+        expected_amd_cli_sha256 = $ControlConfig.expected_amd_cli_sha256
+        expected_amd_cli_version = $ControlConfig.expected_amd_cli_version
+        expected_amd_cli_architecture = $ControlConfig.expected_amd_cli_architecture
+        harness_artifact_sha256 = $ControlConfig.harness_artifact_sha256
+    }
+}
+
+function Get-I2gTreatmentPlaceholderReason {
+    param(
+        [Parameter(Mandatory = $true)][bool]$TreatmentAllowedByScientificGate,
+        [Parameter(Mandatory = $true)][bool]$TreatmentDiscoveryStarted,
+        [Parameter(Mandatory = $true)][bool]$TreatmentDiscoveryCompleted,
+        [Parameter(Mandatory = $true)][bool]$HarnessRuntimeFailure
+    )
+
+    if (-not $TreatmentAllowedByScientificGate) {
+        return 'NOT_ALLOWED_BY_SCIENTIFIC_GATE'
+    }
+    if (-not $TreatmentDiscoveryStarted) {
+        return 'ALLOWED_BUT_NOT_STARTED_DUE_TO_HARNESS_FAILURE'
+    }
+    if (-not $TreatmentDiscoveryCompleted) {
+        return 'STARTED_BUT_EVIDENCE_NOT_COMPLETED'
+    }
+    if ($HarnessRuntimeFailure) {
+        return 'STARTED_BUT_EVIDENCE_NOT_COMPLETED'
+    }
+    return 'STARTED_BUT_EVIDENCE_NOT_COMPLETED'
+}
+
+function Resolve-I2gFailureClass {
+    param(
+        [Parameter(Mandatory = $true)][string]$ErrorMessage,
+        [Parameter(Mandatory = $true)][bool]$TreatmentAllowedByScientificGate,
+        [Parameter(Mandatory = $true)][int]$ControlRuns,
+        [Parameter(Mandatory = $true)][string]$ControlResult
+    )
+
+    if ($ErrorMessage -match '^(INVALID_NO_CAUSAL_INTERPRETATION|CONTROL_DRIFT|INVALID_CONFIGURATION_DELTA|INVALID_TOKEN_DELTA|TOKEN_GATE_FAILED|IDENTITY_MISMATCH|PROCESS_OWNERSHIP_FAILED|TIMEOUT|DISCOVERY_FAILED|CLEANUP_FAILED)(:|$)') {
+        return 'SCIENTIFIC_INVALIDATION'
+    }
+    if (-not $TreatmentAllowedByScientificGate -and $ControlRuns -gt 0 -and $ControlResult -ne 'POWER_UNAVAILABLE') {
+        return 'SCIENTIFIC_INVALIDATION'
+    }
+    return 'HARNESS_RUNTIME_ERROR'
 }
 
 function Get-I2gRightSnapshot {
@@ -334,6 +408,10 @@ function Invoke-I2gServicePhase {
     $script:I2gState.phase = $Phase
     $script:I2gState.service_start_intent_durable = $true
     $phaseState = if ($Phase -eq 'CONTROL') { 'ControlServiceRunning' } else { 'TreatmentServiceRunning' }
+    if ($Phase -eq 'TREATMENT') {
+        $script:I2gState.treatment_service_phase_started = $true
+        $script:I2gState.treatment_service_phase_completed = $false
+    }
     Set-I2gState -State $phaseState
     Invoke-I2eSc -Arguments @('start', $I2gServiceName) | Out-Null
     $serviceAfterStart = Get-I2eServiceSnapshot -ServiceName $I2gServiceName
@@ -358,6 +436,10 @@ function Invoke-I2gServicePhase {
         } else {
             $script:TreatmentRuns = 1
             $script:I2gState.treatment_runs = 1
+            $script:I2gState.treatment_discovery_spawn_intent_durable = $true
+            $script:I2gState.treatment_discovery_started = $true
+            $script:TreatmentDiscoverySpawnIntentDurable = $true
+            $script:TreatmentDiscoveryStarted = $true
         }
         $script:I2gState.total_runs = [int]$script:I2gState.control_runs + [int]$script:I2gState.treatment_runs
         $script:I2gState.discovery_budget_inference = if ($launch) { 'LAUNCH_EVIDENCE' } else { 'SPAWN_INTENT_UNCERTAIN_FAIL_CLOSED' }
@@ -369,9 +451,19 @@ function Invoke-I2gServicePhase {
     if (-not (Test-Path -LiteralPath $discoveryPath -PathType Leaf)) {
         throw "$Phase did not produce durable discovery evidence before timeout."
     }
+    $discoveryEvidence = Read-I2gJson -Path $discoveryPath
+    if ($Phase -eq 'TREATMENT') {
+        $script:I2gState.treatment_discovery_completed = $true
+        $script:TreatmentDiscoveryCompleted = $true
+        Save-I2gState
+    }
     $stop = Stop-I2eService -ServiceName $I2gServiceName
     $serviceAfterStop = Get-I2eServiceSnapshot -ServiceName $I2gServiceName
     $processes = Get-I2gOwnedProcessCounts
+    if ($Phase -eq 'TREATMENT') {
+        $script:I2gState.treatment_service_phase_completed = $true
+        Save-I2gState
+    }
     [ordered]@{
         phase = $Phase
         stop = $stop
@@ -379,7 +471,7 @@ function Invoke-I2gServicePhase {
         processes_after_stop = $processes
         spawn_intent = $spawnIntent
         launch_evidence = $launch
-        discovery = Read-I2gJson -Path $discoveryPath
+        discovery = $discoveryEvidence
     }
 }
 
@@ -874,6 +966,16 @@ try {
         power_sampling_runs = 0
         retry_occurred = $false
         treatment_allowed = $false
+        treatment_allowed_by_scientific_gate = $false
+        treatment_policy_mutation_started = $false
+        treatment_policy_mutation_completed = $false
+        treatment_service_phase_started = $false
+        treatment_service_phase_completed = $false
+        treatment_discovery_started = $false
+        treatment_discovery_completed = $false
+        harness_runtime_failure = $false
+        failure_class = 'NONE'
+        scientific_result = 'NOT_OBTAINED'
         recovery_required = $false
         active_config_path = $ConfigPath
     }
@@ -1025,18 +1127,29 @@ try {
     $controlScientificGate = $ControlResult -ceq 'POWER_UNAVAILABLE' -and $ControlTokenGate -and $ControlTeardownPass
     if (-not $controlScientificGate) {
         $TreatmentAllowed = $false
+        $TreatmentAllowedByScientificGate = $false
+        $FailureClass = 'SCIENTIFIC_INVALIDATION'
+        $ScientificResult = 'NOT_OBTAINED'
         $script:I2gState.treatment_allowed = $false
+        $script:I2gState.treatment_allowed_by_scientific_gate = $false
+        $script:I2gState.failure_class = $FailureClass
+        $script:I2gState.scientific_result = $ScientificResult
         Set-I2gState -State 'Failed'
-        throw "CONTROL did not produce a valid stable POWER_UNAVAILABLE baseline: $ControlResult"
+        throw "CONTROL_DRIFT: CONTROL did not produce a valid stable POWER_UNAVAILABLE baseline: $ControlResult"
     }
 
+    $TreatmentAllowedByScientificGate = $true
     $script:I2gState.treatment_allowed = $true
+    $script:I2gState.treatment_allowed_by_scientific_gate = $true
     $TreatmentAllowed = $true
     Set-I2gState -State 'TreatmentPolicyReady'
     $profileBeforeTreatment = Get-I2gRightSnapshot -Label 'treatment-policy-before-add' -Sid $ServiceSid -Right $I2gTreatmentRight
     if ($profileBeforeTreatment.status -ne 'READ' -or $profileBeforeTreatment.direct_present -or $profileBeforeTreatment.assignment_present) {
-        throw 'TREATMENT ProfileSingle right was not absent immediately before mutation.'
+        throw 'INVALID_CONFIGURATION_DELTA: TREATMENT ProfileSingle right was not absent immediately before mutation.'
     }
+    $TreatmentPolicyMutationStarted = $true
+    $script:I2gState.treatment_policy_mutation_started = $true
+    Save-I2gState
     Write-I2gAtomicJson -Path (Join-Path $RunRoot 'TREATMENT-POLICY.json') -Value ([ordered]@{
         schema = 'amd-i2g-treatment-policy/v1'
         service_sid = $ServiceSid
@@ -1050,17 +1163,17 @@ try {
     Add-I2gExactRight -Sid $ServiceSid -Right $I2gTreatmentRight
     $ProfileSingleAddedByRun = $true
     $profileAfter = Get-I2gRightSnapshot -Label 'treatment-policy-after-add' -Sid $ServiceSid -Right $I2gTreatmentRight
-    if ($profileAfter.status -ne 'READ' -or -not $profileAfter.direct_present -or -not $profileAfter.assignment_present) { throw 'TREATMENT ProfileSingle right readback failed.' }
+    if ($profileAfter.status -ne 'READ' -or -not $profileAfter.direct_present -or -not $profileAfter.assignment_present) { throw 'INVALID_CONFIGURATION_DELTA: TREATMENT ProfileSingle right readback failed.' }
     $systemAfterTreatment = Get-I2gRightSnapshot -Label 'treatment-policy-system-profile-after-add' -Sid $ServiceSid -Right $I2gControlRight
     if ($systemAfterTreatment.status -ne 'READ' -or -not $systemAfterTreatment.direct_present -or -not $systemAfterTreatment.assignment_present) {
-        throw 'TREATMENT SystemProfile right readback failed.'
+        throw 'INVALID_CONFIGURATION_DELTA: TREATMENT SystemProfile right readback failed.'
     }
     $script:I2gState.profile_single_ownership.observed_present = $true
     $script:I2gState.profile_single_ownership.owned_by_run = $true
     $script:I2gState.profile_single_right_added_by_run = $true
     Save-I2gState
     if (-not (Test-I2gExactPolicy -Snapshot $profileAfter -ExpectedRights @($I2gControlRight, $I2gTreatmentRight))) {
-        throw 'TREATMENT direct Service SID policy is not exact.'
+        throw 'INVALID_CONFIGURATION_DELTA: TREATMENT direct Service SID policy is not exact.'
     }
     Write-I2gAtomicJson -Path (Join-Path $RunRoot 'TREATMENT-POLICY-AFTER.json') -Value ([ordered]@{
         schema = 'amd-i2g-treatment-policy-after/v1'
@@ -1075,7 +1188,10 @@ try {
     $pairedConfigPass = (@($controlDirectRights) -join '|') -ceq $I2gControlRight -and
         (@($treatmentDirectRights) -join '|') -ceq (@($expectedTreatmentRights) -join '|')
     $PairedConfigPass = $pairedConfigPass
-    if (-not $PairedConfigPass) { throw 'CONTROL/TREATMENT configuration delta is not exact.' }
+    if (-not $PairedConfigPass) { throw 'INVALID_CONFIGURATION_DELTA: CONTROL/TREATMENT configuration delta is not exact.' }
+    $TreatmentPolicyMutationCompleted = $true
+    $script:I2gState.treatment_policy_mutation_completed = $true
+    Save-I2gState
     Write-I2gAtomicJson -Path (Join-Path $RunRoot 'PAIRED-CONFIG-COMPARISON.json') -Value ([ordered]@{
         schema = 'amd-i2g-paired-config-comparison/v1'
         allowed_delta = $I2gTreatmentRight
@@ -1084,9 +1200,10 @@ try {
         pass = $pairedConfigPass
     })
 
-    $treatmentConfig = $controlConfig.Clone()
-    $treatmentConfig.phase = 'TREATMENT'
-    $treatmentConfig.expected_profile_single_process_privilege = $true
+    $treatmentConfig = New-I2gTreatmentConfig -ControlConfig $controlConfig
+    $TreatmentServicePhaseStarted = $true
+    $script:I2gState.treatment_service_phase_started = $true
+    Save-I2gState
     $treatmentPhase = Invoke-I2gServicePhase -Phase TREATMENT -Config $treatmentConfig
     $TreatmentResult = [string]$treatmentPhase.discovery.availability
     $treatmentPreToken = Read-I2gJson -Path (Join-Path $RunRoot 'TREATMENT-TOKEN-PRE.json')
@@ -1107,15 +1224,42 @@ try {
             $PairedResult = 'PROFILE_SINGLE_INSUFFICIENT_IN_PAIRED_I2G_CONTEXT'
         }
         $CausalInterpretationValid = $true
+        $ScientificResult = $PairedResult
+        $FailureClass = 'NONE'
     }
+    $script:I2gState.treatment_allowed_by_scientific_gate = $TreatmentAllowedByScientificGate
+    $script:I2gState.treatment_policy_mutation_started = $TreatmentPolicyMutationStarted
+    $script:I2gState.treatment_policy_mutation_completed = $TreatmentPolicyMutationCompleted
+    $script:I2gState.treatment_service_phase_started = $TreatmentServicePhaseStarted
+    $script:I2gState.treatment_discovery_spawn_intent_durable = $TreatmentDiscoverySpawnIntentDurable
+    $script:I2gState.treatment_discovery_started = $TreatmentDiscoveryStarted
+    $script:I2gState.treatment_discovery_completed = $TreatmentDiscoveryCompleted
+    $script:I2gState.failure_class = $FailureClass
+    $script:I2gState.scientific_result = $ScientificResult
     Set-I2gState -State 'TreatmentComplete'
 }
 catch {
     if ($null -eq $PrimaryError) { $PrimaryError = $_.Exception.Message }
-    if ($TreatmentRuns -eq 0) { $TreatmentAllowed = $false }
+    if ($FailureClass -eq 'NONE') {
+        $FailureClass = Resolve-I2gFailureClass -ErrorMessage ([string]$PrimaryError) `
+            -TreatmentAllowedByScientificGate $TreatmentAllowedByScientificGate `
+            -ControlRuns ([int]$ControlRuns) -ControlResult ([string]$ControlResult)
+    }
+    $HarnessRuntimeFailure = $FailureClass -eq 'HARNESS_RUNTIME_ERROR'
+    $ScientificResult = if ($HarnessRuntimeFailure) { 'NOT_OBTAINED' } else { 'INVALID_NO_CAUSAL_INTERPRETATION' }
     if ($null -ne $script:I2gState -and $null -ne $RunRoot) {
         $script:I2gState.recovery_required = $ServiceCreated -or $SystemProfileAddedByRun -or $ProfileSingleAddedByRun
-        $script:I2gState.treatment_allowed = $TreatmentAllowed
+        $script:I2gState.treatment_allowed = $TreatmentAllowedByScientificGate
+        $script:I2gState.treatment_allowed_by_scientific_gate = $TreatmentAllowedByScientificGate
+        $script:I2gState.treatment_policy_mutation_started = $TreatmentPolicyMutationStarted
+        $script:I2gState.treatment_policy_mutation_completed = $TreatmentPolicyMutationCompleted
+        $script:I2gState.treatment_service_phase_started = $TreatmentServicePhaseStarted
+        $script:I2gState.treatment_discovery_spawn_intent_durable = $TreatmentDiscoverySpawnIntentDurable
+        $script:I2gState.treatment_discovery_started = $TreatmentDiscoveryStarted
+        $script:I2gState.treatment_discovery_completed = $TreatmentDiscoveryCompleted
+        $script:I2gState.harness_runtime_failure = $HarnessRuntimeFailure
+        $script:I2gState.failure_class = $FailureClass
+        $script:I2gState.scientific_result = $ScientificResult
         Set-I2gState -State 'Failed'
     }
 }
@@ -1166,7 +1310,21 @@ finally {
             schema = 'amd-i2g-real-evidence-placeholder/v1'
             qualification_only = $true
             status = 'NOT_RUN'
-            reason = if ($TreatmentAllowed) { 'evidence was not emitted before an unexpected failure' } else { 'phase was not allowed by the fixed scientific gate' }
+            reason = Get-I2gTreatmentPlaceholderReason `
+                -TreatmentAllowedByScientificGate $TreatmentAllowedByScientificGate `
+                -TreatmentDiscoveryStarted $TreatmentDiscoveryStarted `
+                -TreatmentDiscoveryCompleted $TreatmentDiscoveryCompleted `
+                -HarnessRuntimeFailure $HarnessRuntimeFailure
+            treatment_allowed_by_scientific_gate = $TreatmentAllowedByScientificGate
+            treatment_policy_mutation_started = $TreatmentPolicyMutationStarted
+            treatment_policy_mutation_completed = $TreatmentPolicyMutationCompleted
+            treatment_service_phase_started = $TreatmentServicePhaseStarted
+            treatment_discovery_spawn_intent_durable = $TreatmentDiscoverySpawnIntentDurable
+            treatment_discovery_started = $TreatmentDiscoveryStarted
+            treatment_discovery_completed = $TreatmentDiscoveryCompleted
+            harness_runtime_failure = $HarnessRuntimeFailure
+            failure_class = $FailureClass
+            scientific_result = $ScientificResult
             recorded_at_utc = [DateTime]::UtcNow.ToString('o')
         }
         foreach ($requiredPlaceholder in @(
@@ -1187,6 +1345,11 @@ finally {
             paired_result = $PairedResult
             configuration_delta_pass = $PairedConfigPass
             token_delta_pass = $PairedTokenPass
+            treatment_allowed_by_scientific_gate = $TreatmentAllowedByScientificGate
+            treatment_discovery_started = $TreatmentDiscoveryStarted
+            treatment_discovery_completed = $TreatmentDiscoveryCompleted
+            failure_class = $FailureClass
+            scientific_result = $ScientificResult
             cleanup_result = if ($cleanupPass) { 'PASS' } else { 'FAIL' }
             causal_interpretation_valid = $CausalInterpretationValid -and $cleanupPass
             recorded_at_utc = [DateTime]::UtcNow.ToString('o')
@@ -1203,7 +1366,9 @@ finally {
             'BLOCKED'
         } elseif ($PairedResult -in @('PROFILE_SINGLE_SUFFICIENT_IN_PAIRED_I2G_CONTEXT', 'PROFILE_SINGLE_INSUFFICIENT_IN_PAIRED_I2G_CONTEXT')) {
             'PASS_AMD_PRIVILEGE_I2G_REAL_QUALIFICATION'
-        } elseif ($PrimaryError -like 'INVALID_NO_CAUSAL_INTERPRETATION*' -or -not $TreatmentAllowed) {
+        } elseif ($HarnessRuntimeFailure) {
+            'BLOCKED_HARNESS_RUNTIME_ERROR'
+        } elseif ($FailureClass -eq 'SCIENTIFIC_INVALIDATION' -or $PrimaryError -like 'INVALID_NO_CAUSAL_INTERPRETATION*' -or -not $TreatmentAllowedByScientificGate) {
             'INVALID_NO_CAUSAL_INTERPRETATION'
         } else {
             'BLOCKED'
@@ -1229,7 +1394,17 @@ finally {
             treatment_token_gate = $TreatmentTokenGate
             paired_config_delta = $PairedConfigPass
             paired_token_delta = $PairedTokenPass
-            treatment_allowed = $TreatmentAllowed
+            treatment_allowed = $TreatmentAllowedByScientificGate
+            treatment_allowed_by_scientific_gate = $TreatmentAllowedByScientificGate
+            treatment_policy_mutation_started = $TreatmentPolicyMutationStarted
+            treatment_policy_mutation_completed = $TreatmentPolicyMutationCompleted
+            treatment_service_phase_started = $TreatmentServicePhaseStarted
+            treatment_discovery_spawn_intent_durable = $TreatmentDiscoverySpawnIntentDurable
+            treatment_discovery_started = $TreatmentDiscoveryStarted
+            treatment_discovery_completed = $TreatmentDiscoveryCompleted
+            harness_runtime_failure = $HarnessRuntimeFailure
+            failure_class = $FailureClass
+            scientific_result = $ScientificResult
             preexisting_system_profile_right = $SystemProfilePreexisting
             preexisting_profile_single_right = $ProfileSinglePreexisting
             system_profile_added_by_run = $SystemProfileAddedByRun
@@ -1248,17 +1423,22 @@ finally {
         }
         Write-I2gAtomicJson -Path (Join-Path $RunRoot 'FINAL-SUMMARY.json') -Value $final
         $final | ConvertTo-Json -Depth 50
-        if ($overall -eq 'BLOCKED') { exit 1 }
+        if ($overall -eq 'BLOCKED' -or $overall -eq 'BLOCKED_HARNESS_RUNTIME_ERROR') { exit 1 }
+        if ($overall -eq 'INVALID_NO_CAUSAL_INTERPRETATION') { exit 2 }
     }
     elseif ($null -ne $PrimaryError) {
         [ordered]@{
-            result = if ($PrimaryError -like 'INVALID_NO_CAUSAL_INTERPRETATION*') { 'INVALID_NO_CAUSAL_INTERPRETATION' } else { 'BLOCKED' }
+            result = if ($FailureClass -eq 'SCIENTIFIC_INVALIDATION' -or $PrimaryError -like 'INVALID_NO_CAUSAL_INTERPRETATION*') { 'INVALID_NO_CAUSAL_INTERPRETATION' } else { 'BLOCKED_HARNESS_RUNTIME_ERROR' }
             primary_error = $PrimaryError
+            failure_class = $FailureClass
+            scientific_result = $ScientificResult
+            harness_runtime_failure = $HarnessRuntimeFailure
             real_privileged_run = 'NO'
             real_cleanup_run = 'NO'
             power_sampling_runs = 0
             retry_occurred = $false
         } | ConvertTo-Json -Depth 20
-        if ($PrimaryError -notlike 'INVALID_NO_CAUSAL_INTERPRETATION*') { exit 1 }
+        if ($FailureClass -eq 'SCIENTIFIC_INVALIDATION' -or $PrimaryError -like 'INVALID_NO_CAUSAL_INTERPRETATION*') { exit 2 }
+        exit 1
     }
 }

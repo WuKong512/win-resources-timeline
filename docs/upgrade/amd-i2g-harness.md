@@ -18,7 +18,7 @@ I2G_GATE_CONSUMED = true
 I2G_REAL_EXECUTION_ALLOWED = false
 I2G_REAL_CLEANUP_ALLOWED = false
 I2G_HUMAN_REAL_RUN_AUTHORIZATION = CONSUMED
-I2G_REAL_RUNTIME = 0
+I2G_REAL_RUNTIME = ATTEMPT1_ONLY_CONSUMED
 I2G_OFFLINE_VALIDATION = PASS
 I2G_REAL_GATE_CONSUMED = true
 I2G_HARNESS_ARTIFACT_ARCHITECTURE = x64
@@ -27,9 +27,48 @@ I2G_HARNESS_ARTIFACT_SHA256 = 2613129D179EA2A0496AD680E68E77A79FFFBB569D0802A11A
 I2G_EXECUTION_SURFACE = SYNTHETIC_OFFLINE_FAIL_CLOSED
 I2G_SHARED_EXECUTABLE_OFFLINE_ONLY = false
 I2G_TASK_LOCAL_REAL_RUNNER = ONE_SHOT_EXACT_AUTHORIZATION_ONLY
-I2G_TASK_LOCAL_REAL_RUN_STATUS = BLOCKED_NOT_ELEVATED_AUTHORIZATION_CONSUMED
-NEXT_GATE = NEW_EXPLICIT_HUMAN_AUTHORIZATION_REQUIRED
+I2G_TASK_LOCAL_REAL_RUN_STATUS = ATTEMPT1_VALID_CONTROL_HARNESS_RUNTIME_FAILURE
+NEXT_GATE = HUMAN_REVIEW_BEFORE_ANY_NEW_REAL_RUN_AUTHORIZATION
 ```
+
+## AMD-I2G REAL ATTEMPT #1 — IMMUTABLE HISTORICAL EVIDENCE
+
+Attempt `9ae1e7898f6b4a438f1acc41b76c2715` is retained exactly as generated and
+is not a valid paired scientific result. CONTROL was valid and returned
+`POWER_UNAVAILABLE` after one discovery run. TREATMENT was scientifically
+allowed, but the harness failed before TREATMENT discovery because Windows
+PowerShell attempted to clone an `OrderedDictionary`. Rollback passed and the
+final machine state was clean. The correct classification is
+`HARNESS_RUNTIME_ERROR` with `SCIENTIFIC_RESULT=NOT_OBTAINED`, not a scientific
+TREATMENT rejection. The repair adds explicit CONTROL/TREATMENT progress state,
+an explicit configuration copy, distinct placeholder reasons, deterministic
+wrapper exit codes, and child-process isolation for the reviewed real runner.
+
+```text
+ATTEMPT1_RUN_ID = 9ae1e7898f6b4a438f1acc41b76c2715
+ATTEMPT1_CONTROL_RUNS = 1
+ATTEMPT1_TREATMENT_RUNS = 0
+ATTEMPT1_TOTAL_DISCOVERY_RUNS = 1
+ATTEMPT1_CONTROL_RESULT = POWER_UNAVAILABLE
+ATTEMPT1_TREATMENT_DISCOVERY = NOT_RUN
+ATTEMPT1_TREATMENT_ALLOWED_BY_SCIENTIFIC_GATE = true
+ATTEMPT1_HARNESS_RUNTIME_FAILURE = true
+ATTEMPT1_FAILURE_CLASS = HARNESS_RUNTIME_ERROR
+ATTEMPT1_SCIENTIFIC_RESULT = NOT_OBTAINED
+ATTEMPT1_CAUSAL_INTERPRETATION_VALID = false
+ATTEMPT1_ROLLBACK = PASS
+ATTEMPT1_FINAL_MACHINE_STATE = CLEAN
+ATTEMPT1_AUTHORIZATION = CONSUMED
+ATTEMPT1_RAW_EVIDENCE = IMMUTABLE
+NEW_REAL_RUN_AUTHORIZATION_REQUIRED = true
+```
+
+The reviewed real wrapper uses a separate Windows PowerShell 5.1 child for the
+real runner. Its deterministic exit contract is `0` for a complete paired
+qualification with a scientific result, `1` for blocked/harness/runtime or
+cleanup failure, and `2` for an invalid or non-causal scientific result. This
+keeps the parent process alive to clear authorization state and restore the
+original contract bytes.
 
 本次交付只影响 `tools/amd-privilege-qualification` 资格工具和升级文档；不改变
 Resource Timeline 生产采集器、Provider、数据库、UI、安装器、开机启动或生产账户。
