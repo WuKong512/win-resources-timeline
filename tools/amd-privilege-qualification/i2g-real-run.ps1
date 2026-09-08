@@ -98,9 +98,52 @@ function Write-I2gAtomicJson {
     $parent = Split-Path -Parent $Path
     New-Item -ItemType Directory -Force -Path $parent | Out-Null
     $temp = Join-Path $parent ('.pending-{0}.json' -f ([Guid]::NewGuid().ToString('N')))
+    $replacementBackup = $null
     try {
-        [IO.File]::WriteAllText($temp, ($Value | ConvertTo-Json -Depth 50), [Text.UTF8Encoding]::new($false))
-        [IO.File]::Move($temp, $Path)
+        $json = $Value | ConvertTo-Json -Depth 50
+        $jsonBytes = [Text.UTF8Encoding]::new($false).GetBytes($json)
+        [IO.File]::WriteAllBytes($temp, $jsonBytes)
+        $tempHash = (Get-FileHash -LiteralPath $temp -Algorithm SHA256).Hash.ToUpperInvariant()
+        $sha = [Security.Cryptography.SHA256]::Create()
+        try {
+            $expectedHash = ([BitConverter]::ToString($sha.ComputeHash($jsonBytes))).Replace('-', '').ToUpperInvariant()
+        }
+        finally {
+            $sha.Dispose()
+        }
+        if ($tempHash -cne $expectedHash) {
+            throw "Atomic JSON temporary file hash mismatch: $tempHash"
+        }
+        if (Test-Path -LiteralPath $Path -PathType Leaf) {
+            $replacementBackup = Join-Path $parent ('.pending-{0}.replace-backup.json' -f ([Guid]::NewGuid().ToString('N')))
+            if (Test-Path -LiteralPath $replacementBackup -PathType Leaf) {
+                throw "Atomic JSON replacement backup path already exists: $replacementBackup"
+            }
+            try {
+                [IO.File]::Replace($temp, $Path, $replacementBackup, $true)
+            }
+            catch {
+                throw [InvalidOperationException]::new(
+                    ('Atomic JSON replacement failed; transient backup path={0}; original error={1}' -f $replacementBackup, $_.Exception.Message),
+                    $_.Exception)
+            }
+        }
+        else {
+            [IO.File]::Move($temp, $Path)
+        }
+        $destinationHash = (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToUpperInvariant()
+        if ($destinationHash -cne $expectedHash) {
+            throw "Atomic JSON destination hash mismatch: $destinationHash; transient backup retained at $replacementBackup"
+        }
+        if ($null -ne $replacementBackup) {
+            if (-not (Test-Path -LiteralPath $replacementBackup -PathType Leaf)) {
+                throw "Atomic JSON replacement backup is missing after replacement: $replacementBackup"
+            }
+            Remove-Item -LiteralPath $replacementBackup -Force -ErrorAction Stop
+            if (Test-Path -LiteralPath $replacementBackup -PathType Leaf) {
+                throw "Atomic JSON replacement backup could not be removed: $replacementBackup"
+            }
+        }
     }
     catch {
         if (Test-Path -LiteralPath $temp -PathType Leaf) {
@@ -410,6 +453,7 @@ function Invoke-I2gServicePhase {
     $script:I2gState.service_start_intent_durable = $true
     $phaseState = if ($Phase -eq 'CONTROL') { 'ControlServiceRunning' } else { 'TreatmentServiceRunning' }
     if ($Phase -eq 'TREATMENT') {
+        $script:TreatmentServicePhaseStarted = $true
         $script:I2gState.treatment_service_phase_started = $true
         $script:I2gState.treatment_service_phase_completed = $false
         $script:TreatmentServicePhaseCompleted = $false
@@ -1199,9 +1243,6 @@ try {
     })
 
     $treatmentConfig = New-I2gTreatmentConfig -ControlConfig $controlConfig
-    $TreatmentServicePhaseStarted = $true
-    $script:I2gState.treatment_service_phase_started = $true
-    Save-I2gState
     $treatmentPhase = Invoke-I2gServicePhase -Phase TREATMENT -Config $treatmentConfig
     $TreatmentServicePhaseCompleted = $true
     $script:I2gState.treatment_service_phase_completed = $TreatmentServicePhaseCompleted

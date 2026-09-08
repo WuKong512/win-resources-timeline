@@ -286,18 +286,71 @@ exit $innerExitCode
     }
 }
 
+function Invoke-I2gAtomicJsonWriterTests {
+    param([Parameter(Mandatory = $true)][string]$RunnerPath)
+
+    $writerFunction = [ScriptBlock]::Create((Get-I2gFunctionDefinitionText -Path $RunnerPath -Name 'Write-I2gAtomicJson'))
+    . $writerFunction
+    $root = Join-Path $testRoot 'atomic-json-writer'
+    New-Item -ItemType Directory -Force -Path $root | Out-Null
+    $destination = Join-Path $root 'config.json'
+    $valueA = [ordered]@{ phase = 'A'; sequence = 1; marker = 'first' }
+    $valueB = [ordered]@{ phase = 'B'; sequence = 2; marker = 'overwrite' }
+    $valueC = [ordered]@{ phase = 'C'; sequence = 3; marker = 'repeat' }
+
+    Write-I2gAtomicJson -Path $destination -Value $valueA
+    Assert-True (Test-Path -LiteralPath $destination -PathType Leaf) 'Atomic JSON first write did not create the destination.'
+    $observedA = Get-Content -LiteralPath $destination -Raw | ConvertFrom-Json
+    Assert-True ([string]$observedA.phase -ceq 'A' -and [int]$observedA.sequence -eq 1) 'Atomic JSON first-write content mismatch.'
+    Write-Host 'I2G_ATOMIC_JSON_FIRST_WRITE=PASS'
+
+    Write-I2gAtomicJson -Path $destination -Value $valueB
+    $observedB = Get-Content -LiteralPath $destination -Raw | ConvertFrom-Json
+    Assert-True ([string]$observedB.phase -ceq 'B' -and [int]$observedB.sequence -eq 2) 'Atomic JSON existing-destination overwrite mismatch.'
+    Write-Host 'I2G_ATOMIC_JSON_OVERWRITE_EXISTING=PASS'
+
+    Write-I2gAtomicJson -Path $destination -Value $valueC
+    $observedC = Get-Content -LiteralPath $destination -Raw | ConvertFrom-Json
+    Assert-True ([string]$observedC.phase -ceq 'C' -and [int]$observedC.sequence -eq 3) 'Atomic JSON repeated overwrite mismatch.'
+    $leftovers = @(Get-ChildItem -LiteralPath $root -File -ErrorAction SilentlyContinue | Where-Object { $_.Name -like '.pending-*' })
+    Assert-True ($leftovers.Count -eq 0) 'Atomic JSON left a temporary or transient replacement file behind.'
+    $writerSource = Get-I2gFunctionDefinitionText -Path $RunnerPath -Name 'Write-I2gAtomicJson'
+    Assert-True ($writerSource -notmatch 'Remove-Item\s+-LiteralPath\s+\$Path') 'Atomic JSON writer deletes the destination before replacement.'
+    Write-Host 'I2G_ATOMIC_JSON_REPEATED_OVERWRITE=PASS'
+    Write-Host 'I2G_ATOMIC_JSON_DESTINATION_NEVER_DELETE_THEN_MOVE=PASS'
+    Write-Host 'I2G_ATOMIC_JSON_TEMP_CLEANUP=PASS'
+    Write-Host 'I2G_ATOMIC_JSON_TRANSIENT_BACKUP_CLEANUP=PASS'
+
+    $failureTarget = Join-Path $root 'failure-target'
+    New-Item -ItemType Directory -Force -Path $failureTarget | Out-Null
+    $failureRaised = $false
+    try {
+        Write-I2gAtomicJson -Path $failureTarget -Value $valueA
+    }
+    catch {
+        $failureRaised = $true
+    }
+    Assert-True $failureRaised 'Atomic JSON failure-safety test did not raise for a directory destination.'
+    Assert-True (Test-Path -LiteralPath $failureTarget -PathType Container) 'Atomic JSON failure removed the existing destination directory.'
+    Write-Host 'I2G_ATOMIC_JSON_FAILURE_SAFETY=PASS'
+}
+
 function Get-TestTreatmentServicePhaseState {
     param(
-        [Parameter(Mandatory = $true)][bool]$ServicePhaseStarted,
+        [Parameter(Mandatory = $true)][bool]$ConfigPublished,
+        [Parameter(Mandatory = $true)][bool]$ServiceStartSucceeded,
         [Parameter(Mandatory = $true)][bool]$DiscoveryStarted,
         [Parameter(Mandatory = $true)][bool]$DiscoveryCompleted,
         [Parameter(Mandatory = $true)][bool]$ServiceTeardownCompleted
     )
+    $servicePhaseStarted = $ConfigPublished
     [ordered]@{
-        treatment_service_phase_started = $ServicePhaseStarted
+        persisted_phase = if ($servicePhaseStarted) { 'TREATMENT' } else { 'CONTROL' }
+        treatment_service_phase_started = $servicePhaseStarted
         treatment_discovery_started = $DiscoveryStarted
         treatment_discovery_completed = $DiscoveryCompleted
-        treatment_service_phase_completed = $ServicePhaseStarted -and $ServiceTeardownCompleted
+        treatment_service_phase_completed = $servicePhaseStarted -and $ServiceStartSucceeded -and
+            $DiscoveryStarted -and $DiscoveryCompleted -and $ServiceTeardownCompleted
     }
 }
 
@@ -307,18 +360,26 @@ function Invoke-I2gTreatmentServicePhaseStateTests {
     Assert-True ($RunnerSource.Contains('$TreatmentServicePhaseCompleted = $true')) 'Successful treatment service completion state is missing.'
     Assert-True ($RunnerSource.Contains("treatment_service_phase_completion_source = 'EXPLICIT_STATE'")) 'Explicit treatment completion source marker is missing.'
     Assert-True ($RunnerSource -notmatch 'treatment_service_phase_completed\s*=\s*if\s*\(\$TreatmentServicePhaseStarted\)\s*\{\s*\$TreatmentDiscoveryCompleted') 'Treatment service completion is still derived from discovery completion.'
+    $servicePhaseSource = Get-I2gFunctionDefinitionText -Path $realRunnerPath -Name 'Invoke-I2gServicePhase'
+    $configWrite = $servicePhaseSource.IndexOf('Write-I2gAtomicJson -Path $ConfigPath -Value $Config', [StringComparison]::Ordinal)
+    $phaseStart = $servicePhaseSource.IndexOf('$script:TreatmentServicePhaseStarted = $true', [StringComparison]::Ordinal)
+    $serviceStart = $servicePhaseSource.IndexOf("Invoke-I2eSc -Arguments @('start', `$I2gServiceName)", [StringComparison]::Ordinal)
+    Assert-True ($configWrite -ge 0 -and $phaseStart -gt $configWrite -and $serviceStart -gt $phaseStart) 'Treatment phase start is not ordered after config publication and before service start.'
+    Assert-True ($RunnerSource -notmatch '\$treatmentConfig\s*=\s*New-I2gTreatmentConfig[\s\S]{0,180}\$TreatmentServicePhaseStarted\s*=\s*\$true') 'Treatment phase is marked started before Invoke-I2gServicePhase publishes config.'
 
-    $neverStarted = Get-TestTreatmentServicePhaseState -ServicePhaseStarted $false -DiscoveryStarted $false -DiscoveryCompleted $false -ServiceTeardownCompleted $false
-    Assert-True (-not $neverStarted.treatment_service_phase_started -and -not $neverStarted.treatment_service_phase_completed) 'Never-started service phase state is wrong.'
-    $beforeDiscovery = Get-TestTreatmentServicePhaseState -ServicePhaseStarted $true -DiscoveryStarted $false -DiscoveryCompleted $false -ServiceTeardownCompleted $false
-    Assert-True ($beforeDiscovery.treatment_service_phase_started -and -not $beforeDiscovery.treatment_service_phase_completed) 'Failure before discovery state is wrong.'
-    $discoveryFailure = Get-TestTreatmentServicePhaseState -ServicePhaseStarted $true -DiscoveryStarted $true -DiscoveryCompleted $false -ServiceTeardownCompleted $false
-    Assert-True ($discoveryFailure.treatment_discovery_started -and -not $discoveryFailure.treatment_discovery_completed -and -not $discoveryFailure.treatment_service_phase_completed) 'Discovery failure state is wrong.'
-    $teardownFailure = Get-TestTreatmentServicePhaseState -ServicePhaseStarted $true -DiscoveryStarted $true -DiscoveryCompleted $true -ServiceTeardownCompleted $false
-    Assert-True ($teardownFailure.treatment_discovery_completed -and -not $teardownFailure.treatment_service_phase_completed) 'Teardown failure state is wrong.'
-    $complete = Get-TestTreatmentServicePhaseState -ServicePhaseStarted $true -DiscoveryStarted $true -DiscoveryCompleted $true -ServiceTeardownCompleted $true
-    Assert-True ($complete.treatment_service_phase_started -and $complete.treatment_discovery_completed -and $complete.treatment_service_phase_completed) 'Complete service phase state is wrong.'
-    Write-Host 'I2G_TREATMENT_SERVICE_PHASE_STATE_MACHINE=PASS cases=5 source=EXPLICIT_STATE'
+    $case1 = Get-TestTreatmentServicePhaseState -ConfigPublished $false -ServiceStartSucceeded $false -DiscoveryStarted $false -DiscoveryCompleted $false -ServiceTeardownCompleted $false
+    Assert-True ($case1.persisted_phase -ceq 'CONTROL' -and -not $case1.treatment_service_phase_started -and -not $case1.treatment_service_phase_completed) 'Case 1 pre-config failure state is wrong.'
+    $case2 = Get-TestTreatmentServicePhaseState -ConfigPublished $false -ServiceStartSucceeded $false -DiscoveryStarted $false -DiscoveryCompleted $false -ServiceTeardownCompleted $false
+    Assert-True ($case2.persisted_phase -ceq 'CONTROL' -and -not $case2.treatment_service_phase_started -and -not $case2.treatment_service_phase_completed) 'Case 2 config-write failure state is wrong.'
+    $case3 = Get-TestTreatmentServicePhaseState -ConfigPublished $true -ServiceStartSucceeded $false -DiscoveryStarted $false -DiscoveryCompleted $false -ServiceTeardownCompleted $false
+    Assert-True ($case3.persisted_phase -ceq 'TREATMENT' -and $case3.treatment_service_phase_started -and -not $case3.treatment_service_phase_completed) 'Case 3 service-start failure state is wrong.'
+    $case4 = Get-TestTreatmentServicePhaseState -ConfigPublished $true -ServiceStartSucceeded $true -DiscoveryStarted $true -DiscoveryCompleted $false -ServiceTeardownCompleted $false
+    Assert-True ($case4.treatment_service_phase_started -and $case4.treatment_discovery_started -and -not $case4.treatment_discovery_completed -and -not $case4.treatment_service_phase_completed) 'Case 4 discovery failure state is wrong.'
+    $case5 = Get-TestTreatmentServicePhaseState -ConfigPublished $true -ServiceStartSucceeded $true -DiscoveryStarted $true -DiscoveryCompleted $true -ServiceTeardownCompleted $false
+    Assert-True ($case5.treatment_discovery_completed -and -not $case5.treatment_service_phase_completed) 'Case 5 teardown failure state is wrong.'
+    $case6 = Get-TestTreatmentServicePhaseState -ConfigPublished $true -ServiceStartSucceeded $true -DiscoveryStarted $true -DiscoveryCompleted $true -ServiceTeardownCompleted $true
+    Assert-True ($case6.treatment_service_phase_started -and $case6.treatment_discovery_completed -and $case6.treatment_service_phase_completed) 'Case 6 full success state is wrong.'
+    Write-Host 'I2G_TREATMENT_SERVICE_PHASE_STATE_MACHINE=PASS cases=6 persisted_phase_consistent=YES source=EXPLICIT_STATE'
 }
 
 foreach ($path in @($contractPath, $setupPath, $realRunnerPath, $cleanupPath, $PSCommandPath)) {
@@ -361,6 +422,8 @@ $offlineControlConfig = [ordered]@{
     expected_amd_cli_architecture = 'x64'
     harness_artifact_sha256 = 'offline-artifact'
 }
+$offlineAtomicWriterPath = $realRunnerPath
+Invoke-I2gAtomicJsonWriterTests -RunnerPath $offlineAtomicWriterPath
 $offlineTreatmentConfig = New-I2gTreatmentConfig -ControlConfig $offlineControlConfig
 $allowedConfigDelta = @('phase', 'expected_profile_single_process_privilege')
 foreach ($configKey in $offlineControlConfig.Keys) {

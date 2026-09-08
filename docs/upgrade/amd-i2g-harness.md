@@ -18,7 +18,7 @@ I2G_GATE_CONSUMED = true
 I2G_REAL_EXECUTION_ALLOWED = false
 I2G_REAL_CLEANUP_ALLOWED = false
 I2G_HUMAN_REAL_RUN_AUTHORIZATION = CONSUMED
-I2G_REAL_RUNTIME = ATTEMPT1_ONLY_CONSUMED
+I2G_REAL_RUNTIME = ATTEMPT1_AND_ATTEMPT2_CONSUMED
 I2G_OFFLINE_VALIDATION = PASS
 I2G_REAL_GATE_CONSUMED = true
 I2G_HARNESS_ARTIFACT_ARCHITECTURE = x64
@@ -27,7 +27,7 @@ I2G_HARNESS_ARTIFACT_SHA256 = 2613129D179EA2A0496AD680E68E77A79FFFBB569D0802A11A
 I2G_EXECUTION_SURFACE = SYNTHETIC_OFFLINE_FAIL_CLOSED
 I2G_SHARED_EXECUTABLE_OFFLINE_ONLY = false
 I2G_TASK_LOCAL_REAL_RUNNER = ONE_SHOT_EXACT_AUTHORIZATION_ONLY
-I2G_TASK_LOCAL_REAL_RUN_STATUS = ATTEMPT1_VALID_CONTROL_HARNESS_RUNTIME_FAILURE
+I2G_TASK_LOCAL_REAL_RUN_STATUS = ATTEMPT2_VALID_CONTROL_AND_TREATMENT_POLICY_MUTATION_HARNESS_RUNTIME_FAILURE
 NEXT_GATE = HUMAN_REVIEW_BEFORE_ANY_NEW_REAL_RUN_AUTHORIZATION
 ```
 
@@ -62,6 +62,55 @@ ATTEMPT1_AUTHORIZATION = CONSUMED
 ATTEMPT1_RAW_EVIDENCE = IMMUTABLE
 NEW_REAL_RUN_AUTHORIZATION_REQUIRED = true
 ```
+
+## AMD-I2G REAL ATTEMPT #2 — IMMUTABLE HISTORICAL EVIDENCE
+
+Attempt `2eee22d181dd4fc39415a9a227afcb2c` is also retained exactly as generated
+and is not a valid paired scientific result. CONTROL completed one valid
+`POWER_UNAVAILABLE` discovery and teardown. The scientific gate allowed TREATMENT,
+and the TREATMENT policy mutation completed with the expected configuration delta,
+but the harness failed before TREATMENT service start/discovery because the shared
+`I2G-CONFIG.json` writer attempted `File.Move` over an existing destination. The
+TREATMENT service phase therefore was not genuinely started, rollback passed, and
+the final machine state was clean. The correct classification is
+`HARNESS_RUNTIME_ERROR` with `SCIENTIFIC_RESULT=NOT_OBTAINED`; no sufficiency or
+insufficiency conclusion about `SeProfileSingleProcessPrivilege` is valid.
+
+```text
+ATTEMPT2_RUN_ID = 2eee22d181dd4fc39415a9a227afcb2c
+ATTEMPT2_REAL_PRIVILEGED_RUN = YES
+ATTEMPT2_CONTROL_RUNS = 1
+ATTEMPT2_TREATMENT_RUNS = 0
+ATTEMPT2_TOTAL_DISCOVERY_RUNS = 1
+ATTEMPT2_CONTROL_RESULT = POWER_UNAVAILABLE
+ATTEMPT2_TREATMENT_ALLOWED_BY_SCIENTIFIC_GATE = true
+ATTEMPT2_TREATMENT_POLICY_MUTATION_STARTED = true
+ATTEMPT2_TREATMENT_POLICY_MUTATION_COMPLETED = true
+ATTEMPT2_RECORDED_TREATMENT_SERVICE_PHASE_STARTED = true
+ATTEMPT2_TREATMENT_SERVICE_PHASE_COMPLETED = false
+ATTEMPT2_TREATMENT_DISCOVERY = NOT_RUN
+ATTEMPT2_FAILURE_CLASS = HARNESS_RUNTIME_ERROR
+ATTEMPT2_SCIENTIFIC_RESULT = NOT_OBTAINED
+ATTEMPT2_CAUSAL_INTERPRETATION_VALID = false
+ATTEMPT2_ROLLBACK = PASS
+ATTEMPT2_FINAL_MACHINE_STATE = CLEAN
+ATTEMPT2_AUTHORIZATION = CONSUMED
+ATTEMPT2_RAW_EVIDENCE = IMMUTABLE
+ATTEMPT3_AUTHORIZATION = NOT_GRANTED
+```
+
+The historical `treatment_service_phase_started=true` field is preserved exactly
+as recorded; it is the state-model defect repaired here, because config
+publication had failed before the TREATMENT service lifecycle genuinely began.
+Future runs must record `false` when TREATMENT config publication fails.
+
+The repair keeps JSON publication atomic for both absent and existing
+destinations, marks the TREATMENT service phase started only after its config is
+published, and keeps service-phase completion as explicit lifecycle state. The
+manual operator launcher remains an untracked operator artifact; its child
+process closure is validated separately and must restore the contract before
+returning control to the operator. These repairs do not authorize another real
+run.
 
 The reviewed real wrapper uses a separate Windows PowerShell 5.1 child for the
 real runner. Its deterministic exit contract is `0` for a complete paired
