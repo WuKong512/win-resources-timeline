@@ -126,11 +126,13 @@ the authoritative summaries, not replacements for raw evidence.
 | AMD-I2G Attempt #3 | Does adding only ProfileSingle change the paired LocalService result? | Same fresh LocalService / Service SID / Session 0 / x64 context in both phases | Control: SystemProfile only; treatment adds and enables ProfileSingle | Same `timechart --list` | Real | Control and treatment both `POWER_UNAVAILABLE`; paired delta and token gates pass; rollback pass | `true`, but only in frozen paired I2G context | ProfileSingle sufficiency in that context | Does not rule out service context, operation/API path, runtime/device authorization, platform details, or other capability combinations | Authoritative post-I2G decision input; run `d6d6c33003934dc5ad2b0b79307e5b2c` |
 
 The CLI/API and vendor-context records add an important non-privilege fact:
-the successful CLI path loads the public `AMDPowerProfileAPI`/CXL graph, while
-the direct minimal API probe has a different process/loader context and aborts.
-That divergence is real evidence, but the repository has not yet reconciled
-whether `timechart --list` is a production-representative telemetry gate or an
-account-sensitive enumeration path. That is the selected next task.
+the successful CLI path has recorded public `AMDPowerProfileAPI`/CXL dependency
+evidence, while the direct minimal API probe has a different process/loader
+context and aborts. The completed operation-path audit classified the
+relationship between `timechart --list` and active production sampling as
+`INSUFFICIENT`. `--list` remains discovery-scoped for production admission
+purposes, and enumeration/sampling equivalence remains `UNKNOWN`. No next task
+is selected pending human review of the operation-path evidence gap.
 
 ## Confounders and invariants
 
