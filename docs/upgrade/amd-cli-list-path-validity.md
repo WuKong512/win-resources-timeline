@@ -341,9 +341,10 @@ runtime state, without changing privileges or account state. That slice is a
 future proposal only. It is not authorized by this task, and no operation-path
 experiment was performed here.
 
-No next task is selected until a human reviews this evidence gap; choosing a
-new privilege, account, or runtime experiment from this unresolved route would
-exceed the evidence.
+The D1 operation-path evidence-gap review is complete.
+`SELECTED_NEXT_TASK = AMD-RUNTIME-PREREQUISITE-AUDIT-Q1` is the read-only next
+task, with `NEXT_GATE = HUMAN_REVIEW_RUNTIME_PREREQUISITE_AUDIT`; selecting it
+does not authorize any live AMD operation.
 
 ## Current-state handoff
 

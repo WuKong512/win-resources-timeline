@@ -139,8 +139,11 @@ evidence, while the direct minimal API probe has a different process/loader
 context and aborts. The completed operation-path audit classified the
 relationship between `timechart --list` and active production sampling as
 `INSUFFICIENT`. `--list` remains discovery-scoped for production admission
-purposes, and enumeration/sampling equivalence remains `UNKNOWN`. No next task
-is selected pending human review of the operation-path evidence gap.
+purposes, and enumeration/sampling equivalence remains `UNKNOWN`. The D1
+operation-path evidence-gap review is complete. `SELECTED_NEXT_TASK =
+AMD-RUNTIME-PREREQUISITE-AUDIT-Q1` is the read-only next task, with
+`NEXT_GATE = HUMAN_REVIEW_RUNTIME_PREREQUISITE_AUDIT`; selecting it does not
+authorize any live AMD operation.
 
 ## Confounders and invariants
 
