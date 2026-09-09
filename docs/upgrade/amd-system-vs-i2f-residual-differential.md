@@ -161,6 +161,11 @@ does not implement, authorize, or execute that experiment. The detailed
 normalized matrix, candidate scoring, and paired design-only contract are recorded in
 [`amd-i2g-variable-selection.md`](amd-i2g-variable-selection.md).
 
+> Historical pointer: the I2G boundary and `NEXT_GATE` values below describe
+> the pre-run selection state. They are superseded by the completed I2G result
+> and the current post-I2G decision in
+> [`amd-post-i2g-production-admission.md`](amd-post-i2g-production-admission.md).
+
 ## I2G variable-selection closure
 
 The read-only review selected exactly one future variable:

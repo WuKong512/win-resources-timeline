@@ -767,7 +767,7 @@ The result interpretation is preregistered:
   a failed/invalid qualification result and must not be interpreted as a
   causal AMD result.
 
-## Current-state handoff
+## HISTORICAL / SUPERSEDED — Current-state handoff before I2G execution
 
 ```text
 I2G_VARIABLE = SeProfileSingleProcessPrivilege
@@ -868,7 +868,12 @@ TREATMENT_RETRY_ALLOWED = false
 CONTROL_DRIFT_STOP_BEFORE_TREATMENT = true
 TOKEN_TEARDOWN_BEFORE_TREATMENT_POLICY_MUTATION = true
 NEW_REAL_RUN_REQUIRED = false
-NEXT_GATE = HUMAN_FINAL_REVIEW_BEFORE_MARKING_PR24_READY
+PR24 = MERGED
+PRODUCTION_ADMISSION = DEFER
+I2H_JUSTIFIED = NO
+SELECTED_NEXT_TASK = AMD-CLI-LIST-PATH-VALIDITY-Q1
+NEXT_GATE = HUMAN_REVIEW_SELECTED_POST_I2G_NEXT_TASK
+POST_I2G_DECISION = amd-post-i2g-production-admission.md
 ```
 
 The implementation adds no production account selection. The default I2G surface
