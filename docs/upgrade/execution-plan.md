@@ -2210,7 +2210,11 @@ paired phase transition permits only the single `SeProfileSingleProcessPrivilege
 assignment to the same Service SID after CONTROL token/process teardown; all
 actual run counts are recorded separately from the planned and maximum caps.
 
-## AMD CURRENT STATE RECONCILIATION — I2G IMPLEMENTED OFFLINE
+## HISTORICAL / PREDECESSOR / SUPERSEDED — AMD CURRENT STATE RECONCILIATION — I2G IMPLEMENTED OFFLINE
+
+This is a preserved predecessor handoff, not authoritative current state. It
+is superseded by the completed AMD runtime prerequisite audit at the end of
+this document.
 
 The previous design-only I2G block above is retained for history. The current
 implementation and handoff are defined in
@@ -2374,7 +2378,10 @@ The result does not generalize beyond the paired I2G context. Attempt #1 and
 Attempt #2 remain historical harness failures with `SCIENTIFIC_RESULT=NOT_OBTAINED`;
 no Attempt #4 is required or allowed.
 
-## AMD CURRENT STATE RECONCILIATION — POST-I2G PRODUCTION ADMISSION DECISION
+## HISTORICAL / PREDECESSOR / SUPERSEDED — AMD CURRENT STATE RECONCILIATION — POST-I2G PRODUCTION ADMISSION DECISION
+
+This is a preserved predecessor handoff, not authoritative current state. It
+is superseded by the completed AMD runtime prerequisite audit below.
 
 The preceding I2G implementation handoff is now superseded by the
 documentation-only decision in
@@ -2434,6 +2441,8 @@ Its detailed source of truth is
 The prior Q1 selection is superseded as a current task marker; historical
 decision snapshots remain immutable.
 
+This is the only authoritative current state in this execution plan.
+
 ~~~text
 AMD_RUNTIME_PREREQUISITE_AUDIT_Q1 = COMPLETE / INSUFFICIENT_EVIDENCE
 RUNTIME_PREREQUISITE_AUDIT = COMPLETE / INSUFFICIENT_EVIDENCE
@@ -2465,7 +2474,9 @@ I2H_JUSTIFIED = NO
 ATTEMPT4_AUTHORIZATION = NOT_GRANTED
 LIVE_PAIR_AUTHORIZED = NO
 SELECTED_NEXT_TASK = NONE / HUMAN_REVIEW_REQUIRED
+SELECTED_NEXT_TASK_GOAL = NO_UNIQUE_LOWER_RISK_READ_ONLY_TASK; REVIEW_Q1_EVIDENCE_BEFORE_ANY_SEPARATELY_AUTHORIZED_LIVE_OPERATION
 NEXT_GATE = HUMAN_REVIEW_RUNTIME_PREREQUISITE_AUDIT
+EXECUTION_PLAN_SINGLE_CURRENT_STATE = PASS
 AMD_CLI_REAL_INVOCATIONS = 0
 AMD_API_REAL_INVOCATIONS = 0
 POWER_SAMPLING_RUNS = 0
