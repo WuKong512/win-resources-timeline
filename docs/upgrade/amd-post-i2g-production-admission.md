@@ -266,6 +266,10 @@ result is the right product signal. A further privilege test would add another
 token variable without resolving the known account/context confounding or the
 CLI/API operation mismatch.
 
+Historical process note: Draft PR creation was initially blocked by GitHub
+sign-in and was later resolved by PR #26. This is historical process context,
+not current-state truth or a scientific gate.
+
 ## P2 disposition
 
 ```text
@@ -368,7 +372,6 @@ OPERATION_PATH_AUDIT = amd-cli-list-path-validity.md
 REAL_EXECUTION_AUTHORIZED_BY_THIS_TASK = NO
 RESULT = PASS_WITH_EXTERNAL_BLOCKERS
 TASK_RESULT = COMPLETE / INSUFFICIENT
-PR_CREATION = BLOCKED_GITHUB_SIGN_IN_REQUIRED
 QUALIFICATION_TEST = BLOCKED
 QUALIFICATION_TEST_BLOCKER = PRE_EXISTING_PINNED_RELEASE_ARTIFACT_SHA256_MISMATCH
 QUALIFICATION_BLOCKER_TASK_CAUSED = NO
