@@ -55,10 +55,14 @@ PRODUCTION_ACCOUNT = UNRESOLVED
 LOCAL_SYSTEM_PRODUCTION_SELECTION = NOT_AUTHORIZED
 PRODUCTION_ADMISSION = DEFER
 I2H_JUSTIFIED = NO
-SELECTED_NEXT_TASK = AMD-CLI-LIST-PATH-VALIDITY-Q1
-NEXT_GATE = HUMAN_REVIEW_SELECTED_POST_I2G_NEXT_TASK
-NEXT_TASK = AMD-CLI-LIST-PATH-VALIDITY-Q1
+AMD_CLI_LIST_PATH_VALIDITY_Q1 = COMPLETE / INSUFFICIENT
+CLI_LIST_ROLE = ACCOUNT_SENSITIVE_COUNTER_ENUMERATION / DISCOVERY_ONLY
+ENUMERATION_AND_SAMPLING_EQUIVALENCE = UNKNOWN
+SELECTED_NEXT_TASK = NONE
+NEXT_GATE = HUMAN_REVIEW_OPERATION_PATH_EVIDENCE_GAP
+NEXT_TASK = NONE
 POST_I2G_DECISION = ../upgrade/amd-post-i2g-production-admission.md
+OPERATION_PATH_AUDIT = ../upgrade/amd-cli-list-path-validity.md
 ARCHITECTURE_SINGLE_AUTHORITATIVE_CURRENT_STATE = PASS
 ```
 
@@ -72,6 +76,11 @@ the LocalService context. The I2B non-sampling `timechart --list` differential
 and I2C SYSTEM-only comparison are historical real evidence, and all of their
 legacy setup, client, and cleanup wrappers are now permanently retired. None
 selects LocalSystem, alters AMD permissions, or admits a provider.
+
+The operation-path audit is now complete with route verdict `INSUFFICIENT`.
+The historical discovery results remain scoped to counter enumeration; they do
+not by themselves establish or reject active production sampling capability.
+See [`amd-cli-list-path-validity.md`](../upgrade/amd-cli-list-path-validity.md).
 
 ## HISTORICAL / SUPERSEDED I2E PRE-CONTROL INCIDENT
 
