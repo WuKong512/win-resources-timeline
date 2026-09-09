@@ -9,6 +9,7 @@ $RunnerPath = Join-Path $ToolRoot 'run-amd-localservice-active-sampling.ps1'
 $ServiceHostPath = Join-Path $ToolRoot 'service-host.ps1'
 . (Join-Path $ToolRoot 'contract.ps1')
 . (Join-Path $ToolRoot '..\amd-uprof-cli-spike\postprocess.ps1')
+. (Join-Path $ToolRoot '..\amd-privilege-qualification\sc-argument-contract.ps1')
 
 function Assert-True {
     param(
@@ -42,6 +43,17 @@ function Assert-Contains {
     }
 }
 
+function Assert-ArrayEqual {
+    param(
+        [Parameter(Mandatory = $true)][object[]]$Actual,
+        [Parameter(Mandatory = $true)][object[]]$Expected,
+        [Parameter(Mandatory = $true)][string]$Message
+    )
+    $actualText = @($Actual | ForEach-Object { [string]$_ }) -join [char]0
+    $expectedText = @($Expected | ForEach-Object { [string]$_ }) -join [char]0
+    Assert-Equal -Actual $actualText -Expected $expectedText -Message $Message
+}
+
 function Test-PowerShellSyntax {
     param([Parameter(Mandatory = $true)][string]$Path)
 
@@ -69,12 +81,61 @@ Assert-Equal -Actual $contract.amd_cli_interval_ms -Expected 1000 -Message 'CLI 
 Assert-Equal -Actual $contract.amd_cli_duration_seconds -Expected 10 -Message 'CLI duration'
 Assert-Equal -Actual $contract.max_runs -Expected 1 -Message 'one-shot max runs'
 Assert-Equal -Actual $contract.retries -Expected 0 -Message 'retry prohibition'
+Assert-True -Condition $contract.live_service_mutation_supported -Message 'live service mutation capability is explicit'
+Assert-True -Condition $contract.live_output_acl_mutation_supported -Message 'live output ACL capability is explicit'
+Assert-True -Condition $contract.live_control_baseline_lsa_mutation_supported -Message 'live CONTROL baseline LSA capability is explicit'
+Assert-Equal -Actual $contract.allowed_lsa_right -Expected 'SeSystemProfilePrivilege' -Message 'allowed LSA right'
+Assert-Equal -Actual $contract.allowed_lsa_target -Expected 'EXACT_Q1_SERVICE_SID_ONLY' -Message 'allowed LSA target'
 
 $command = @(Get-FixedAmdCliArguments -OutputDirectory 'C:\ProgramData\run\raw\timechart-output')
 Assert-Equal -Actual ($command -join '|') -Expected 'timechart|--event|power|--interval|1000|--duration|10|--format|csv|--output-dir|C:\ProgramData\run\raw\timechart-output' -Message 'exact CLI command'
 Assert-True -Condition (-not ($command -contains '--list')) -Message 'active command must not include discovery'
 Assert-True -Condition (-not ($command -contains '--temperature')) -Message 'active command must not add temperature'
 Assert-True -Condition (-not ($command -contains '--frequency')) -Message 'active command must not add frequency'
+
+$serviceBinPath = 'C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe -NoLogo -File C:\qualification\service-host.ps1 -ManifestPath C:\qualification\manifest.json'
+$serviceArgs = @(New-QualificationServiceCreateArguments -ServiceName $contract.service_name -BinPath $serviceBinPath -ServiceAccount $contract.account -DisplayName $contract.service_display_name)
+$expectedServiceArgs = @(
+    'create'
+    $contract.service_name
+    'binPath='
+    $serviceBinPath
+    'start='
+    'demand'
+    'obj='
+    $contract.account
+    'type='
+    'own'
+    'DisplayName='
+    $contract.service_display_name
+)
+Assert-ArrayEqual -Actual $serviceArgs -Expected $expectedServiceArgs -Message 'exact sc.exe create argv contract'
+Assert-Equal -Actual $serviceArgs[1] -Expected $contract.service_name -Message 'service name argv'
+Assert-Equal -Actual $serviceArgs[3] -Expected $serviceBinPath -Message 'service binPath argv'
+Assert-Equal -Actual $serviceArgs[7] -Expected $contract.account -Message 'LocalService account argv'
+Assert-Equal -Actual $serviceArgs[5] -Expected 'demand' -Message 'manual start argv'
+Assert-Equal -Actual $serviceArgs[9] -Expected 'own' -Message 'own-process argv'
+Assert-Equal -Actual $serviceArgs[11] -Expected $contract.service_display_name -Message 'display name argv'
+$serviceConfigurationFixture = [pscustomobject]@{
+    present = $true
+    name = $contract.service_name
+    start_name = $contract.account
+    start_mode = 'Manual'
+    service_type = 'Own Process'
+    display_name = $contract.service_display_name
+    path_name = $serviceBinPath
+}
+$serviceSidFixture = [pscustomobject]@{
+    valid = $true
+    sid = 'S-1-5-80-1-2-3-4-5'
+    sid_type = 'unrestricted'
+}
+$serviceConfigurationGate = Test-Q1ServiceConfigurationEvidence -Evidence $serviceConfigurationFixture -Contract $contract -ExpectedBinPath $serviceBinPath -ServiceSidEvidence $serviceSidFixture
+Assert-True -Condition $serviceConfigurationGate.valid -Message 'service configuration fixture validates all frozen fields'
+$badDisplayFixture = $serviceConfigurationFixture | ConvertTo-Json -Depth 20 | ConvertFrom-Json
+$badDisplayFixture.display_name = 'unexpected display name'
+$badDisplayGate = Test-Q1ServiceConfigurationEvidence -Evidence $badDisplayFixture -Contract $contract -ExpectedBinPath $serviceBinPath -ServiceSidEvidence $serviceSidFixture
+Assert-True -Condition (-not $badDisplayGate.valid) -Message 'service display-name drift must block'
 
 $tokenFixture = Get-OfflineTokenFixture
 $expectedServiceSid = 'S-1-5-80-1234567890-1234567890-1234567890-1234567890-1234'
@@ -90,6 +151,11 @@ $adminGroup = $tokenFixture | ConvertTo-Json -Depth 20 | ConvertFrom-Json
 $adminGroup.group_sids += 'S-1-5-32-544'
 $adminGate = Test-EffectiveTokenEvidence -Evidence $adminGroup -Contract $contract -ExpectedServiceSid $expectedServiceSid
 Assert-True -Condition (-not $adminGate.valid) -Message 'Administrators membership must be rejected'
+$missingSystemProfile = $tokenFixture | ConvertTo-Json -Depth 20 | ConvertFrom-Json
+$missingSystemProfile.privileges = @($missingSystemProfile.privileges |
+    Where-Object { $_.name -cne 'SeSystemProfilePrivilege' })
+$missingSystemProfileGate = Test-EffectiveTokenEvidence -Evidence $missingSystemProfile -Contract $contract -ExpectedServiceSid $expectedServiceSid
+Assert-True -Condition (-not $missingSystemProfileGate.valid) -Message 'missing SystemProfile must be rejected'
 
 $binary = Get-OfflineBinaryFixture -Contract $contract
 $binaryGate = Test-BinaryIdentityEvidence -Identity $binary -Contract $contract
@@ -109,6 +175,84 @@ $badDrivers = @($drivers | ForEach-Object {
 })
 $badDriverGate = Test-DriverVersionEvidence -Drivers $badDrivers -Contract $contract
 Assert-True -Condition (-not $badDriverGate.valid) -Message 'driver version mismatch must block'
+$sourceIdentity = Test-HarnessSourceIdentity -Root $ToolRoot -Contract $contract
+Assert-True -Condition $sourceIdentity.valid -Message 'reviewed harness source identity'
+$driftContract = Get-AmdLocalServiceSamplingContract
+$driftContract.harness_source_sha256.runner = ('0' * 64)
+$driftIdentity = Test-HarnessSourceIdentity -Root $ToolRoot -Contract $driftContract
+Assert-True -Condition (-not $driftIdentity.valid) -Message 'harness source/checkpoint drift must block'
+
+$lsaSid = $expectedServiceSid
+$lsaBefore = [pscustomobject]@{
+    direct = [pscustomobject]@{ status = 'READ'; direct_rights = @() }
+    assignment = [pscustomobject]@{ status = 'READ'; assigned_principals = @() }
+}
+$lsaAfter = [pscustomobject]@{
+    direct = [pscustomobject]@{ status = 'READ'; direct_rights = @('SeSystemProfilePrivilege') }
+    assignment = [pscustomobject]@{ status = 'READ'; assigned_principals = @($lsaSid) }
+}
+$lsaDecision = Get-Q1LsaMaterializationDecision -Before $lsaBefore -After $lsaAfter -ServiceSid $lsaSid -Right $contract.allowed_lsa_right -MutationAttempted $true
+Assert-True -Condition $lsaDecision.valid -Message 'new Q1 Service SID CONTROL right materialization fixture'
+Assert-True -Condition $lsaDecision.added_by_run -Message 'Q1 LSA ownership is tracked'
+Assert-True -Condition $lsaDecision.cleanup_allowed -Message 'Q1-owned LSA right is removable'
+$lsaCleanup = Test-Q1LsaCleanupEvidence -Snapshot $lsaBefore -ServiceSid $lsaSid -Right $contract.allowed_lsa_right
+Assert-True -Condition $lsaCleanup.valid -Message 'Q1 LSA cleanup readback fixture'
+$lsaPreexisting = [pscustomobject]@{
+    direct = [pscustomobject]@{ status = 'READ'; direct_rights = @('SeSystemProfilePrivilege') }
+    assignment = [pscustomobject]@{ status = 'READ'; assigned_principals = @($lsaSid) }
+}
+$lsaPreexistingDecision = Get-Q1LsaMaterializationDecision -Before $lsaPreexisting -After $lsaAfter -ServiceSid $lsaSid -Right $contract.allowed_lsa_right -MutationAttempted $true
+Assert-True -Condition (-not $lsaPreexistingDecision.valid) -Message 'pre-existing Q1 LSA right must fail closed'
+Assert-True -Condition (-not $lsaPreexistingDecision.cleanup_allowed) -Message 'pre-existing LSA right is not owned by Q1'
+
+$gateFixtureRoot = New-TestRoot
+try {
+    $gatePath = Join-Path $gateFixtureRoot 'Q1-LIVE-GATE.json'
+    $gateRecord = New-OneShotGateRecord -TaskId $contract.task_id -RunId 'offline-gate-fixture' -MaxRuns 1 -Retries 0 -RealExecutionAllowed $false
+    $firstGate = Acquire-OneShotGateFile -GatePath $gatePath -GateRecord $gateRecord
+    Assert-Equal -Actual $firstGate.state -Expected 'CONSUMED' -Message 'first isolated gate is consumed'
+    $secondGateBlocked = $false
+    try {
+        Acquire-OneShotGateFile -GatePath $gatePath -GateRecord $gateRecord | Out-Null
+    }
+    catch {
+        $secondGateBlocked = $true
+    }
+    Assert-True -Condition $secondGateBlocked -Message 'consumed gate rejects second live attempt'
+    Assert-True -Condition (Test-Path -LiteralPath $gatePath -PathType Leaf) -Message 'consumed gate remains durable'
+}
+finally {
+    if (Test-Path -LiteralPath $gateFixtureRoot) {
+        Remove-Item -LiteralPath $gateFixtureRoot -Recurse -Force
+    }
+}
+
+$startedAccounting = Get-InvocationAccounting -ProcessResult ([pscustomobject]@{
+    state = 'PROCESS_FAILED_AFTER_START'
+    process_started = $true
+    invocation_attempted = 1
+    power_sampling_runs = 1
+})
+Assert-Equal -Actual $startedAccounting.amd_cli_real_invocations -Expected 1 -Message 'post-start harness error remains one AMD invocation'
+Assert-Equal -Actual $startedAccounting.power_sampling_runs -Expected 1 -Message 'post-start harness error remains one sampling run'
+$launchEvidenceRoot = New-TestRoot
+try {
+    $launchEvidenceRaw = Join-Path $launchEvidenceRoot 'raw'
+    New-Item -ItemType Directory -Path $launchEvidenceRaw | Out-Null
+    [IO.File]::WriteAllText((Join-Path $launchEvidenceRaw 'cli-launch-started.json'), '{"process_started":true}')
+    $durableAccounting = Get-InvocationAccounting -ProcessResult ([pscustomobject]@{
+        state = 'NOT_ATTEMPTED'
+        process_started = $false
+        invocation_attempted = 0
+        power_sampling_runs = 0
+    }) -RunRoot $launchEvidenceRoot
+    Assert-Equal -Actual $durableAccounting.amd_cli_real_invocations -Expected 1 -Message 'durable launch evidence cannot be downgraded'
+}
+finally {
+    if (Test-Path -LiteralPath $launchEvidenceRoot) {
+        Remove-Item -LiteralPath $launchEvidenceRoot -Recurse -Force
+    }
+}
 
 $fixtureRoot = New-TestRoot
 try {
@@ -162,13 +306,16 @@ Assert-Contains -Text $runnerText -Needle 'Get-RuntimeFailureCategory' -Message 
 Assert-Contains -Text $runnerText -Needle 'showsid' -Message 'exact Service SID capture exists'
 Assert-Contains -Text $runnerText -Needle 'Get-ServiceConfigurationEvidence' -Message 'service configuration validation exists'
 Assert-Contains -Text $runnerText -Needle 'Acquire-OneShotGate' -Message 'one-shot gate exists'
-Assert-Contains -Text $runnerText -Needle 'max_runs = 1' -Message 'one-shot max is encoded'
-Assert-Contains -Text $runnerText -Needle 'retries = 0' -Message 'zero retries is encoded'
+Assert-Contains -Text $runnerText -Needle 'New-QualificationServiceCreateArguments' -Message 'qualified sc.exe argv helper is reused'
+Assert-Contains -Text $runnerText -Needle 'Initialize-Q1LsaMaterialization' -Message 'CONTROL baseline LSA materialization exists'
+Assert-Contains -Text $runnerText -Needle 'Test-HarnessSourceIdentity' -Message 'reviewed harness source identity is enforced'
 Assert-Contains -Text $serviceText -Needle 'ServiceBase' -Message 'dedicated ServiceBase host exists'
 Assert-Contains -Text $serviceText -Needle 'Get-EffectiveTokenEvidence' -Message 'effective token capture exists'
 Assert-Contains -Text $serviceText -Needle 'ExpectedServiceSid' -Message 'exact Service SID token validation exists'
 Assert-Contains -Text $serviceText -Needle 'Invoke-BoundedAmdCli' -Message 'bounded child path exists'
 Assert-Contains -Text $serviceText -Needle 'taskkill.exe' -Message 'owned process-tree cleanup exists'
+Assert-Contains -Text $serviceText -Needle 'cli-launch-started.json' -Message 'irreversible launch evidence exists'
+Assert-Contains -Text $serviceText -Needle 'PROCESS_FAILED_AFTER_START' -Message 'post-start harness failure is classified'
 Assert-True -Condition (-not ($runnerText -match 'I2G_REAL_RUN_AUTHORIZATION')) -Message 'I2G authorization marker is not reused'
 
 $powershell = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
@@ -186,6 +333,10 @@ Assert-Equal -Actual $dry.plan.gate.max_runs -Expected 1 -Message 'dry-run gate 
 Assert-Equal -Actual $dry.plan.gate.retries -Expected 0 -Message 'dry-run gate retries'
 Assert-Equal -Actual $dry.amd_cli_real_invocations -Expected 0 -Message 'dry-run AMD CLI count'
 Assert-Equal -Actual $dry.power_sampling_runs -Expected 0 -Message 'dry-run sampling count'
+Assert-Equal -Actual $dry.current_task_lsa_mutations -Expected 0 -Message 'offline current-task LSA mutation count'
+Assert-Equal -Actual $dry.harness_live_contract_allows_control_baseline_lsa_mutation -Expected 'YES' -Message 'live LSA capability is distinct from offline count'
+Assert-Equal -Actual $dry.allowed_lsa_right -Expected 'SeSystemProfilePrivilege' -Message 'dry-run allowed LSA right'
+Assert-Equal -Actual $dry.allowed_lsa_target -Expected 'EXACT_Q1_SERVICE_SID_ONLY' -Message 'dry-run allowed LSA target'
 Assert-True -Condition (-not (Test-Path -LiteralPath $contract.output_base)) -Message 'dry-run did not create ProgramData output base'
 
 $liveOutput = & $powershell -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $RunnerPath -Mode Live 2>&1 | Out-String
@@ -217,4 +368,16 @@ Assert-True -Condition ($null -eq $residualProcess) -Message 'offline tests star
     acl_mutations = 0
     driver_mutations = 0
     platform_security_mutations = 0
+    current_task_service_mutations = 0
+    current_task_lsa_mutations = 0
+    current_task_token_mutations = 0
+    current_task_acl_mutations = 0
+    current_task_device_mutations = 0
+    current_task_driver_mutations = 0
+    current_task_platform_security_mutations = 0
+    live_service_mutation_supported = 'YES'
+    live_output_acl_mutation_supported = 'YES'
+    live_control_baseline_lsa_mutation_supported = 'YES'
+    allowed_lsa_right = 'SeSystemProfilePrivilege'
+    allowed_lsa_target = 'EXACT_Q1_SERVICE_SID_ONLY'
 } | ConvertTo-Json -Depth 10

@@ -7,8 +7,8 @@ collector, provider, installer, broker, or Rust runtime component.
 Current state:
 
 ~~~text
-HARNESS_IMPLEMENTATION = COMPLETE
-Q1_LIVE_RUN = BLOCKED_BY_MISSING_HARNESS -> HARNESS_READY_AWAITING_HUMAN_AUTHORIZATION
+HARNESS_IMPLEMENTATION = REVIEW_FIX_COMPLETE
+Q1_LIVE_RUN = HARNESS_READY_PENDING_REVIEW
 Q1_LIVE_RUN_AUTHORIZED = NO
 AMD_CLI_REAL_INVOCATIONS_DURING_IMPLEMENTATION = 0
 POWER_SAMPLING_RUNS_DURING_IMPLEMENTATION = 0
@@ -17,7 +17,8 @@ POWER_SAMPLING_RUNS_DURING_IMPLEMENTATION = 0
 ## Files and responsibilities
 
 - contract.ps1 contains the immutable account, Session 0, token, binary,
-  driver, command, output, and one-shot budget values.
+  driver, command, output, one-shot budget, LSA allowance, and reviewed
+  source-hash values.
 - run-amd-localservice-active-sampling.ps1 is the administrator-side
   controller. DryRun is the default. Live requires a new task-specific
   authorization and performs the preflight, exact service lifecycle, evidence
@@ -29,9 +30,10 @@ POWER_SAMPLING_RUNS_DURING_IMPLEMENTATION = 0
 - test-harness.ps1 is an offline regression suite. It uses fixtures and the
   dry-run path; it does not create a service or invoke an AMD binary.
 
-The implementation does not dot-source or execute the I2G real runner and does
-not use the I2G authorization marker. It also does not modify the existing
-LocalSystem service-context harness.
+The implementation reuses only the side-effect-free I2E helper library for the
+qualified sc.exe argument contract and exact LSA helper. It does not dot-source
+or execute the I2G real runner, does not use the I2G authorization marker, and
+does not modify the existing LocalSystem service-context harness.
 
 ## Frozen command and identities
 
@@ -47,7 +49,7 @@ SESSION = 0
 INTERACTIVE = NO
 AMD_CLI = D:\apps\AMDuProf\bin\AMDuProfCLI.exe
 AMD_CLI_SHA256 = D0812D64963DD98F7C339CAC72F650461F95FF84E757A99767C7981B4111FBAC
-COMMAND = timechart --event power --interval 1000 --duration 10 --format csv
+COMMAND = timechart --event power --interval 1000 --duration 10 --format csv --output-dir <RUN_ROOT>\raw\timechart-output
 MAX_RUNS = 1
 RETRIES = 0
 ~~~
@@ -62,9 +64,13 @@ as an automatic mismatch.
 The effective token must contain the I2F/I2G CONTROL semantics: System
 integrity, no Administrators membership, a dedicated Service SID,
 SeSystemProfilePrivilege enabled, and SeProfileSingleProcessPrivilege absent.
-The harness never grants a privilege, edits LSA policy, adds a group, widens
-an existing ACL, changes a driver, or changes platform security state. A
-token mismatch blocks before AMD CLI launch.
+The future live path may materialize only the exact CONTROL baseline right on
+the newly created Q1 Service SID. It must first prove that the right is absent,
+durably record intent, read back the exact assignment, track ownership, and
+remove the right only when this run added it. It never changes the
+LocalService account-global rights, LocalSystem, Administrators membership,
+ProfileSingle, device ACLs, drivers, or platform security. A token mismatch
+blocks before AMD CLI launch.
 
 ## Dry/offline validation
 
@@ -76,9 +82,11 @@ pwsh -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File .\tools\am
 
 The dry run validates command construction, contract fields, fixture binary
 and driver identity, token expectations, run-root policy, one-shot budget, and
-package-power CSV parsing. It simulates lifecycle state only. It does not
-create the ProgramData output base, register a service, call sc.exe,
-read an effective service token, or invoke AMDuProfCLI.
+package-power CSV parsing, LSA ownership decisions, gate consumption semantics,
+and irreversible post-start invocation accounting. It simulates lifecycle
+state only. It does not create the ProgramData output base, register a
+service, call sc.exe, read an effective service token, read or mutate LSA
+policy, or invoke AMDuProfCLI.
 
 The regression suite is:
 
@@ -94,13 +102,22 @@ The live controller is disabled unless all of the following are present:
 2. The new task-specific switch AuthorizeLiveRun is present.
 3. The new token AMD-LOCALSERVICE-ACTIVE-SAMPLING-Q1 is supplied.
 4. The environment marker AMD_LOCALSERVICE_ACTIVE_SAMPLING_AUTHORIZATION has
-   the value GRANTED_FOR_THIS_TASK_ONLY.
+  the value GRANTED_FOR_THIS_TASK_ONLY.
 5. All read-only preflight gates pass.
+6. The exact reviewed SHA256 identity of the controller, service host,
+   contract, parser, sc.exe helper, and LSA/cleanup helpers passes before any
+   live mutation.
 
 The live path consumes Q1-LIVE-GATE.json before service registration. The gate
 is one-shot with MAX_RUNS=1 and RETRIES=0; service failure, timeout, malformed
 output, nonzero exit, and post-launch evidence failure do not permit retry.
 The gate is separate from the consumed I2G gate.
+
+The moment Process.Start() succeeds, the run is irreversibly counted as one
+AMD CLI invocation and one sampling run. Durable launch-started evidence and
+the final process state preserve that count even if later capture, parsing,
+cleanup, or summary generation fails. A post-start harness error is never
+reported as zero invocations.
 
 The live path creates only the exact service
 ResourceTimelineAmdLocalServiceActiveSamplingQualification. It uses a
@@ -128,6 +145,12 @@ when necessary, deletes only the exact temporary service, and records residue
 status. An unexpected child or remaining service/process is a harness failure,
 not a scientific POWER_UNAVAILABLE result.
 
+Live mutation capabilities and current-task accounting are separate. The
+harness supports exact temporary service lifecycle mutation, isolated output
+ACL mutation, and exact Q1 CONTROL-baseline LSA mutation. The current review
+fix performed zero of each: no real service, ACL, LSA, token, driver, device,
+platform-security, or AMD operation occurred.
+
 ## Failure classifications
 
 The harness keeps infrastructure and scientific outcomes separate:
@@ -136,6 +159,7 @@ The harness keeps infrastructure and scientific outcomes separate:
 | --- | --- |
 | Preflight, manifest, account, Session 0, token, binary, driver, service, or residue gate fails | BLOCKED |
 | CLI process never starts | LAUNCH_FAILURE or HARNESS_FAILED |
+| CLI starts and a later harness operation fails | HARNESS_FAILURE_AFTER_PROCESS_START |
 | CLI starts but times out | TIMEOUT |
 | CLI starts and exits nonzero | ACCESS_DENIED, LOADER_FAILURE, VERSION_MISMATCH, DRIVER_UNAVAILABLE, BIOS_UNSUPPORTED, HYPERVISOR_UNSUPPORTED, NO_COUNTER, or CLI_RUNTIME_FAILURE |
 | CLI completes but output is absent or malformed | OUTPUT_ARTIFACT_MISSING or PARSE_FAILED |

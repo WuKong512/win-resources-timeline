@@ -13,6 +13,7 @@ $ErrorActionPreference = 'Stop'
 $ToolRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 . (Join-Path $ToolRoot 'contract.ps1')
 . (Join-Path $ToolRoot '..\amd-uprof-cli-spike\postprocess.ps1')
+. (Join-Path $ToolRoot '..\amd-privilege-qualification\i2e-runtime-library.ps1')
 
 function ConvertTo-JsonText {
     param([Parameter(Mandatory = $true)]$Value)
@@ -324,28 +325,12 @@ function Test-Administrator {
 }
 
 function Get-HarnessIdentity {
-    param([Parameter(Mandatory = $true)][string]$Root)
-
-    $files = @(
-        (Join-Path $Root 'contract.ps1'),
-        (Join-Path $Root 'run-amd-localservice-active-sampling.ps1'),
-        (Join-Path $Root 'service-host.ps1')
+    param(
+        [Parameter(Mandatory = $true)][string]$Root,
+        [Parameter(Mandatory = $true)]$Contract
     )
-    $records = foreach ($path in $files) {
-        if (Test-Path -LiteralPath $path -PathType Leaf) {
-            [pscustomobject]@{
-                path = $path
-                sha256 = (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToUpperInvariant()
-            }
-        }
-        else {
-            [pscustomobject]@{ path = $path; sha256 = $null; missing = $true }
-        }
-    }
-    [pscustomobject]@{
-        source_files = @($records)
-        source_root = $Root
-    }
+
+    Test-HarnessSourceIdentity -Root $Root -Contract $Contract
 }
 
 function Get-LivePreflight {
@@ -359,6 +344,7 @@ function Get-LivePreflight {
     $drivers = Get-HostDriverEvidence -Contract $Contract
     $driverGate = Test-DriverVersionEvidence -Drivers $drivers -Contract $Contract
     $git = Get-GitBaselineEvidence -Contract $Contract
+    $harness = Test-HarnessSourceIdentity -Root $ToolRoot -Contract $Contract
     $account = Get-LocalServiceSid
     $admin = Test-Administrator
     $residual = Get-ResidualEvidence -Contract $Contract -RunRoot $RunRoot
@@ -367,6 +353,7 @@ function Get-LivePreflight {
     $failures = New-Object System.Collections.Generic.List[string]
     if (-not $admin.is_administrator) { [void]$failures.Add('administrator preflight failed') }
     if (-not $git.valid) { [void]$failures.Add('git baseline/working-tree preflight failed') }
+    if (-not $harness.valid) { [void]$failures.Add('reviewed harness source identity preflight failed') }
     if (-not $account.matches) { [void]$failures.Add('LocalService SID preflight failed') }
     if (-not $binaryGate.valid) { [void]$failures.Add('AMD binary identity preflight failed') }
     if (-not $driverGate.valid) { [void]$failures.Add('AMD driver identity preflight failed') }
@@ -380,6 +367,7 @@ function Get-LivePreflight {
         valid = ($failures.Count -eq 0)
         failures = @($failures)
         git = $git
+        harness_identity = $harness
         administrator = $admin
         account = $account
         binary = $binary
@@ -449,9 +437,28 @@ function New-IsolatedOutputRoot {
         New-Item -ItemType Directory -Path $Contract.output_base -Force | Out-Null
     }
     New-Item -ItemType Directory -Path $RunRoot | Out-Null
-    Set-IsolatedOutputAcl -Path $RunRoot -Contract $Contract
     foreach ($directory in @('raw', 'raw\timechart-output', 'summary')) {
         New-Item -ItemType Directory -Path (Join-Path $RunRoot $directory) | Out-Null
+    }
+    Write-JsonAtomic -Path (Join-Path $RunRoot 'raw\output-acl-mutation-intent.json') -Value ([ordered]@{
+        schema = 'amd-localservice-active-sampling-q1/output-acl-mutation-intent/v1'
+        state = 'MUTATION_ATTEMPTED'
+        run_root = $RunRoot
+        service_account = $Contract.account
+        scope = 'EXACT_Q1_RUN_ROOT_ONLY'
+        recorded_at_utc = [DateTime]::UtcNow.ToString('o')
+    })
+    Set-IsolatedOutputAcl -Path $RunRoot -Contract $Contract
+    Write-JsonAtomic -Path (Join-Path $RunRoot 'raw\output-acl-mutation-complete.json') -Value ([ordered]@{
+        schema = 'amd-localservice-active-sampling-q1/output-acl-mutation-complete/v1'
+        state = 'MUTATION_COMPLETE'
+        run_root = $RunRoot
+        recorded_at_utc = [DateTime]::UtcNow.ToString('o')
+    })
+    [pscustomobject]@{
+        run_root = $RunRoot
+        acl_mutation_attempted = $true
+        acl_mutation_verified = $true
     }
 }
 
@@ -462,46 +469,12 @@ function Acquire-OneShotGate {
         [Parameter(Mandatory = $true)]$Contract
     )
 
-    if (-not (Test-Path -LiteralPath $OutputBase -PathType Container)) {
-        New-Item -ItemType Directory -Path $OutputBase -Force | Out-Null
+    if ([int]$Contract.max_runs -ne 1 -or [int]$Contract.retries -ne 0) {
+        throw 'one-shot gate contract is not MAX_RUNS=1 / RETRIES=0'
     }
     $gatePath = Join-Path $OutputBase $Contract.gate_file_name
-    $gate = [ordered]@{
-        schema = 'amd-localservice-active-sampling-q1/gate/v1'
-        task_id = $Contract.task_id
-        run_id = $RunId
-        max_runs = $Contract.max_runs
-        retries = $Contract.retries
-        state = 'CONSUMED'
-        consumed_before_service_registration = $true
-        consumed_at_utc = [DateTime]::UtcNow.ToString('o')
-        real_execution_allowed = $true
-    }
-    $json = ConvertTo-JsonText -Value $gate
-    $bytes = (New-Object System.Text.UTF8Encoding($false)).GetBytes($json)
-    try {
-        $stream = New-Object IO.FileStream(
-            $gatePath,
-            [IO.FileMode]::CreateNew,
-            [IO.FileAccess]::Write,
-            [IO.FileShare]::None
-        )
-        try {
-            $stream.Write($bytes, 0, $bytes.Length)
-        }
-        finally {
-            $stream.Dispose()
-        }
-    }
-    catch {
-        throw "one-shot gate unavailable or already consumed: $gatePath"
-    }
-    [pscustomobject]@{
-        path = $gatePath
-        state = 'CONSUMED'
-        max_runs = 1
-        retries = 0
-    }
+    $gateRecord = New-OneShotGateRecord -TaskId $Contract.task_id -RunId $RunId -MaxRuns $Contract.max_runs -Retries $Contract.retries -RealExecutionAllowed $true
+    Acquire-OneShotGateFile -GatePath $gatePath -GateRecord $gateRecord
 }
 
 function Quote-WindowsArgument {
@@ -543,25 +516,37 @@ function New-QualificationService {
     param(
         [Parameter(Mandatory = $true)]$Contract,
         [Parameter(Mandatory = $true)][string]$ManifestPath,
-        [Parameter(Mandatory = $true)][string]$ServiceHostPath
+        [Parameter(Mandatory = $true)][string]$ServiceHostPath,
+        [string]$RunRoot
     )
 
     $binPath = Get-ServiceHostBinaryPath -ServiceHostPath $ServiceHostPath -ManifestPath $ManifestPath
     $created = $false
     try {
-        $create = Invoke-Sc -Arguments @(
-            'create',
-            $Contract.service_name,
-            "binPath= $binPath",
-            'type= own',
-            'start= demand',
-            'obj= NT AUTHORITY\LocalService',
-            'DisplayName= Resource Timeline AMD LocalService active sampling qualification'
-        )
+        if (-not [string]::IsNullOrWhiteSpace($RunRoot)) {
+            Write-JsonAtomic -Path (Join-Path $RunRoot 'raw\service-mutation-started.json') -Value ([ordered]@{
+                schema = 'amd-localservice-active-sampling-q1/service-mutation-started/v1'
+                state = 'CREATE_ATTEMPTED'
+                service_name = $Contract.service_name
+                service_account = $Contract.account
+                service_display_name = $Contract.service_display_name
+                recorded_at_utc = [DateTime]::UtcNow.ToString('o')
+            })
+        }
+        $createArguments = New-QualificationServiceCreateArguments -ServiceName $Contract.service_name -BinPath $binPath -ServiceAccount $Contract.account -DisplayName $Contract.service_display_name
+        $create = Invoke-Sc -Arguments $createArguments
         if ($create.exit_code -ne 0) {
             throw "service creation failed: $($create.output)"
         }
         $created = $true
+        if (-not [string]::IsNullOrWhiteSpace($RunRoot)) {
+            Write-JsonAtomic -Path (Join-Path $RunRoot 'raw\service-mutation-complete.json') -Value ([ordered]@{
+                schema = 'amd-localservice-active-sampling-q1/service-mutation-complete/v1'
+                state = 'CREATE_COMPLETE'
+                service_name = $Contract.service_name
+                recorded_at_utc = [DateTime]::UtcNow.ToString('o')
+            })
+        }
         $sidType = Invoke-Sc -Arguments @('sidtype', $Contract.service_name, 'unrestricted')
         if ($sidType.exit_code -ne 0) {
             throw "service SID configuration failed: $($sidType.output)"
@@ -577,6 +562,7 @@ function New-QualificationService {
             service_account = $Contract.account
             service_sid_type = $Contract.service_sid_type
             bin_path = $binPath
+            create_arguments = @($createArguments)
             create = $create
             sid_type = $sidType
             service_sid = $serviceSid
@@ -592,6 +578,174 @@ function New-QualificationService {
             }
         }
         throw
+    }
+}
+
+function Get-Q1LsaSnapshot {
+    param(
+        [Parameter(Mandatory = $true)][string]$Label,
+        [Parameter(Mandatory = $true)][string]$ServiceSid,
+        [Parameter(Mandatory = $true)]$Contract
+    )
+
+    [pscustomobject]@{
+        schema = 'amd-localservice-active-sampling-q1/lsa-snapshot/v1'
+        label = $Label
+        service_sid = $ServiceSid
+        right = $Contract.allowed_lsa_right
+        direct = Get-I2eDirectAccountRightsSnapshot -Label $Label -Sid $ServiceSid
+        assignment = Get-I2eUserRightAssignmentSnapshot -Right $Contract.allowed_lsa_right
+        captured_at_utc = [DateTime]::UtcNow.ToString('o')
+    }
+}
+
+function Initialize-Q1LsaMaterialization {
+    param(
+        [Parameter(Mandatory = $true)]$Contract,
+        [Parameter(Mandatory = $true)][string]$RunRoot,
+        [Parameter(Mandatory = $true)][string]$ServiceSid
+    )
+
+    if ([string]$Contract.allowed_lsa_right -cne 'SeSystemProfilePrivilege' -or
+        [string]$Contract.allowed_lsa_target -cne 'EXACT_Q1_SERVICE_SID_ONLY') {
+        throw 'Q1 LSA contract is not the exact SeSystemProfilePrivilege / dedicated Service SID contract'
+    }
+    $rawRoot = Join-Path $RunRoot 'raw'
+    $intent = [ordered]@{
+        schema = 'amd-localservice-active-sampling-q1/lsa-mutation-intent/v1'
+        state = 'PLANNED'
+        service_sid = $ServiceSid
+        right = $Contract.allowed_lsa_right
+        target = $Contract.allowed_lsa_target
+        permitted_mutation = 'NEW_Q1_SERVICE_SID_PLUS_SeSystemProfilePrivilege_ONLY'
+        forbidden_targets = @('S-1-5-19', 'LocalSystem', 'Administrators', 'device ACLs', 'drivers', 'platform security')
+        recorded_at_utc = [DateTime]::UtcNow.ToString('o')
+    }
+    Write-JsonAtomic -Path (Join-Path $rawRoot 'lsa-mutation-intent.json') -Value $intent
+    $before = Get-Q1LsaSnapshot -Label 'BEFORE_Q1_MATERIALIZATION' -ServiceSid $ServiceSid -Contract $Contract
+    Write-JsonAtomic -Path (Join-Path $rawRoot 'lsa-before.json') -Value $before
+    $beforeGate = Test-Q1LsaBeforeMaterialization -Snapshot $before -ServiceSid $ServiceSid -Right $Contract.allowed_lsa_right
+    if (-not $beforeGate.valid) {
+        Write-JsonAtomic -Path (Join-Path $rawRoot 'lsa-materialization-blocked.json') -Value $beforeGate
+        throw ('BLOCKED_LSA_CONTROL_BASELINE_PRECONDITION: {0}' -f ($beforeGate.failures -join '; '))
+    }
+    $started = [ordered]@{
+        schema = 'amd-localservice-active-sampling-q1/lsa-mutation-started/v1'
+        state = 'MUTATION_ATTEMPTED'
+        service_sid = $ServiceSid
+        right = $Contract.allowed_lsa_right
+        target = $Contract.allowed_lsa_target
+        started_at_utc = [DateTime]::UtcNow.ToString('o')
+    }
+    Write-JsonAtomic -Path (Join-Path $rawRoot 'lsa-mutation-started.json') -Value $started
+    try {
+        Add-I2eExactServiceProfileRight -ServiceSid $ServiceSid
+    }
+    catch {
+        try {
+            Write-JsonAtomic -Path (Join-Path $rawRoot 'lsa-mutation-failure.json') -Value ([ordered]@{
+                schema = 'amd-localservice-active-sampling-q1/lsa-mutation-failure/v1'
+                state = 'MUTATION_FAILED_OR_AMBIGUOUS'
+                service_sid = $ServiceSid
+                right = $Contract.allowed_lsa_right
+                error = $_.Exception.Message
+                recorded_at_utc = [DateTime]::UtcNow.ToString('o')
+            })
+        }
+        catch {}
+        throw
+    }
+    $after = Get-Q1LsaSnapshot -Label 'AFTER_Q1_MATERIALIZATION' -ServiceSid $ServiceSid -Contract $Contract
+    Write-JsonAtomic -Path (Join-Path $rawRoot 'lsa-after.json') -Value $after
+    $decision = Get-Q1LsaMaterializationDecision -Before $before -After $after -ServiceSid $ServiceSid -Right $Contract.allowed_lsa_right -MutationAttempted $true
+    Write-JsonAtomic -Path (Join-Path $rawRoot 'lsa-ownership.json') -Value ([ordered]@{
+        schema = 'amd-localservice-active-sampling-q1/lsa-ownership/v1'
+        added_by_run = $decision.added_by_run
+        cleanup_allowed = $decision.cleanup_allowed
+        service_sid = $ServiceSid
+        right = $Contract.allowed_lsa_right
+        decision = $decision
+        recorded_at_utc = [DateTime]::UtcNow.ToString('o')
+    })
+    if (-not $decision.valid) {
+        throw ('LSA right readback failed closed: {0}' -f ($decision.failures -join '; '))
+    }
+    [pscustomobject]@{
+        service_sid = $ServiceSid
+        right = $Contract.allowed_lsa_right
+        before = $before
+        after = $after
+        decision = $decision
+        mutation_attempted = $true
+        added_by_run = [bool]$decision.added_by_run
+    }
+}
+
+function Remove-Q1LsaRightIfOwned {
+    param(
+        [Parameter(Mandatory = $true)]$Contract,
+        [Parameter(Mandatory = $true)][string]$RunRoot,
+        [AllowNull()]$Materialization
+    )
+
+    $rawRoot = Join-Path $RunRoot 'raw'
+    if ($null -eq $Materialization -or -not [bool]$Materialization.added_by_run) {
+        return [pscustomobject]@{
+            attempted = $false
+            cleanup_verified = $true
+            added_by_run = $false
+            reason = 'Q1 run did not establish ownership of the exact LSA right'
+        }
+    }
+    $serviceSid = [string]$Materialization.service_sid
+    $intent = [ordered]@{
+        schema = 'amd-localservice-active-sampling-q1/lsa-cleanup-intent/v1'
+        state = 'PLANNED'
+        service_sid = $serviceSid
+        right = $Contract.allowed_lsa_right
+        exact_owner_required = $true
+        recorded_at_utc = [DateTime]::UtcNow.ToString('o')
+    }
+    Write-JsonAtomic -Path (Join-Path $rawRoot 'lsa-cleanup-intent.json') -Value $intent
+    Write-JsonAtomic -Path (Join-Path $rawRoot 'lsa-cleanup-started.json') -Value ([ordered]@{
+        schema = 'amd-localservice-active-sampling-q1/lsa-cleanup-started/v1'
+        state = 'CLEANUP_ATTEMPTED'
+        service_sid = $serviceSid
+        right = $Contract.allowed_lsa_right
+        started_at_utc = [DateTime]::UtcNow.ToString('o')
+    })
+    try {
+        Remove-I2eExactServiceProfileRight -ServiceSid $serviceSid
+        $final = Get-Q1LsaSnapshot -Label 'AFTER_Q1_CLEANUP' -ServiceSid $serviceSid -Contract $Contract
+        Write-JsonAtomic -Path (Join-Path $rawRoot 'lsa-cleanup-after.json') -Value $final
+        $gate = Test-Q1LsaCleanupEvidence -Snapshot $final -ServiceSid $serviceSid -Right $Contract.allowed_lsa_right
+        Write-JsonAtomic -Path (Join-Path $rawRoot 'lsa-cleanup.json') -Value $gate
+        [pscustomobject]@{
+            attempted = $true
+            cleanup_verified = [bool]$gate.valid
+            added_by_run = $true
+            final = $final
+            validation = $gate
+        }
+    }
+    catch {
+        try {
+            Write-JsonAtomic -Path (Join-Path $rawRoot 'lsa-cleanup-failure.json') -Value ([ordered]@{
+                schema = 'amd-localservice-active-sampling-q1/lsa-cleanup-failure/v1'
+                state = 'CLEANUP_FAILED_OR_AMBIGUOUS'
+                service_sid = $serviceSid
+                right = $Contract.allowed_lsa_right
+                error = $_.Exception.Message
+                recorded_at_utc = [DateTime]::UtcNow.ToString('o')
+            })
+        }
+        catch {}
+        [pscustomobject]@{
+            attempted = $true
+            cleanup_verified = $false
+            added_by_run = $true
+            error = $_.Exception.Message
+        }
     }
 }
 
@@ -666,6 +820,7 @@ function Get-ServiceConfigurationEvidence {
             start_name = $null
             start_mode = $null
             service_type = $null
+            display_name = $null
             path_name = $null
             state = $null
             process_id = 0
@@ -677,6 +832,7 @@ function Get-ServiceConfigurationEvidence {
         start_name = $service.StartName
         start_mode = $service.StartMode
         service_type = $service.ServiceType
+        display_name = $service.DisplayName
         path_name = $service.PathName
         state = $service.State
         process_id = [int]$service.ProcessId
@@ -691,37 +847,7 @@ function Test-ServiceConfigurationEvidence {
         [Parameter(Mandatory = $true)]$ServiceSidEvidence
     )
 
-    $failures = New-Object System.Collections.Generic.List[string]
-    if (-not $Evidence.present) {
-        [void]$failures.Add('qualification service is absent after creation')
-    }
-    else {
-        if ([string]$Evidence.name -cne $Contract.service_name) {
-            [void]$failures.Add('service name mismatch')
-        }
-        if ([string]$Evidence.start_name -ine $Contract.account) {
-            [void]$failures.Add('service account mismatch')
-        }
-        if ([string]$Evidence.start_mode -ine 'Manual') {
-            [void]$failures.Add('service start mode is not demand/manual')
-        }
-        if ([string]$Evidence.service_type -notmatch '(?i)Own Process') {
-            [void]$failures.Add('service type is not own-process')
-        }
-        if ([string]$Evidence.path_name -notmatch [regex]::Escape($ExpectedBinPath)) {
-            [void]$failures.Add('service image path does not match the frozen host command')
-        }
-    }
-    if (-not $ServiceSidEvidence.valid) {
-        [void]$failures.Add('dedicated Service SID evidence is invalid')
-    }
-    if ([string]$ServiceSidEvidence.sid_type -ine $Contract.service_sid_type) {
-        [void]$failures.Add('dedicated Service SID type is not unrestricted')
-    }
-    [pscustomobject]@{
-        valid = ($failures.Count -eq 0)
-        failures = @($failures)
-    }
+    Test-Q1ServiceConfigurationEvidence -Evidence $Evidence -Contract $Contract -ExpectedBinPath $ExpectedBinPath -ServiceSidEvidence $ServiceSidEvidence
 }
 
 function Wait-ForPath {
@@ -829,8 +955,9 @@ function Get-Manifest {
         run_id = $RunId
         run_root = $RunRoot
         output_directory = $outputDirectory
-        harness_identity = Get-HarnessIdentity -Root $ToolRoot
+        harness_identity = Get-HarnessIdentity -Root $ToolRoot -Contract $Contract
         service_name = $Contract.service_name
+        service_display_name = $Contract.service_display_name
         service_account = $Contract.account
         service_account_sid = $Contract.account_sid
         service_sid_type = $Contract.service_sid_type
@@ -854,6 +981,12 @@ function Get-Manifest {
         max_runs = $Contract.max_runs
         retries = $Contract.retries
         token_contract = Get-ExpectedTokenContract -Contract $Contract
+        lsa_contract = [ordered]@{
+            supported = [bool]$Contract.live_control_baseline_lsa_mutation_supported
+            right = $Contract.allowed_lsa_right
+            target = $Contract.allowed_lsa_target
+            ownership_cleanup_required = $true
+        }
         gate = $Gate
         preflight = $Preflight
         created_at_utc = [DateTime]::UtcNow.ToString('o')
@@ -868,6 +1001,7 @@ function Get-RuntimeFailureCategory {
 
     if ($null -eq $ProcessResult) { return 'HARNESS_FAILURE' }
     if (-not $ProcessResult.process_started) { return 'LAUNCH_FAILURE' }
+    if ($ProcessResult.harness_failure_after_process_start) { return 'HARNESS_FAILURE_AFTER_PROCESS_START' }
     if ($ProcessResult.harness_failed) { return 'HARNESS_FAILURE' }
     if ($ProcessResult.cleanup_succeeded -eq $false) { return 'HARNESS_CLEANUP_FAILED' }
     if ($ProcessResult.timeout) { return 'TIMEOUT' }
@@ -922,6 +1056,7 @@ function Get-ResultClassification {
         return 'HARNESS_CLEANUP_FAILED'
     }
     if ($ServiceResult.process_result.timeout) { return 'TIMEOUT' }
+    if ($ServiceResult.process_result.harness_failure_after_process_start) { return 'HARNESS_FAILURE_AFTER_PROCESS_START' }
     if ($ServiceResult.process_result.harness_failed) { return 'HARNESS_FAILED' }
     if (-not $ServiceResult.process_result.process_started) { return 'LAUNCH_FAILURE' }
     if ($ServiceResult.process_result.target_exit_signed -ne 0) {
@@ -986,6 +1121,19 @@ function Invoke-OfflineDryRun {
         acl_mutations = 0
         driver_mutations = 0
         platform_security_mutations = 0
+        live_service_mutation_supported = [bool]$Contract.live_service_mutation_supported
+        live_output_acl_mutation_supported = [bool]$Contract.live_output_acl_mutation_supported
+        live_control_baseline_lsa_mutation_supported = [bool]$Contract.live_control_baseline_lsa_mutation_supported
+        harness_live_contract_allows_control_baseline_lsa_mutation = 'YES'
+        allowed_lsa_right = $Contract.allowed_lsa_right
+        allowed_lsa_target = $Contract.allowed_lsa_target
+        current_task_service_mutations = 0
+        current_task_lsa_mutations = 0
+        current_task_token_mutations = 0
+        current_task_acl_mutations = 0
+        current_task_device_mutations = 0
+        current_task_driver_mutations = 0
+        current_task_platform_security_mutations = 0
         note = 'Dry run does not create a Windows service, inspect an effective service token, or invoke AMD CLI.'
     }
 }
@@ -1026,6 +1174,9 @@ function Invoke-LiveRun {
     $preflight = $null
     $serviceResult = $null
     $cleanup = $null
+    $lsaMaterialization = $null
+    $lsaCleanup = $null
+    $outputRootEvidence = $null
     $preServiceCleanup = $null
     $wrapperError = $null
     try {
@@ -1033,12 +1184,13 @@ function Invoke-LiveRun {
         if (-not $preflight.valid) {
             throw ('BLOCKED_PREFLIGHT: {0}' -f ($preflight.failures -join '; '))
         }
-        New-IsolatedOutputRoot -RunRoot $runRoot -Contract $Contract
+        $outputRootEvidence = New-IsolatedOutputRoot -RunRoot $runRoot -Contract $Contract
         $gate = Acquire-OneShotGate -OutputBase $Contract.output_base -RunId $runId -Contract $Contract
         $manifestPath = Join-Path $runRoot 'manifest.json'
         $serviceHostPath = Join-Path $ToolRoot 'service-host.ps1'
-        $serviceDefinition = New-QualificationService -Contract $Contract -ManifestPath $manifestPath -ServiceHostPath $serviceHostPath
+        $serviceDefinition = New-QualificationService -Contract $Contract -ManifestPath $manifestPath -ServiceHostPath $serviceHostPath -RunRoot $runRoot
         $serviceCreated = $true
+        $lsaMaterialization = Initialize-Q1LsaMaterialization -Contract $Contract -RunRoot $runRoot -ServiceSid ([string]$serviceDefinition.service_sid.sid)
         $manifest = Get-Manifest -Contract $Contract -RunId $runId -RunRoot $runRoot -Gate $gate -Preflight $preflight -ServiceDefinition $serviceDefinition
         Write-JsonAtomic -Path $manifestPath -Value $manifest
         Start-Service -Name $Contract.service_name
@@ -1055,6 +1207,9 @@ function Invoke-LiveRun {
     finally {
         if ($serviceCreated) {
             $cleanup = Stop-And-RemoveQualificationService -Contract $Contract -RunRoot $runRoot
+        }
+        if ($null -ne $lsaMaterialization) {
+            $lsaCleanup = Remove-Q1LsaRightIfOwned -Contract $Contract -RunRoot $runRoot -Materialization $lsaMaterialization
         }
         elseif ($null -eq $gate -and (Test-Path -LiteralPath $runRoot -PathType Container)) {
             Remove-Item -LiteralPath $runRoot -Recurse -Force
@@ -1078,7 +1233,8 @@ function Invoke-LiveRun {
     }
     $powerEvidence = Test-PackagePowerEvidence -Parsed $parsedCsv
     $classification = 'BLOCKED'
-    if ($null -ne $cleanup -and -not $cleanup.cleanup_verified) {
+    if (($null -ne $cleanup -and -not $cleanup.cleanup_verified) -or
+        ($null -ne $lsaCleanup -and -not $lsaCleanup.cleanup_verified)) {
         $classification = 'HARNESS_CLEANUP_FAILED'
     }
     elseif ($null -ne $serviceResult) {
@@ -1093,6 +1249,8 @@ function Invoke-LiveRun {
     if ($null -ne $serviceResult) {
         $runtimeProcessResult = $serviceResult.process_result
     }
+    $invocationAccounting = Get-InvocationAccounting -ProcessResult $runtimeProcessResult -RunRoot $runRoot
+    $lsaAccounting = Get-Q1LsaMutationAccounting -RunRoot $runRoot
     $summary = [ordered]@{
         schema = 'amd-localservice-active-sampling-q1/summary/v1'
         result = $classification
@@ -1110,21 +1268,31 @@ function Invoke-LiveRun {
         pre_service_cleanup = $preServiceCleanup
         output_inventory = $finalInventory
         cleanup = $cleanup
+        output_root_mutation = $outputRootEvidence
+        lsa_materialization = $lsaMaterialization
+        lsa_cleanup = $lsaCleanup
+        lsa_accounting = $lsaAccounting
+        invocation_accounting = $invocationAccounting
         residue = $residue
         wrapper_error = $wrapperError
         gate = $gate
         exact_command = Get-CanonicalCommandRecord -Contract $Contract -OutputDirectory (Join-Path $runRoot 'raw\timechart-output')
         max_runs = $Contract.max_runs
         retries = $Contract.retries
-        amd_cli_real_invocations = if ($null -ne $serviceResult -and $serviceResult.process_result.process_started) { 1 } else { 0 }
+        amd_cli_real_invocations = $invocationAccounting.amd_cli_real_invocations
         amd_api_real_invocations = 0
-        power_sampling_runs = if ($null -ne $serviceResult -and $serviceResult.process_result.process_started) { 1 } else { 0 }
-        service_mutations = if ($serviceCreated) { 1 } else { 0 }
-        lsa_mutations = 0
+        power_sampling_runs = $invocationAccounting.power_sampling_runs
+        service_mutations = if (Test-Path -LiteralPath (Join-Path $runRoot 'raw\service-mutation-started.json') -PathType Leaf) { 1 } else { 0 }
+        lsa_mutations = $lsaAccounting.lsa_mutations
         token_mutations = 0
-        acl_mutations = if ($serviceCreated) { 1 } else { 0 }
+        acl_mutations = if (Test-Path -LiteralPath (Join-Path $runRoot 'raw\output-acl-mutation-intent.json') -PathType Leaf) { 1 } else { 0 }
         driver_mutations = 0
         platform_security_mutations = 0
+        live_service_mutation_supported = [bool]$Contract.live_service_mutation_supported
+        live_output_acl_mutation_supported = [bool]$Contract.live_output_acl_mutation_supported
+        live_control_baseline_lsa_mutation_supported = [bool]$Contract.live_control_baseline_lsa_mutation_supported
+        allowed_lsa_right = $Contract.allowed_lsa_right
+        allowed_lsa_target = $Contract.allowed_lsa_target
         production_admission = 'DEFER'
         next_gate = 'HUMAN_REVIEW_LOCALSERVICE_ACTIVE_SAMPLING_RESULT'
     }

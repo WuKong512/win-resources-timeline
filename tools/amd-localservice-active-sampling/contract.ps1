@@ -8,6 +8,7 @@ function Get-AmdLocalServiceSamplingContract {
         account = 'NT AUTHORITY\LocalService'
         account_sid = 'S-1-5-19'
         service_name = 'ResourceTimelineAmdLocalServiceActiveSamplingQualification'
+        service_display_name = 'Resource Timeline AMD LocalService active sampling qualification'
         service_sid_type = 'unrestricted'
         session_id = 0
         interactive = $false
@@ -46,6 +47,23 @@ function Get-AmdLocalServiceSamplingContract {
         authorization_environment = 'AMD_LOCALSERVICE_ACTIVE_SAMPLING_AUTHORIZATION'
         authorization_environment_value = 'GRANTED_FOR_THIS_TASK_ONLY'
         gate_file_name = 'Q1-LIVE-GATE.json'
+        harness_identity_mode = 'SOURCE_SHA256_PINNED'
+        contract_canonical_sha256 = '7753B2E397B138D2526A24111E09580E81D6D65D0D9D8B1DB40ADC94C869C701'
+        harness_source_sha256 = [ordered]@{
+            contract = '7753B2E397B138D2526A24111E09580E81D6D65D0D9D8B1DB40ADC94C869C701'
+            runner = 'CE9105E61F41A85D9B2791743DA6FC0F1AC6BB40A380863CB1D1D1B8E90A0142'
+            service_host = 'DF5289E9FA0D49FE8F3E80646809827358C28DCAFF3AB3095F7A3948FA518933'
+            sc_argument_contract = 'A238266DF382BFE2870E11ED40A14468EF7BCB58807D0F235D17C5A3C3F5E5FA'
+            i2e_runtime_library = 'BC22E7599A64D61BC3B93351328B546656D1393EFABC87106630A86F43A71F08'
+            i2e_service_profile_contract = '75CFE997C4F89E2162ECA28AA96655F1210E10574E2A33B3B1A25E26748F9468'
+            cleanup_state_contract = 'AB812C8393448AF17DD89518A4B07FD793AD2CB5E444B0DE52B7B9BA5A62A157'
+            postprocess = 'BAB1C3505B1A0E1ABC6AF58E85687B0097FEC1B27CE768F8A7AE2FA4FF1EC338'
+        }
+        live_service_mutation_supported = $true
+        live_output_acl_mutation_supported = $true
+        live_control_baseline_lsa_mutation_supported = $true
+        allowed_lsa_right = 'SeSystemProfilePrivilege'
+        allowed_lsa_target = 'EXACT_Q1_SERVICE_SID_ONLY'
         driver_versions = [ordered]@{
             AMDPowerProfiler = [ordered]@{
                 file_name = 'AMDPowerProfiler.sys'
@@ -62,6 +80,381 @@ function Get-AmdLocalServiceSamplingContract {
                 signer_pattern = '(?i)Advanced Micro Devices|\bAMD\b'
             }
         }
+    }
+}
+
+function Get-ContractPropertyValue {
+    param(
+        [AllowNull()][object]$Object,
+        [Parameter(Mandatory = $true)][string]$Name,
+        [AllowNull()][object]$Default = $null
+    )
+
+    if ($null -eq $Object) {
+        return $Default
+    }
+    $property = @($Object.PSObject.Properties | Where-Object Name -eq $Name | Select-Object -First 1)
+    if ($property.Count -eq 1) {
+        return $property[0].Value
+    }
+    $Default
+}
+
+function Get-HarnessSourcePaths {
+    param([Parameter(Mandatory = $true)][string]$Root)
+
+    [ordered]@{
+        contract = Join-Path $Root 'contract.ps1'
+        runner = Join-Path $Root 'run-amd-localservice-active-sampling.ps1'
+        service_host = Join-Path $Root 'service-host.ps1'
+        sc_argument_contract = Join-Path $Root '..\amd-privilege-qualification\sc-argument-contract.ps1'
+        i2e_runtime_library = Join-Path $Root '..\amd-privilege-qualification\i2e-runtime-library.ps1'
+        i2e_service_profile_contract = Join-Path $Root '..\amd-privilege-qualification\i2e-service-profile-contract.ps1'
+        cleanup_state_contract = Join-Path $Root '..\amd-privilege-qualification\cleanup-state-contract.ps1'
+        postprocess = Join-Path $Root '..\amd-uprof-cli-spike\postprocess.ps1'
+    }
+}
+
+function Get-CanonicalFileSha256 {
+    param([Parameter(Mandatory = $true)][string]$Path)
+
+    $text = [IO.File]::ReadAllText($Path, (New-Object System.Text.UTF8Encoding($false)))
+    $canonical = $text.Replace(
+        ([string][char]13 + [string][char]10),
+        [string][char]10
+    ).Replace([string][char]13, [string][char]10)
+    if ([IO.Path]::GetFileName($Path) -ieq 'contract.ps1') {
+        $canonical = [regex]::Replace(
+            $canonical,
+            "(?m)(contract_canonical_sha256\s*=\s*')[^']*(')",
+            '$1__SELF_CANONICAL_SHA256__$2',
+            1
+        )
+        $canonical = [regex]::Replace(
+            $canonical,
+            "(?m)^\s*contract\s*=\s*'[^']*'",
+            "            contract = '__SELF_CANONICAL_SHA256__'",
+            1
+        )
+    }
+    $bytes = (New-Object System.Text.UTF8Encoding($false)).GetBytes($canonical)
+    $sha = New-Object System.Security.Cryptography.SHA256Managed
+    try {
+        ([BitConverter]::ToString($sha.ComputeHash($bytes))).Replace('-', '').ToUpperInvariant()
+    }
+    finally {
+        $sha.Dispose()
+    }
+}
+
+function Get-HarnessSourceIdentity {
+    param(
+        [Parameter(Mandatory = $true)][string]$Root,
+        [Parameter(Mandatory = $true)]$Contract
+    )
+
+    $paths = Get-HarnessSourcePaths -Root $Root
+    $records = New-Object System.Collections.Generic.List[object]
+    $failures = New-Object System.Collections.Generic.List[string]
+    foreach ($entry in $paths.GetEnumerator()) {
+        $key = [string]$entry.Key
+        $path = [string]$entry.Value
+        $expected = [string]$Contract.harness_source_sha256[$key]
+        $exists = Test-Path -LiteralPath $path -PathType Leaf
+        $actual = $null
+        if ($exists) {
+            try {
+                $actual = Get-CanonicalFileSha256 -Path $path
+            }
+            catch {
+                [void]$failures.Add(('{0} hash failed: {1}' -f $key, $_.Exception.Message))
+            }
+        }
+        else {
+            [void]$failures.Add(('{0} source file is missing' -f $key))
+        }
+        $matches = $exists -and
+            $expected -notmatch '^__PENDING_' -and
+            $actual -cne $null -and
+            $actual -ceq $expected
+        if (-not $matches) {
+            [void]$failures.Add(('{0} SHA256 does not match the reviewed source contract' -f $key))
+        }
+        [void]$records.Add([pscustomobject]@{
+            key = $key
+            path = $path
+            expected_sha256 = $expected
+            sha256 = $actual
+            exists = $exists
+            matches = $matches
+        })
+    }
+    [pscustomobject]@{
+        mode = [string]$Contract.harness_identity_mode
+        source_root = $Root
+        source_files = $records.ToArray()
+        valid = ($failures.Count -eq 0)
+        failures = $failures.ToArray()
+    }
+}
+
+function Test-HarnessSourceIdentity {
+    param(
+        [Parameter(Mandatory = $true)][string]$Root,
+        [Parameter(Mandatory = $true)]$Contract
+    )
+
+    Get-HarnessSourceIdentity -Root $Root -Contract $Contract
+}
+
+function Get-InvocationAccounting {
+    param(
+        [AllowNull()]$ProcessResult,
+        [string]$RunRoot
+    )
+
+    $durableLaunchStarted = $false
+    $launchStartedPath = $null
+    if (-not [string]::IsNullOrWhiteSpace($RunRoot)) {
+        $launchStartedPath = Join-Path $RunRoot 'raw\cli-launch-started.json'
+        $durableLaunchStarted = Test-Path -LiteralPath $launchStartedPath -PathType Leaf
+    }
+    $processStarted = [bool](Get-ContractPropertyValue -Object $ProcessResult -Name 'process_started' -Default $false)
+    $invocationAttempted = [bool](Get-ContractPropertyValue -Object $ProcessResult -Name 'invocation_attempted' -Default $false)
+    $samplingRuns = [int](Get-ContractPropertyValue -Object $ProcessResult -Name 'power_sampling_runs' -Default 0)
+    $started = $durableLaunchStarted -or $processStarted -or $invocationAttempted -or ($samplingRuns -gt 0)
+    $state = [string](Get-ContractPropertyValue -Object $ProcessResult -Name 'state' -Default $null)
+    if ($started -and [string]::IsNullOrWhiteSpace($state)) {
+        $state = if ($durableLaunchStarted) { 'PROCESS_STARTED_EVIDENCE_PRESENT' } else { 'PROCESS_STARTED' }
+    }
+    [pscustomobject]@{
+        durable_launch_started = $durableLaunchStarted
+        launch_started_path = $launchStartedPath
+        process_started = $started
+        invocation_attempted = if ($started) { 1 } else { 0 }
+        amd_cli_real_invocations = if ($started) { 1 } else { 0 }
+        power_sampling_runs = if ($started) { 1 } else { 0 }
+        state = $state
+        irreversible = $started
+    }
+}
+
+function Get-Q1LsaMutationAccounting {
+    param([Parameter(Mandatory = $true)][string]$RunRoot)
+
+    $rawRoot = Join-Path $RunRoot 'raw'
+    $startedPath = Join-Path $rawRoot 'lsa-mutation-started.json'
+    $ownershipPath = Join-Path $rawRoot 'lsa-ownership.json'
+    $attempted = Test-Path -LiteralPath $startedPath -PathType Leaf
+    $ownership = $null
+    if (Test-Path -LiteralPath $ownershipPath -PathType Leaf) {
+        try {
+            $ownership = Get-Content -LiteralPath $ownershipPath -Raw | ConvertFrom-Json
+        }
+        catch {
+            $ownership = $null
+        }
+    }
+    [pscustomobject]@{
+        mutation_attempted = $attempted
+        lsa_mutations = if ($attempted) { 1 } else { 0 }
+        added_by_run = if ($null -ne $ownership) { [bool]$ownership.added_by_run } else { $false }
+        ownership_known = ($null -ne $ownership)
+        started_path = $startedPath
+        ownership_path = $ownershipPath
+    }
+}
+
+function New-OneShotGateRecord {
+    param(
+        [Parameter(Mandatory = $true)][string]$TaskId,
+        [Parameter(Mandatory = $true)][string]$RunId,
+        [Parameter(Mandatory = $true)][int]$MaxRuns,
+        [Parameter(Mandatory = $true)][int]$Retries,
+        [Parameter(Mandatory = $true)][bool]$RealExecutionAllowed
+    )
+
+    [ordered]@{
+        schema = 'amd-localservice-active-sampling-q1/gate/v1'
+        task_id = $TaskId
+        run_id = $RunId
+        max_runs = $MaxRuns
+        retries = $Retries
+        state = 'CONSUMED'
+        consumed_before_service_registration = $true
+        consumed_at_utc = [DateTime]::UtcNow.ToString('o')
+        real_execution_allowed = $RealExecutionAllowed
+    }
+}
+
+function Acquire-OneShotGateFile {
+    param(
+        [Parameter(Mandatory = $true)][string]$GatePath,
+        [Parameter(Mandatory = $true)]$GateRecord
+    )
+
+    $parent = Split-Path -Parent $GatePath
+    if (-not (Test-Path -LiteralPath $parent -PathType Container)) {
+        New-Item -ItemType Directory -Path $parent -Force | Out-Null
+    }
+    $json = $GateRecord | ConvertTo-Json -Depth 30
+    $bytes = (New-Object System.Text.UTF8Encoding($false)).GetBytes($json)
+    try {
+        $stream = New-Object IO.FileStream(
+            $GatePath,
+            [IO.FileMode]::CreateNew,
+            [IO.FileAccess]::Write,
+            [IO.FileShare]::None
+        )
+        try {
+            $stream.Write($bytes, 0, $bytes.Length)
+        }
+        finally {
+            $stream.Dispose()
+        }
+    }
+    catch {
+        throw "one-shot gate unavailable or already consumed: $GatePath"
+    }
+    [pscustomobject]@{
+        path = $GatePath
+        state = [string]$GateRecord.state
+        max_runs = [int]$GateRecord.max_runs
+        retries = [int]$GateRecord.retries
+    }
+}
+
+function Test-Q1LsaBeforeMaterialization {
+    param(
+        [Parameter(Mandatory = $true)]$Snapshot,
+        [Parameter(Mandatory = $true)][string]$ServiceSid,
+        [Parameter(Mandatory = $true)][string]$Right
+    )
+
+    $failures = New-Object System.Collections.Generic.List[string]
+    $direct = Get-ContractPropertyValue -Object $Snapshot -Name 'direct'
+    $assignment = Get-ContractPropertyValue -Object $Snapshot -Name 'assignment'
+    if ([string](Get-ContractPropertyValue -Object $direct -Name 'status') -cne 'READ') {
+        [void]$failures.Add('direct Service SID right snapshot is unavailable')
+    }
+    if ([string](Get-ContractPropertyValue -Object $assignment -Name 'status') -cne 'READ') {
+        [void]$failures.Add('user-right assignment snapshot is unavailable')
+    }
+    $directRights = @((Get-ContractPropertyValue -Object $direct -Name 'direct_rights' -Default @()) |
+        ForEach-Object { [string]$_ })
+    $assigned = @((Get-ContractPropertyValue -Object $assignment -Name 'assigned_principals' -Default @()) |
+        ForEach-Object { [string]$_ })
+    if ($directRights -contains $Right) {
+        [void]$failures.Add('SeSystemProfilePrivilege already exists on the exact Service SID')
+    }
+    if ($assigned | Where-Object { $_ -ieq $ServiceSid }) {
+        [void]$failures.Add('exact Service SID already has the required user-right assignment')
+    }
+    $unexpected = @($directRights | Where-Object { $_ -cne $Right })
+    if ($unexpected.Count -ne 0) {
+        [void]$failures.Add(('unexpected pre-existing direct rights: {0}' -f ($unexpected -join ', ')))
+    }
+    [pscustomobject]@{
+        valid = ($failures.Count -eq 0)
+        failures = @($failures)
+        right = $Right
+        service_sid = $ServiceSid
+        right_absent_before = ($directRights -notcontains $Right -and
+            -not ($assigned | Where-Object { $_ -ieq $ServiceSid }))
+    }
+}
+
+function Test-Q1LsaAfterMaterialization {
+    param(
+        [Parameter(Mandatory = $true)]$Snapshot,
+        [Parameter(Mandatory = $true)][string]$ServiceSid,
+        [Parameter(Mandatory = $true)][string]$Right
+    )
+
+    $failures = New-Object System.Collections.Generic.List[string]
+    $direct = Get-ContractPropertyValue -Object $Snapshot -Name 'direct'
+    $assignment = Get-ContractPropertyValue -Object $Snapshot -Name 'assignment'
+    if ([string](Get-ContractPropertyValue -Object $direct -Name 'status') -cne 'READ') {
+        [void]$failures.Add('direct Service SID right readback is unavailable')
+    }
+    if ([string](Get-ContractPropertyValue -Object $assignment -Name 'status') -cne 'READ') {
+        [void]$failures.Add('user-right assignment readback is unavailable')
+    }
+    $directRights = @((Get-ContractPropertyValue -Object $direct -Name 'direct_rights' -Default @()) |
+        ForEach-Object { [string]$_ })
+    $assigned = @((Get-ContractPropertyValue -Object $assignment -Name 'assigned_principals' -Default @()) |
+        ForEach-Object { [string]$_ })
+    if ($directRights.Count -ne 1 -or $directRights[0] -cne $Right) {
+        [void]$failures.Add('exact Service SID direct rights readback is not only SeSystemProfilePrivilege')
+    }
+    if (-not ($assigned | Where-Object { $_ -ieq $ServiceSid })) {
+        [void]$failures.Add('exact Service SID user-right assignment is absent after materialization')
+    }
+    [pscustomobject]@{
+        valid = ($failures.Count -eq 0)
+        failures = @($failures)
+        right = $Right
+        service_sid = $ServiceSid
+        exact_right_materialized = ($directRights.Count -eq 1 -and
+            $directRights[0] -ceq $Right -and
+            [bool]($assigned | Where-Object { $_ -ieq $ServiceSid }))
+    }
+}
+
+function Get-Q1LsaMaterializationDecision {
+    param(
+        [Parameter(Mandatory = $true)]$Before,
+        [Parameter(Mandatory = $true)]$After,
+        [Parameter(Mandatory = $true)][string]$ServiceSid,
+        [Parameter(Mandatory = $true)][string]$Right,
+        [Parameter(Mandatory = $true)][bool]$MutationAttempted
+    )
+
+    $beforeGate = Test-Q1LsaBeforeMaterialization -Snapshot $Before -ServiceSid $ServiceSid -Right $Right
+    $afterGate = Test-Q1LsaAfterMaterialization -Snapshot $After -ServiceSid $ServiceSid -Right $Right
+    $owned = $MutationAttempted -and $beforeGate.valid -and $afterGate.valid
+    [pscustomobject]@{
+        valid = ($beforeGate.valid -and $afterGate.valid -and $MutationAttempted)
+        before = $beforeGate
+        after = $afterGate
+        mutation_attempted = $MutationAttempted
+        added_by_run = $owned
+        cleanup_allowed = $owned
+        failures = @($beforeGate.failures + $afterGate.failures)
+    }
+}
+
+function Test-Q1LsaCleanupEvidence {
+    param(
+        [Parameter(Mandatory = $true)]$Snapshot,
+        [Parameter(Mandatory = $true)][string]$ServiceSid,
+        [Parameter(Mandatory = $true)][string]$Right
+    )
+
+    $failures = New-Object System.Collections.Generic.List[string]
+    $direct = Get-ContractPropertyValue -Object $Snapshot -Name 'direct'
+    $assignment = Get-ContractPropertyValue -Object $Snapshot -Name 'assignment'
+    if ([string](Get-ContractPropertyValue -Object $direct -Name 'status') -cne 'READ') {
+        [void]$failures.Add('direct Service SID cleanup readback is unavailable')
+    }
+    if ([string](Get-ContractPropertyValue -Object $assignment -Name 'status') -cne 'READ') {
+        [void]$failures.Add('user-right cleanup readback is unavailable')
+    }
+    $directRights = @((Get-ContractPropertyValue -Object $direct -Name 'direct_rights' -Default @()) |
+        ForEach-Object { [string]$_ })
+    $assigned = @((Get-ContractPropertyValue -Object $assignment -Name 'assigned_principals' -Default @()) |
+        ForEach-Object { [string]$_ })
+    if ($directRights -contains $Right) {
+        [void]$failures.Add('required right remains on the exact Service SID after cleanup')
+    }
+    if ($assigned | Where-Object { $_ -ieq $ServiceSid }) {
+        [void]$failures.Add('exact Service SID remains assigned the required right after cleanup')
+    }
+    [pscustomobject]@{
+        valid = ($failures.Count -eq 0)
+        failures = @($failures)
+        service_sid = $ServiceSid
+        right = $Right
     }
 }
 
@@ -135,6 +528,50 @@ function Test-ControlledRunRoot {
         run_root = $RunRoot
         output_base = $OutputBase
         preexisting = (Test-Path -LiteralPath $RunRoot)
+    }
+}
+
+function Test-Q1ServiceConfigurationEvidence {
+    param(
+        [Parameter(Mandatory = $true)]$Evidence,
+        [Parameter(Mandatory = $true)]$Contract,
+        [Parameter(Mandatory = $true)][string]$ExpectedBinPath,
+        [Parameter(Mandatory = $true)]$ServiceSidEvidence
+    )
+
+    $failures = New-Object System.Collections.Generic.List[string]
+    if (-not $Evidence.present) {
+        [void]$failures.Add('qualification service is absent after creation')
+    }
+    else {
+        if ([string]$Evidence.name -cne $Contract.service_name) {
+            [void]$failures.Add('service name mismatch')
+        }
+        if ([string]$Evidence.start_name -ine $Contract.account) {
+            [void]$failures.Add('service account mismatch')
+        }
+        if ([string]$Evidence.start_mode -ine 'Manual') {
+            [void]$failures.Add('service start mode is not demand/manual')
+        }
+        if ([string]$Evidence.service_type -notmatch '(?i)Own Process') {
+            [void]$failures.Add('service type is not own-process')
+        }
+        if ([string]$Evidence.display_name -cne $Contract.service_display_name) {
+            [void]$failures.Add('service display name mismatch')
+        }
+        if ([string]$Evidence.path_name -notmatch [regex]::Escape($ExpectedBinPath)) {
+            [void]$failures.Add('service image path does not match the frozen host command')
+        }
+    }
+    if (-not [bool]$ServiceSidEvidence.valid) {
+        [void]$failures.Add('dedicated Service SID evidence is invalid')
+    }
+    if ([string]$ServiceSidEvidence.sid_type -ine $Contract.service_sid_type) {
+        [void]$failures.Add('dedicated Service SID type is not unrestricted')
+    }
+    [pscustomobject]@{
+        valid = ($failures.Count -eq 0)
+        failures = $failures.ToArray()
     }
 }
 
@@ -461,5 +898,18 @@ function Get-OfflinePlan {
         acl_mutations = 0
         driver_mutations = 0
         platform_security_mutations = 0
+        live_service_mutation_supported = [bool]$Contract.live_service_mutation_supported
+        live_output_acl_mutation_supported = [bool]$Contract.live_output_acl_mutation_supported
+        live_control_baseline_lsa_mutation_supported = [bool]$Contract.live_control_baseline_lsa_mutation_supported
+        harness_live_contract_allows_control_baseline_lsa_mutation = 'YES'
+        allowed_lsa_right = $Contract.allowed_lsa_right
+        allowed_lsa_target = $Contract.allowed_lsa_target
+        current_task_service_mutations = 0
+        current_task_lsa_mutations = 0
+        current_task_token_mutations = 0
+        current_task_acl_mutations = 0
+        current_task_device_mutations = 0
+        current_task_driver_mutations = 0
+        current_task_platform_security_mutations = 0
     }
 }

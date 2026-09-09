@@ -10,6 +10,7 @@ $ErrorActionPreference = 'Stop'
 $ToolRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 . (Join-Path $ToolRoot 'contract.ps1')
 . (Join-Path $ToolRoot '..\amd-uprof-cli-spike\postprocess.ps1')
+. (Join-Path $ToolRoot '..\amd-privilege-qualification\i2e-runtime-library.ps1')
 
 function ConvertTo-JsonText {
     param([Parameter(Mandatory = $true)]$Value)
@@ -152,6 +153,25 @@ function Test-ManifestContract {
     )
 
     $failures = New-Object System.Collections.Generic.List[string]
+    $currentHarnessIdentity = Test-HarnessSourceIdentity -Root $ToolRoot -Contract $Contract
+    if (-not $currentHarnessIdentity.valid) {
+        [void]$failures.Add('reviewed harness source identity is not valid')
+    }
+    $manifestHarnessIdentity = Get-ContractPropertyValue -Object $Manifest -Name 'harness_identity'
+    if ($null -eq $manifestHarnessIdentity -or -not [bool](Get-ContractPropertyValue -Object $manifestHarnessIdentity -Name 'valid' -Default $false)) {
+        [void]$failures.Add('manifest harness source identity is missing or invalid')
+    }
+    elseif ($null -ne (Get-ContractPropertyValue -Object $manifestHarnessIdentity -Name 'source_files')) {
+        foreach ($currentRecord in @($currentHarnessIdentity.source_files)) {
+            $manifestRecord = @($manifestHarnessIdentity.source_files |
+                Where-Object { [string]$_.key -ceq [string]$currentRecord.key } |
+                Select-Object -First 1)
+            if ($manifestRecord.Count -ne 1 -or
+                [string]$manifestRecord[0].sha256 -cne [string]$currentRecord.sha256) {
+                [void]$failures.Add(('manifest harness source identity mismatch: {0}' -f $currentRecord.key))
+            }
+        }
+    }
     $expectedOutput = Join-Path ([string]$Manifest.run_root) 'raw\timechart-output'
     $expectedArgs = @(Get-FixedAmdCliArguments -OutputDirectory $expectedOutput)
     if ([string]$Manifest.schema -ne 'amd-localservice-active-sampling-q1/manifest/v1') {
@@ -225,6 +245,7 @@ function Test-ManifestContract {
     [pscustomobject]@{
         valid = ($failures.Count -eq 0)
         failures = @($failures)
+        harness_identity = $currentHarnessIdentity
     }
 }
 
@@ -269,11 +290,16 @@ function Get-ProcessResultNotLaunched {
     param([string]$ErrorMessage = $null)
 
     [ordered]@{
+        state = 'NOT_ATTEMPTED'
         executable = $null
         arguments = @()
         working_directory = $null
         output_directory = $null
         process_started = $false
+        invocation_attempted = 0
+        power_sampling_runs = 0
+        launch_intent_durable = $false
+        launch_started_durable = $false
         target_pid = $null
         started_at_utc = $null
         finished_at_utc = [DateTime]::UtcNow.ToString('o')
@@ -297,6 +323,59 @@ function Get-ProcessResultNotLaunched {
     }
 }
 
+function Get-ProcessResultAfterStartFailure {
+    param(
+        [Parameter(Mandatory = $true)]$Manifest,
+        [Parameter(Mandatory = $true)][string]$RunRoot,
+        [AllowNull()][int]$TargetPid,
+        [AllowNull()][DateTime]$StartedAt,
+        [Parameter(Mandatory = $true)][string]$ErrorMessage,
+        [Parameter(Mandatory = $true)][bool]$Timeout,
+        [Parameter(Mandatory = $true)][bool]$KillAttempted,
+        [AllowNull()][string]$KillOutput,
+        [Parameter(Mandatory = $true)][bool]$ProcessTerminated
+    )
+
+    $rawRoot = Join-Path $RunRoot 'raw'
+    $stdoutPath = Join-Path $rawRoot 'cli-stdout.txt'
+    $stderrPath = Join-Path $rawRoot 'cli-stderr.txt'
+    [ordered]@{
+        state = 'PROCESS_FAILED_AFTER_START'
+        executable = $Manifest.executable
+        arguments = @($Manifest.arguments)
+        working_directory = $Manifest.working_directory
+        output_directory = (Join-Path $rawRoot 'timechart-output')
+        process_started = $true
+        invocation_attempted = 1
+        power_sampling_runs = 1
+        launch_intent_durable = (Test-Path -LiteralPath (Join-Path $rawRoot 'cli-launch-intent.json') -PathType Leaf)
+        launch_started_durable = (Test-Path -LiteralPath (Join-Path $rawRoot 'cli-launch-started.json') -PathType Leaf)
+        target_pid = $TargetPid
+        started_at_utc = if ($null -ne $StartedAt) { $StartedAt.ToString('o') } else { $null }
+        finished_at_utc = [DateTime]::UtcNow.ToString('o')
+        duration_ms = if ($null -ne $StartedAt) { [int64]([DateTime]::UtcNow - $StartedAt).TotalMilliseconds } else { $null }
+        timeout_ms = [int]$Manifest.cli_timeout_ms
+        timeout = $Timeout
+        target_exit_signed = $null
+        target_exit_hex = $null
+        stdout_path = $stdoutPath
+        stderr_path = $stderrPath
+        stdout_bytes = if (Test-Path -LiteralPath $stdoutPath -PathType Leaf) { ([IO.FileInfo]$stdoutPath).Length } else { 0 }
+        stderr_bytes = if (Test-Path -LiteralPath $stderrPath -PathType Leaf) { ([IO.FileInfo]$stderrPath).Length } else { 0 }
+        stdout_persisted = (Test-Path -LiteralPath $stdoutPath -PathType Leaf)
+        stderr_persisted = (Test-Path -LiteralPath $stderrPath -PathType Leaf)
+        capture_complete = (Test-Path -LiteralPath $stdoutPath -PathType Leaf) -and
+            (Test-Path -LiteralPath $stderrPath -PathType Leaf)
+        child_tree_kill_attempted = $KillAttempted
+        child_tree_kill_output = $KillOutput
+        cleanup_attempted = $true
+        cleanup_succeeded = $ProcessTerminated
+        harness_failed = $true
+        harness_failure_after_process_start = $true
+        harness_error = $ErrorMessage
+    }
+}
+
 function Invoke-BoundedAmdCli {
     param(
         [Parameter(Mandatory = $true)]$Manifest,
@@ -308,10 +387,14 @@ function Invoke-BoundedAmdCli {
     $stdoutPath = Join-Path $rawRoot 'cli-stdout.txt'
     $stderrPath = Join-Path $rawRoot 'cli-stderr.txt'
     $launchPath = Join-Path $rawRoot 'cli-launch.json'
-    $start = [DateTime]::UtcNow
+    $launchIntentPath = Join-Path $rawRoot 'cli-launch-intent.json'
+    $launchStartedPath = Join-Path $rawRoot 'cli-launch-started.json'
     $process = $null
     $stdoutTask = $null
     $stderrTask = $null
+    $processStarted = $false
+    $targetPid = $null
+    $startedAt = $null
     $timeout = $false
     $killAttempted = $false
     $killOutput = $null
@@ -319,6 +402,15 @@ function Invoke-BoundedAmdCli {
         $argumentText = @($Manifest.arguments | ForEach-Object {
             Quote-WindowsArgument -Value ([string]$_)
         }) -join ' '
+        Write-JsonAtomic -Path $launchIntentPath -Value ([ordered]@{
+            schema = 'amd-localservice-active-sampling-q1/cli-launch-intent/v1'
+            state = 'LAUNCH_INTENT_DURABLE'
+            executable = $Manifest.executable
+            arguments = @($Manifest.arguments)
+            working_directory = $Manifest.working_directory
+            output_directory = $outputDirectory
+            recorded_at_utc = [DateTime]::UtcNow.ToString('o')
+        })
         $psi = New-Object Diagnostics.ProcessStartInfo
         $psi.FileName = [string]$Manifest.executable
         $psi.Arguments = $argumentText
@@ -330,46 +422,75 @@ function Invoke-BoundedAmdCli {
         $process = New-Object Diagnostics.Process
         $process.StartInfo = $psi
         if (-not $process.Start()) {
-            return Get-ProcessResultNotLaunched -ErrorMessage 'AMDuProfCLI process start returned false'
+            $notStarted = Get-ProcessResultNotLaunched -ErrorMessage 'AMDuProfCLI process start returned false'
+            $notStarted.state = 'LAUNCH_FAILED'
+            $notStarted.executable = $Manifest.executable
+            $notStarted.arguments = @($Manifest.arguments)
+            $notStarted.working_directory = $Manifest.working_directory
+            $notStarted.output_directory = $outputDirectory
+            $notStarted.timeout_ms = [int]$Manifest.cli_timeout_ms
+            $notStarted.launch_intent_durable = (Test-Path -LiteralPath $launchIntentPath -PathType Leaf)
+            return $notStarted
         }
-        $launch = [ordered]@{
-            schema = 'amd-localservice-active-sampling-q1/cli-launch/v1'
+        $processStarted = $true
+        $startedAt = [DateTime]::UtcNow
+        try { $targetPid = [int]$process.Id } catch { $targetPid = $null }
+        $stdoutTask = $process.StandardOutput.ReadToEndAsync()
+        $stderrTask = $process.StandardError.ReadToEndAsync()
+        Write-JsonAtomic -Path $launchStartedPath -Value ([ordered]@{
+            schema = 'amd-localservice-active-sampling-q1/cli-launch-started/v1'
+            state = 'PROCESS_STARTED'
             process_started = $true
-            target_pid = $process.Id
+            invocation_attempted = 1
+            power_sampling_runs = 1
+            target_pid = $targetPid
             executable = $Manifest.executable
             arguments = @($Manifest.arguments)
             working_directory = $Manifest.working_directory
             output_directory = $outputDirectory
-            started_at_utc = $start.ToString('o')
+            started_at_utc = $startedAt.ToString('o')
+        })
+        $launch = [ordered]@{
+            schema = 'amd-localservice-active-sampling-q1/cli-launch/v1'
+            process_started = $true
+            target_pid = $targetPid
+            executable = $Manifest.executable
+            arguments = @($Manifest.arguments)
+            working_directory = $Manifest.working_directory
+            output_directory = $outputDirectory
+            started_at_utc = $startedAt.ToString('o')
         }
         Write-JsonAtomic -Path $launchPath -Value $launch
-        $stdoutTask = $process.StandardOutput.ReadToEndAsync()
-        $stderrTask = $process.StandardError.ReadToEndAsync()
         if (-not $process.WaitForExit([int]$Manifest.cli_timeout_ms)) {
             $timeout = $true
             $killAttempted = $true
-            $killOutput = (& taskkill.exe /PID $process.Id /T /F 2>&1 | Out-String).Trim()
+            $killOutput = (& taskkill.exe /PID $targetPid /T /F 2>&1 | Out-String).Trim()
             $process.WaitForExit(5000)
         }
         $stdout = if ($null -ne $stdoutTask) { $stdoutTask.Result } else { '' }
         $stderr = if ($null -ne $stderrTask) { $stderrTask.Result } else { '' }
         [IO.File]::WriteAllText($stdoutPath, $stdout, (New-Object Text.UTF8Encoding($false)))
         [IO.File]::WriteAllText($stderrPath, $stderr, (New-Object Text.UTF8Encoding($false)))
-        $finish = [DateTime]::UtcNow
         $exitCode = $null
         if (-not $timeout -and $process.HasExited) {
             $exitCode = [int]$process.ExitCode
         }
+        $finish = [DateTime]::UtcNow
         [ordered]@{
+            state = if ($timeout) { 'PROCESS_TIMEOUT' } else { 'PROCESS_COMPLETED' }
             executable = $Manifest.executable
             arguments = @($Manifest.arguments)
             working_directory = $Manifest.working_directory
             output_directory = $outputDirectory
             process_started = $true
-            target_pid = $process.Id
-            started_at_utc = $start.ToString('o')
+            invocation_attempted = 1
+            power_sampling_runs = 1
+            launch_intent_durable = (Test-Path -LiteralPath $launchIntentPath -PathType Leaf)
+            launch_started_durable = (Test-Path -LiteralPath $launchStartedPath -PathType Leaf)
+            target_pid = $targetPid
+            started_at_utc = $startedAt.ToString('o')
             finished_at_utc = $finish.ToString('o')
-            duration_ms = [int64]($finish - $start).TotalMilliseconds
+            duration_ms = [int64]($finish - $startedAt).TotalMilliseconds
             timeout_ms = [int]$Manifest.cli_timeout_ms
             timeout = $timeout
             target_exit_signed = $exitCode
@@ -387,15 +508,40 @@ function Invoke-BoundedAmdCli {
             cleanup_attempted = $true
             cleanup_succeeded = $process.HasExited
             harness_failed = $false
+            harness_failure_after_process_start = $false
             harness_error = $null
         }
     }
     catch {
+        if ($processStarted) {
+            $processTerminated = $false
+            try { $processTerminated = [bool]$process.HasExited } catch { $processTerminated = $false }
+            if (-not $processTerminated -and $null -ne $targetPid) {
+                try {
+                    $killAttempted = $true
+                    $killOutput = (& taskkill.exe /PID $targetPid /T /F 2>&1 | Out-String).Trim()
+                }
+                catch {
+                    $killOutput = $_.Exception.Message
+                }
+                try { $processTerminated = [bool]$process.HasExited } catch { $processTerminated = $false }
+            }
+            return Get-ProcessResultAfterStartFailure -Manifest $Manifest -RunRoot $RunRoot -TargetPid $targetPid -StartedAt $startedAt -ErrorMessage $_.Exception.Message -Timeout $timeout -KillAttempted $killAttempted -KillOutput $killOutput -ProcessTerminated $processTerminated
+        }
         $failure = Get-ProcessResultNotLaunched -ErrorMessage $_.Exception.Message
-        if ($null -ne $process -and $process.HasExited -eq $false) {
+        $failure.state = 'LAUNCH_FAILED'
+        $failure.executable = $Manifest.executable
+        $failure.arguments = @($Manifest.arguments)
+        $failure.working_directory = $Manifest.working_directory
+        $failure.output_directory = $outputDirectory
+        $failure.timeout_ms = [int]$Manifest.cli_timeout_ms
+        $failure.launch_intent_durable = (Test-Path -LiteralPath $launchIntentPath -PathType Leaf)
+        if ($null -ne $process) {
             try {
-                $killAttempted = $true
-                $killOutput = (& taskkill.exe /PID $process.Id /T /F 2>&1 | Out-String).Trim()
+                if (-not $process.HasExited) {
+                    $killAttempted = $true
+                    $killOutput = (& taskkill.exe /PID $process.Id /T /F 2>&1 | Out-String).Trim()
+                }
             }
             catch {
                 $killOutput = $_.Exception.Message
@@ -486,6 +632,7 @@ function Invoke-ServiceWorker {
     Write-JsonAtomic -Path $statePath -Value ([ordered]@{ state = 'SAMPLING_ATTEMPTED_ONCE'; at_utc = [DateTime]::UtcNow.ToString('o') })
     $processResult = Invoke-BoundedAmdCli -Manifest $Manifest -RunRoot $runRoot
     Write-JsonAtomic -Path (Join-Path $rawRoot 'process-result.json') -Value $processResult
+    $invocationAccounting = Get-InvocationAccounting -ProcessResult $processResult -RunRoot $runRoot
     $inventory = @(Get-OutputInventory -Root $runRoot)
     $result = [ordered]@{
         schema = 'amd-localservice-active-sampling-q1/service-result/v1'
@@ -496,8 +643,9 @@ function Invoke-ServiceWorker {
         binary_identity = $binary
         binary_validation = $binaryGate
         process_result = $processResult
+        invocation_accounting = $invocationAccounting
         output_inventory = $inventory
-        power_sampling_runs = if ($processResult.process_started) { 1 } else { 0 }
+        power_sampling_runs = $invocationAccounting.power_sampling_runs
         retries = 0
         completed_at_utc = [DateTime]::UtcNow.ToString('o')
     }
