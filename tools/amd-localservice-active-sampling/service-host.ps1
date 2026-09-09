@@ -300,6 +300,7 @@ function Get-ProcessResultNotLaunched {
         power_sampling_runs = 0
         launch_intent_durable = $false
         launch_started_durable = $false
+        launch_failed_durable = $false
         target_pid = $null
         started_at_utc = $null
         finished_at_utc = [DateTime]::UtcNow.ToString('o')
@@ -320,6 +321,38 @@ function Get-ProcessResultNotLaunched {
         cleanup_succeeded = $false
         harness_failed = $true
         harness_error = $ErrorMessage
+    }
+}
+
+function Try-WriteLaunchStartFailedEvidence {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)]$Manifest,
+        [Parameter(Mandatory = $true)][string]$OutputDirectory,
+        [Parameter(Mandatory = $true)][string]$ErrorMessage
+    )
+
+    try {
+        Write-JsonAtomic -Path $Path -Value ([ordered]@{
+            schema = 'amd-localservice-active-sampling-q1/cli-launch-start-failed/v1'
+            state = 'PROCESS_START_FAILED'
+            process_started = $false
+            invocation_attempted = 0
+            power_sampling_runs = 0
+            launch_attempt_permitted = $true
+            gate_consumed = $true
+            start_result = 'FAILED'
+            executable = $Manifest.executable
+            arguments = @($Manifest.arguments)
+            working_directory = $Manifest.working_directory
+            output_directory = $OutputDirectory
+            error = $ErrorMessage
+            recorded_at_utc = [DateTime]::UtcNow.ToString('o')
+        })
+        $true
+    }
+    catch {
+        $false
     }
 }
 
@@ -350,6 +383,9 @@ function Get-ProcessResultAfterStartFailure {
         power_sampling_runs = 1
         launch_intent_durable = (Test-Path -LiteralPath (Join-Path $rawRoot 'cli-launch-intent.json') -PathType Leaf)
         launch_started_durable = (Test-Path -LiteralPath (Join-Path $rawRoot 'cli-launch-started.json') -PathType Leaf)
+        launch_failed_durable = (Test-Path -LiteralPath (Join-Path $rawRoot 'cli-launch-start-failed.json') -PathType Leaf)
+        invocation_certainty = 'CONFIRMED_ONE'
+        gate_consumed = $true
         target_pid = $TargetPid
         started_at_utc = if ($null -ne $StartedAt) { $StartedAt.ToString('o') } else { $null }
         finished_at_utc = [DateTime]::UtcNow.ToString('o')
@@ -389,6 +425,7 @@ function Invoke-BoundedAmdCli {
     $launchPath = Join-Path $rawRoot 'cli-launch.json'
     $launchIntentPath = Join-Path $rawRoot 'cli-launch-intent.json'
     $launchStartedPath = Join-Path $rawRoot 'cli-launch-started.json'
+    $launchFailedPath = Join-Path $rawRoot 'cli-launch-start-failed.json'
     $process = $null
     $stdoutTask = $null
     $stderrTask = $null
@@ -405,6 +442,9 @@ function Invoke-BoundedAmdCli {
         Write-JsonAtomic -Path $launchIntentPath -Value ([ordered]@{
             schema = 'amd-localservice-active-sampling-q1/cli-launch-intent/v1'
             state = 'LAUNCH_INTENT_DURABLE'
+            launch_attempt_permitted = $true
+            gate_consumed = $true
+            start_result = 'UNKNOWN'
             executable = $Manifest.executable
             arguments = @($Manifest.arguments)
             working_directory = $Manifest.working_directory
@@ -422,6 +462,7 @@ function Invoke-BoundedAmdCli {
         $process = New-Object Diagnostics.Process
         $process.StartInfo = $psi
         if (-not $process.Start()) {
+            $launchFailedDurable = Try-WriteLaunchStartFailedEvidence -Path $launchFailedPath -Manifest $Manifest -OutputDirectory $outputDirectory -ErrorMessage 'AMDuProfCLI process start returned false'
             $notStarted = Get-ProcessResultNotLaunched -ErrorMessage 'AMDuProfCLI process start returned false'
             $notStarted.state = 'LAUNCH_FAILED'
             $notStarted.executable = $Manifest.executable
@@ -430,19 +471,21 @@ function Invoke-BoundedAmdCli {
             $notStarted.output_directory = $outputDirectory
             $notStarted.timeout_ms = [int]$Manifest.cli_timeout_ms
             $notStarted.launch_intent_durable = (Test-Path -LiteralPath $launchIntentPath -PathType Leaf)
+            $notStarted.launch_failed_durable = $launchFailedDurable
             return $notStarted
         }
         $processStarted = $true
         $startedAt = [DateTime]::UtcNow
         try { $targetPid = [int]$process.Id } catch { $targetPid = $null }
-        $stdoutTask = $process.StandardOutput.ReadToEndAsync()
-        $stderrTask = $process.StandardError.ReadToEndAsync()
         Write-JsonAtomic -Path $launchStartedPath -Value ([ordered]@{
             schema = 'amd-localservice-active-sampling-q1/cli-launch-started/v1'
             state = 'PROCESS_STARTED'
             process_started = $true
             invocation_attempted = 1
             power_sampling_runs = 1
+            launch_attempt_permitted = $true
+            gate_consumed = $true
+            start_result = 'STARTED'
             target_pid = $targetPid
             executable = $Manifest.executable
             arguments = @($Manifest.arguments)
@@ -450,6 +493,8 @@ function Invoke-BoundedAmdCli {
             output_directory = $outputDirectory
             started_at_utc = $startedAt.ToString('o')
         })
+        $stdoutTask = $process.StandardOutput.ReadToEndAsync()
+        $stderrTask = $process.StandardError.ReadToEndAsync()
         $launch = [ordered]@{
             schema = 'amd-localservice-active-sampling-q1/cli-launch/v1'
             process_started = $true
@@ -487,6 +532,9 @@ function Invoke-BoundedAmdCli {
             power_sampling_runs = 1
             launch_intent_durable = (Test-Path -LiteralPath $launchIntentPath -PathType Leaf)
             launch_started_durable = (Test-Path -LiteralPath $launchStartedPath -PathType Leaf)
+            launch_failed_durable = $false
+            invocation_certainty = 'CONFIRMED_ONE'
+            gate_consumed = $true
             target_pid = $targetPid
             started_at_utc = $startedAt.ToString('o')
             finished_at_utc = $finish.ToString('o')
@@ -536,6 +584,12 @@ function Invoke-BoundedAmdCli {
         $failure.output_directory = $outputDirectory
         $failure.timeout_ms = [int]$Manifest.cli_timeout_ms
         $failure.launch_intent_durable = (Test-Path -LiteralPath $launchIntentPath -PathType Leaf)
+        $failure.launch_failed_durable = if ($failure.launch_intent_durable) {
+            Try-WriteLaunchStartFailedEvidence -Path $launchFailedPath -Manifest $Manifest -OutputDirectory $outputDirectory -ErrorMessage $_.Exception.Message
+        }
+        else {
+            $false
+        }
         if ($null -ne $process) {
             try {
                 if (-not $process.HasExited) {

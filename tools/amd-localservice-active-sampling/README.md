@@ -7,7 +7,7 @@ collector, provider, installer, broker, or Rust runtime component.
 Current state:
 
 ~~~text
-HARNESS_IMPLEMENTATION = REVIEW_FIX_COMPLETE
+HARNESS_IMPLEMENTATION = REVIEW_FIX_R2_COMPLETE
 Q1_LIVE_RUN = HARNESS_READY_PENDING_REVIEW
 Q1_LIVE_RUN_AUTHORIZED = NO
 AMD_CLI_REAL_INVOCATIONS_DURING_IMPLEMENTATION = 0
@@ -65,9 +65,13 @@ The effective token must contain the I2F/I2G CONTROL semantics: System
 integrity, no Administrators membership, a dedicated Service SID,
 SeSystemProfilePrivilege enabled, and SeProfileSingleProcessPrivilege absent.
 The future live path may materialize only the exact CONTROL baseline right on
-the newly created Q1 Service SID. It must first prove that the right is absent,
-durably record intent, read back the exact assignment, track ownership, and
-remove the right only when this run added it. It never changes the
+the newly created Q1 Service SID. It first proves that the right is absent,
+durably records the exact task/service/right pre-state and mutation intent,
+then reads back the exact assignment. Cleanup is driven by that durable intent
+and exact SID even if the materialization function fails after LSA add; it
+removes the right only when the Q1 pre-state proves ownership. An unavailable
+recovery readback fails closed and leaves the exact service registration for
+human diagnosis. It never changes the
 LocalService account-global rights, LocalSystem, Administrators membership,
 ProfileSingle, device ACLs, drivers, or platform security. A token mismatch
 blocks before AMD CLI launch.
@@ -82,8 +86,9 @@ pwsh -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File .\tools\am
 
 The dry run validates command construction, contract fields, fixture binary
 and driver identity, token expectations, run-root policy, one-shot budget, and
-package-power CSV parsing, LSA ownership decisions, gate consumption semantics,
-and irreversible post-start invocation accounting. It simulates lifecycle
+package-power CSV parsing, LSA ownership/recovery decisions, exact Service SID
+ACL phases, evidence manifest hashing/sealing decisions, gate consumption
+semantics, and irreversible/ambiguous post-start invocation accounting. It simulates lifecycle
 state only. It does not create the ProgramData output base, register a
 service, call sc.exe, read an effective service token, read or mutate LSA
 policy, or invoke AMDuProfCLI.
@@ -116,8 +121,10 @@ The gate is separate from the consumed I2G gate.
 The moment Process.Start() succeeds, the run is irreversibly counted as one
 AMD CLI invocation and one sampling run. Durable launch-started evidence and
 the final process state preserve that count even if later capture, parsing,
-cleanup, or summary generation fails. A post-start harness error is never
-reported as zero invocations.
+cleanup, or summary generation fails. If the worker stops after durable launch
+intent but before either successor record is durable, accounting is
+`UNKNOWN_0_OR_1` with `INVOCATION_CERTAINTY = AMBIGUOUS`; it is never serialized
+as numeric zero and the consumed gate still forbids a second run.
 
 The live path creates only the exact service
 ResourceTimelineAmdLocalServiceActiveSamplingQualification. It uses a
@@ -132,11 +139,14 @@ The isolated run root is:
 C:\ProgramData\ResourceTimeline\qualification\amd-localservice-active-sampling-q1\<run-id>
 ~~~
 
-Only a new run root is eligible for the exact output ACL. The root grants
-LocalService Modify access and SYSTEM/Administrators FullControl, without
-inheriting user-write access from an unrelated data directory. The root is
-never the production Resource Timeline data directory or historical evidence
-directory.
+Only a new run root is eligible for the output ACL. Staging grants only
+SYSTEM/Administrators control. After service creation and exact Service SID
+validation, only that Q1 Service SID receives Modify access; account-wide
+`S-1-5-19`/LocalService write access is never granted. After the worker and
+service stop, the controller inventories and hashes raw evidence, recursively
+removes Q1 Service SID write access, re-reads the ACL, and verifies the hashes.
+The completed run root is preserved after any live attempt, including FAIL,
+timeout, parser failure, or cleanup failure.
 
 Raw process stdout, stderr, launch data, token data, process result, vendor
 output, and output hashes are retained under raw. Summary data is separate.
