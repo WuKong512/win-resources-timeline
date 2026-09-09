@@ -40,6 +40,7 @@ $ArchitectureDoc = Join-Path $ToolRoot '..\..\docs\architecture\cpu-sensor-amd-p
 $QualificationReadme = Join-Path $ToolRoot 'README.md'
 $ResidualDifferential = Join-Path $ToolRoot '..\..\docs\upgrade\amd-system-vs-i2f-residual-differential.md'
 $I2gSelectionDocument = Join-Path $ToolRoot '..\..\docs\upgrade\amd-i2g-variable-selection.md'
+$PostI2gDecisionDocument = Join-Path $ToolRoot '..\..\docs\upgrade\amd-post-i2g-production-admission.md'
 
 foreach ($wrapper in @(
         $ScArgumentContract,
@@ -1594,7 +1595,7 @@ if ([string]::IsNullOrWhiteSpace($counterDiscoveryFunction) -or
 }
 Write-Host 'COUNTER_DISCOVERY_EXECUTION_EVIDENCE_CONTRACT=PASS'
 
-foreach ($documentationPath in @($ExecutionPlan, $QualificationReadme, $ResidualDifferential, $I2gSelectionDocument, $I2gHarnessDocument)) {
+foreach ($documentationPath in @($ExecutionPlan, $QualificationReadme, $ResidualDifferential, $I2gSelectionDocument, $I2gHarnessDocument, $PostI2gDecisionDocument)) {
     if (-not (Test-Path -LiteralPath $documentationPath -PathType Leaf)) {
         throw "I2F real-closure documentation is missing: $documentationPath"
     }
@@ -1604,7 +1605,8 @@ $currentDocumentation = $architectureSource + [Environment]::NewLine +
     (Get-Content -LiteralPath $ExecutionPlan -Raw) + [Environment]::NewLine +
     (Get-Content -LiteralPath $QualificationReadme -Raw) + [Environment]::NewLine +
     (Get-Content -LiteralPath $I2gSelectionDocument -Raw) + [Environment]::NewLine +
-    (Get-Content -LiteralPath $I2gHarnessDocument -Raw)
+    (Get-Content -LiteralPath $I2gHarnessDocument -Raw) + [Environment]::NewLine +
+    (Get-Content -LiteralPath $PostI2gDecisionDocument -Raw)
 foreach ($requiredI2eCurrentStateText in @(
         'I2E = CLOSED / RERUN_FORBIDDEN',
         'I2F = REAL_COMPLETED / PASS_WITH_NEGATIVE_COUNTER_ACCESS_RESULT / RERUN_FORBIDDEN',
@@ -1665,7 +1667,13 @@ foreach ($requiredI2eCurrentStateText in @(
         'ACTUAL_RUN_COUNT_EVIDENCE_SCHEMA = DEFINED',
         'POWER_SAMPLING_RUNS = 0',
         'NEW_REAL_RUN_REQUIRED = false',
-        'NEXT_GATE = HUMAN_FINAL_REVIEW_BEFORE_MARKING_PR24_READY'
+        'PR24 = MERGED',
+        'I2G_CURRENT_STATE = COMPLETE / ATTEMPT3_AUTHORITATIVE',
+        'PRODUCTION_ADMISSION = DEFER',
+        'I2H_JUSTIFIED = NO',
+        'SELECTED_NEXT_TASK = AMD-CLI-LIST-PATH-VALIDITY-Q1',
+        'NEXT_GATE = HUMAN_REVIEW_SELECTED_POST_I2G_NEXT_TASK',
+        'POST_I2G_DECISION = amd-post-i2g-production-admission.md'
     )) {
     if ($currentDocumentation.IndexOf($requiredI2eCurrentStateText, [StringComparison]::Ordinal) -lt 0) {
         throw "I2E current-state reconciliation is missing: $requiredI2eCurrentStateText"

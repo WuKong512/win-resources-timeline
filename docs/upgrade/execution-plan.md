@@ -2104,7 +2104,7 @@ test seam and is not a real experiment authorization. A new capability
 experiment requires a distinct I2G contract, harness, and human gate; no I2G
 variable is selected here.
 
-## AMD CURRENT STATE RECONCILIATION — CURRENT / AUTHORITATIVE
+## HISTORICAL / SUPERSEDED — AMD CURRENT STATE RECONCILIATION BEFORE I2G IMPLEMENTATION
 
 All preceding AMD handoff blocks are historical snapshots. They remain for
 traceability but are superseded by this single current state; historical
@@ -2193,7 +2193,7 @@ NEXT_TASK = I2G_HARNESS_DESIGN_AND_OFFLINE_IMPLEMENTATION_REVIEW
 EXECUTION_PLAN_SINGLE_CURRENT_STATE = PASS
 ```
 
-The current read-only research state selects exactly one future I2G variable:
+The historical read-only research state selected exactly one future I2G variable:
 `SeProfileSingleProcessPrivilege`. Historical I2F remains predecessor evidence
 only, not the active I2G causal control. The future design is a paired
 CONTROL -> TREATMENT experiment using the same fresh service name, Service SID,
@@ -2268,7 +2268,12 @@ NO_NON_TREATMENT_CONFIGURATION_CHANGE_BETWEEN_PHASES = true
 CONTROL_DRIFT_STOP_BEFORE_TREATMENT = true
 TOKEN_TEARDOWN_BEFORE_TREATMENT_POLICY_MUTATION = true
 NEW_REAL_RUN_REQUIRED = false
-NEXT_GATE = HUMAN_FINAL_REVIEW_BEFORE_MARKING_PR24_READY
+PR24 = MERGED
+PRODUCTION_ADMISSION = DEFER
+I2H_JUSTIFIED = NO
+SELECTED_NEXT_TASK = AMD-CLI-LIST-PATH-VALIDITY-Q1
+NEXT_GATE = HUMAN_REVIEW_SELECTED_POST_I2G_NEXT_TASK
+POST_I2G_DECISION = amd-post-i2g-production-admission.md
 ```
 
 ### AMD-I2G REAL ATTEMPT #1 — IMMUTABLE RECONCILIATION
@@ -2354,3 +2359,40 @@ NEW_REAL_RUN_REQUIRED = false
 The result does not generalize beyond the paired I2G context. Attempt #1 and
 Attempt #2 remain historical harness failures with `SCIENTIFIC_RESULT=NOT_OBTAINED`;
 no Attempt #4 is required or allowed.
+
+## AMD CURRENT STATE RECONCILIATION — POST-I2G PRODUCTION ADMISSION DECISION
+
+The preceding I2G implementation handoff is now superseded by the
+documentation-only decision in
+[`amd-post-i2g-production-admission.md`](amd-post-i2g-production-admission.md).
+PR #24 is merged; the I2G result is complete and immutable; no new real run is
+required or authorized.
+
+```text
+PR24 = MERGED
+PR24_MERGE_COMMIT = ecb461bf719c041b852fff113ddc25048c145c33
+I2G = COMPLETE / ATTEMPT3_AUTHORITATIVE
+I2G_SCIENTIFIC_RESULT = PROFILE_SINGLE_INSUFFICIENT_IN_PAIRED_I2G_CONTEXT
+I2G_CAUSAL_INTERPRETATION_VALID = true
+I2G_REAL_GATE_CONSUMED = true
+I2G_REAL_EXECUTION_ALLOWED = false
+I2G_REAL_CLEANUP_ALLOWED = false
+ATTEMPT1_AUTHORIZATION = CONSUMED
+ATTEMPT2_AUTHORIZATION = CONSUMED
+ATTEMPT3_AUTHORIZATION = CONSUMED
+ATTEMPT4_AUTHORIZATION = NOT_GRANTED
+NEW_REAL_RUN_REQUIRED = false
+PRODUCTION_ACCOUNT = UNRESOLVED
+LOCAL_SYSTEM_PRODUCTION_SELECTION = NOT_AUTHORIZED
+PRODUCTION_ADMISSION = DEFER
+I2H_JUSTIFIED = NO
+SELECTED_NEXT_TASK = AMD-CLI-LIST-PATH-VALIDITY-Q1
+NEXT_GATE = HUMAN_REVIEW_SELECTED_POST_I2G_NEXT_TASK
+EXECUTION_PLAN_SINGLE_CURRENT_STATE = PASS
+```
+
+The selected task is an offline reconciliation of whether
+`AMDuProfCLI.exe timechart --list` is a production-representative telemetry
+gate. It is intentionally ahead of any new privilege or account experiment;
+see the decision document for the evidence matrix, confounder matrix,
+elimination status, and stop conditions.
