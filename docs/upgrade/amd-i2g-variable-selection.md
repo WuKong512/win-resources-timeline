@@ -871,9 +871,13 @@ NEW_REAL_RUN_REQUIRED = false
 PR24 = MERGED
 PRODUCTION_ADMISSION = DEFER
 I2H_JUSTIFIED = NO
-SELECTED_NEXT_TASK = AMD-CLI-LIST-PATH-VALIDITY-Q1
-NEXT_GATE = HUMAN_REVIEW_SELECTED_POST_I2G_NEXT_TASK
+AMD_CLI_LIST_PATH_VALIDITY_Q1 = COMPLETE / INSUFFICIENT
+CLI_LIST_ROLE = ACCOUNT_SENSITIVE_COUNTER_ENUMERATION / DISCOVERY_ONLY
+ENUMERATION_AND_SAMPLING_EQUIVALENCE = UNKNOWN
+SELECTED_NEXT_TASK = NONE
+NEXT_GATE = HUMAN_REVIEW_OPERATION_PATH_EVIDENCE_GAP
 POST_I2G_DECISION = amd-post-i2g-production-admission.md
+OPERATION_PATH_AUDIT = amd-cli-list-path-validity.md
 ```
 
 The implementation adds no production account selection. The default I2G surface
@@ -885,3 +889,7 @@ qualification and obtained the narrowly scoped result
 `PROFILE_SINGLE_INSUFFICIENT_IN_PAIRED_I2G_CONTEXT`; no further real run is
 required or authorized. The task-local real runner remains one-shot and
 exact-token gated; it is not a reusable Windows backend or production integration.
+The completed operation-path audit records `INSUFFICIENT`; its historical
+`--list` results remain discovery-only and do not change the I2G causal
+interpretation. The current next gate is human review of the operation-path
+evidence gap.

@@ -2,9 +2,10 @@
 
 This is the authoritative post-merge decision record for
 `AMD-POST-I2G-PRODUCTION-ADMISSION-D1`. It reconciles immutable AMD evidence
-through PR #24 and selects one bounded next task. It does not authorize or
-execute an AMD, privilege, service, token, LSA, ACL, driver, device, or
-sampling operation.
+through PR #24 and preserves the task that was selected before the operation-
+path audit. The post-audit current state is recorded below. This document does
+not authorize or execute an AMD, privilege, service, token, LSA, ACL, driver,
+device, or sampling operation.
 
 ## Decision summary
 
@@ -21,8 +22,12 @@ PRODUCTION_ACCOUNT = UNRESOLVED
 PRODUCTION_ACCOUNT_DECISION_READY = NO
 AMD_PRODUCTION_ADMISSION = DEFER
 I2H_JUSTIFIED = NO
-SELECTED_NEXT_TASK = AMD-CLI-LIST-PATH-VALIDITY-Q1
-NEXT_GATE = HUMAN_REVIEW_SELECTED_POST_I2G_NEXT_TASK
+AMD_CLI_LIST_PATH_VALIDITY_Q1 = COMPLETE / INSUFFICIENT
+CLI_LIST_ROLE = ACCOUNT_SENSITIVE_COUNTER_ENUMERATION / DISCOVERY_ONLY
+ENUMERATION_AND_SAMPLING_EQUIVALENCE = UNKNOWN
+SELECTED_NEXT_TASK = NONE
+NEXT_GATE = HUMAN_REVIEW_OPERATION_PATH_EVIDENCE_GAP
+OPERATION_PATH_AUDIT = amd-cli-list-path-validity.md
 RESULT = PASS_AMD_POST_I2G_PRODUCTION_ADMISSION_DECISION
 ```
 
@@ -34,10 +39,11 @@ remains plausible because the same signed CLI produced `POWER_AVAILABLE` in
 the historical SYSTEM counter comparison; it is not rejected solely because
 LocalService failed.
 
-The next task is an offline operation-path validity decision. It is more
-informative than naming another privilege because I2G already tested the
-selected privilege with a valid paired delta and the negative result leaves
-the operation/API boundary and broader service-context boundary open.
+The selected offline operation-path task has now completed with route verdict
+`INSUFFICIENT`. It remains more informative than naming another privilege
+because I2G already tested the selected privilege with a valid paired delta;
+the unresolved operation/API boundary is documented in
+[`amd-cli-list-path-validity.md`](amd-cli-list-path-validity.md).
 
 ## Authoritative I2G result and fail-closed state
 
@@ -120,11 +126,13 @@ the authoritative summaries, not replacements for raw evidence.
 | AMD-I2G Attempt #3 | Does adding only ProfileSingle change the paired LocalService result? | Same fresh LocalService / Service SID / Session 0 / x64 context in both phases | Control: SystemProfile only; treatment adds and enables ProfileSingle | Same `timechart --list` | Real | Control and treatment both `POWER_UNAVAILABLE`; paired delta and token gates pass; rollback pass | `true`, but only in frozen paired I2G context | ProfileSingle sufficiency in that context | Does not rule out service context, operation/API path, runtime/device authorization, platform details, or other capability combinations | Authoritative post-I2G decision input; run `d6d6c33003934dc5ad2b0b79307e5b2c` |
 
 The CLI/API and vendor-context records add an important non-privilege fact:
-the successful CLI path loads the public `AMDPowerProfileAPI`/CXL graph, while
-the direct minimal API probe has a different process/loader context and aborts.
-That divergence is real evidence, but the repository has not yet reconciled
-whether `timechart --list` is a production-representative telemetry gate or an
-account-sensitive enumeration path. That is the selected next task.
+the successful CLI path has recorded public `AMDPowerProfileAPI`/CXL dependency
+evidence, while the direct minimal API probe has a different process/loader
+context and aborts. The completed operation-path audit classified the
+relationship between `timechart --list` and active production sampling as
+`INSUFFICIENT`. `--list` remains discovery-scoped for production admission
+purposes, and enumeration/sampling equivalence remains `UNKNOWN`. No next task
+is selected pending human review of the operation-path evidence gap.
 
 ## Confounders and invariants
 
@@ -223,12 +231,18 @@ The missing evidence is specific:
    executable remains separate from the production Resource Timeline
    collector; no AMD Provider has been registered.
 
-The current CLI/service approach is therefore deferred, not globally rejected.
-If the selected path-validity task cannot establish a production-relevant
-operation, the next disposition should become `REJECT_CURRENT_PATH` and the
-AMD research path should close or move to a different documented interface.
+The current CLI/service approach remains deferred, not globally rejected. The
+completed path-validity audit is `INSUFFICIENT`, so it does not authorize
+either promotion or rejection of the current operation. A later
+`NOT_VALID_PROXY` result could support `REJECT_CURRENT_PATH`; that is not the
+current state and no alternate interface is selected here.
 
-## Selected next task
+## HISTORICAL / SUPERSEDED — Selected next task before operation-path audit
+
+The following block records the task selected by the post-I2G decision before
+`AMD-CLI-LIST-PATH-VALIDITY-Q1` was completed. The authoritative post-audit
+state is at the end of this document and in
+[`amd-cli-list-path-validity.md`](amd-cli-list-path-validity.md).
 
 ```text
 SELECTED_NEXT_TASK = AMD-CLI-LIST-PATH-VALIDITY-Q1
@@ -251,6 +265,10 @@ decision boundary that I2G could not change: whether the negative `--list`
 result is the right product signal. A further privilege test would add another
 token variable without resolving the known account/context confounding or the
 CLI/API operation mismatch.
+
+Historical process note: Draft PR creation was initially blocked by GitHub
+sign-in and was later resolved by PR #26. This is historical process context,
+not current-state truth or a scientific gate.
 
 ## P2 disposition
 
@@ -280,7 +298,8 @@ HISTORICAL_PR_TEXT_REWRITTEN = NO
 
 Historical/superseded sections retain their original transition language for
 traceability. The authoritative current pointers now refer to this document
-and to `AMD-CLI-LIST-PATH-VALIDITY-Q1`.
+and to the completed
+[`amd-cli-list-path-validity.md`](amd-cli-list-path-validity.md) audit.
 
 ## Delivery and non-execution contract
 
@@ -307,12 +326,55 @@ The performed validation is:
 GIT_DIFF_CHECK = PASS
 POWERSHELL_ASSERTION_PARSE = PASS
 CURRENT_STATE_MARKERS = PASS
-EXISTING_QUALIFICATION_TEST = BLOCKED_BEFORE_DOCUMENTATION_ASSERTIONS
-EXISTING_QUALIFICATION_TEST_BLOCKER = PINNED_RELEASE_ARTIFACT_SHA_MISMATCH
+QUALIFICATION_TEST = BLOCKED
+QUALIFICATION_TEST_BLOCKER = PRE_EXISTING_PINNED_RELEASE_ARTIFACT_SHA256_MISMATCH
+QUALIFICATION_BLOCKER_TASK_CAUSED = NO
+QUALIFICATION_BLOCKER_SCOPE = PRE_EXISTING / OUT_OF_SCOPE / NOT_REPAIRED
+PRE_EXISTING_SHA_MISMATCH_REPAIRED = NO
 REBUILT_ARTIFACT_SHA256 = 37D4C3EC25F5F1607372BC78C0F35CF36511EBDF37E0F67D9F350475C36A1988
 PINNED_ARTIFACT_SHA256 = 2613129D179EA2A0496AD680E68E77A79FFFBB569D0802A11AC03346E162DD80
 RUST_RUNTIME_CHANGED = NO
 ```
 
-The failed check is an artifact identity/environment mismatch in the existing
-qualification contract. It was not weakened or repaired in this decision task.
+The qualification check remains blocked by an artifact identity/environment
+mismatch in the existing contract. The mismatch is pre-existing, out of scope,
+and not repaired by the Q1 audit; the audit itself is complete with route
+verdict `INSUFFICIENT`.
+
+## CURRENT STATE — AMD-CLI-LIST-PATH-VALIDITY-Q1
+
+The selected operation-path audit is complete. Its route verdict is
+`INSUFFICIENT`: the historical `--list` results remain discovery evidence, but
+the repository does not prove that a negative discovery result is a necessary
+failure of the active sampling path.
+
+The classification below separates Q1 task completion from the external PR
+and qualification-test blockers. The earlier `RESULT` in the Decision summary
+remains the post-I2G decision result.
+
+```text
+AMD_CLI_LIST_PATH_VALIDITY_Q1 = COMPLETE / INSUFFICIENT
+CLI_LIST_ROLE = ACCOUNT_SENSITIVE_COUNTER_ENUMERATION / DISCOVERY_ONLY
+SAMPLING_PATH_ROLE = PRODUCTION_RELEVANT_PROFILE_CONFIGURE_START_READ_STOP_PATH
+ENUMERATION_AND_SAMPLING_EQUIVALENCE = UNKNOWN
+I2G_CURRENT_STATE = COMPLETE / ATTEMPT3_AUTHORITATIVE
+I2G_REAL_GATE_CONSUMED = true
+I2G_REAL_EXECUTION_ALLOWED = false
+I2G_REAL_CLEANUP_ALLOWED = false
+ATTEMPT4_AUTHORIZATION = NOT_GRANTED
+I2G_CAUSAL_INTERPRETATION_CHANGED = NO
+PRODUCTION_ACCOUNT = UNRESOLVED
+AMD_PRODUCTION_ADMISSION = DEFER
+I2H_JUSTIFIED = NO
+SELECTED_NEXT_TASK = NONE
+NEXT_GATE = HUMAN_REVIEW_OPERATION_PATH_EVIDENCE_GAP
+OPERATION_PATH_AUDIT = amd-cli-list-path-validity.md
+REAL_EXECUTION_AUTHORIZED_BY_THIS_TASK = NO
+RESULT = PASS_WITH_EXTERNAL_BLOCKERS
+TASK_RESULT = COMPLETE / INSUFFICIENT
+QUALIFICATION_TEST = BLOCKED
+QUALIFICATION_TEST_BLOCKER = PRE_EXISTING_PINNED_RELEASE_ARTIFACT_SHA256_MISMATCH
+QUALIFICATION_BLOCKER_TASK_CAUSED = NO
+QUALIFICATION_BLOCKER_SCOPE = PRE_EXISTING / OUT_OF_SCOPE / NOT_REPAIRED
+PRE_EXISTING_SHA_MISMATCH_REPAIRED = NO
+```

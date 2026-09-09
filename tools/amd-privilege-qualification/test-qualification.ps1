@@ -41,6 +41,7 @@ $QualificationReadme = Join-Path $ToolRoot 'README.md'
 $ResidualDifferential = Join-Path $ToolRoot '..\..\docs\upgrade\amd-system-vs-i2f-residual-differential.md'
 $I2gSelectionDocument = Join-Path $ToolRoot '..\..\docs\upgrade\amd-i2g-variable-selection.md'
 $PostI2gDecisionDocument = Join-Path $ToolRoot '..\..\docs\upgrade\amd-post-i2g-production-admission.md'
+$CliListPathValidityDocument = Join-Path $ToolRoot '..\..\docs\upgrade\amd-cli-list-path-validity.md'
 
 foreach ($wrapper in @(
         $ScArgumentContract,
@@ -1595,7 +1596,7 @@ if ([string]::IsNullOrWhiteSpace($counterDiscoveryFunction) -or
 }
 Write-Host 'COUNTER_DISCOVERY_EXECUTION_EVIDENCE_CONTRACT=PASS'
 
-foreach ($documentationPath in @($ExecutionPlan, $QualificationReadme, $ResidualDifferential, $I2gSelectionDocument, $I2gHarnessDocument, $PostI2gDecisionDocument)) {
+foreach ($documentationPath in @($ExecutionPlan, $QualificationReadme, $ResidualDifferential, $I2gSelectionDocument, $I2gHarnessDocument, $PostI2gDecisionDocument, $CliListPathValidityDocument)) {
     if (-not (Test-Path -LiteralPath $documentationPath -PathType Leaf)) {
         throw "I2F real-closure documentation is missing: $documentationPath"
     }
@@ -1606,7 +1607,8 @@ $currentDocumentation = $architectureSource + [Environment]::NewLine +
     (Get-Content -LiteralPath $QualificationReadme -Raw) + [Environment]::NewLine +
     (Get-Content -LiteralPath $I2gSelectionDocument -Raw) + [Environment]::NewLine +
     (Get-Content -LiteralPath $I2gHarnessDocument -Raw) + [Environment]::NewLine +
-    (Get-Content -LiteralPath $PostI2gDecisionDocument -Raw)
+    (Get-Content -LiteralPath $PostI2gDecisionDocument -Raw) + [Environment]::NewLine +
+    (Get-Content -LiteralPath $CliListPathValidityDocument -Raw)
 foreach ($requiredI2eCurrentStateText in @(
         'I2E = CLOSED / RERUN_FORBIDDEN',
         'I2F = REAL_COMPLETED / PASS_WITH_NEGATIVE_COUNTER_ACCESS_RESULT / RERUN_FORBIDDEN',
@@ -1671,9 +1673,19 @@ foreach ($requiredI2eCurrentStateText in @(
         'I2G_CURRENT_STATE = COMPLETE / ATTEMPT3_AUTHORITATIVE',
         'PRODUCTION_ADMISSION = DEFER',
         'I2H_JUSTIFIED = NO',
-        'SELECTED_NEXT_TASK = AMD-CLI-LIST-PATH-VALIDITY-Q1',
-        'NEXT_GATE = HUMAN_REVIEW_SELECTED_POST_I2G_NEXT_TASK',
-        'POST_I2G_DECISION = amd-post-i2g-production-admission.md'
+        'AMD_CLI_LIST_PATH_VALIDITY_Q1 = COMPLETE / INSUFFICIENT',
+        'CLI_LIST_ROLE = ACCOUNT_SENSITIVE_COUNTER_ENUMERATION / DISCOVERY_ONLY',
+        'ENUMERATION_AND_SAMPLING_EQUIVALENCE = UNKNOWN',
+        'SELECTED_NEXT_TASK = NONE',
+        'NEXT_GATE = HUMAN_REVIEW_OPERATION_PATH_EVIDENCE_GAP',
+        'OPERATION_PATH_AUDIT = amd-cli-list-path-validity.md',
+        'RESULT = PASS_WITH_EXTERNAL_BLOCKERS',
+        'TASK_RESULT = COMPLETE / INSUFFICIENT',
+        'QUALIFICATION_TEST = BLOCKED',
+        'QUALIFICATION_TEST_BLOCKER = PRE_EXISTING_PINNED_RELEASE_ARTIFACT_SHA256_MISMATCH',
+        'QUALIFICATION_BLOCKER_TASK_CAUSED = NO',
+        'QUALIFICATION_BLOCKER_SCOPE = PRE_EXISTING / OUT_OF_SCOPE / NOT_REPAIRED',
+        'PRE_EXISTING_SHA_MISMATCH_REPAIRED = NO'
     )) {
     if ($currentDocumentation.IndexOf($requiredI2eCurrentStateText, [StringComparison]::Ordinal) -lt 0) {
         throw "I2E current-state reconciliation is missing: $requiredI2eCurrentStateText"
