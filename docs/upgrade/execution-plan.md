@@ -2525,3 +2525,40 @@ The future operation remains subject to the document's mandatory preflight
 and explicit human authorization. No AMD operation, service mutation,
 privilege mutation, or live qualification run was performed while creating
 this marker.
+
+## Current-state additive marker: AMD LocalService active-sampling harness I1
+
+This marker records harness readiness only. It does not mark the Q1 live
+qualification as PASS and does not authorize a live run.
+
+~~~text
+AMD_LOCALSERVICE_ACTIVE_SAMPLING_HARNESS_I1 = COMPLETE
+Q1_LIVE_RUN = HARNESS_READY_AWAITING_HUMAN_AUTHORIZATION
+Q1_LIVE_RUN_AUTHORIZED = NO
+REAL_EXECUTION_ALLOWED = false
+PROXY_VERDICT = INSUFFICIENT
+ENUMERATION_AND_SAMPLING_EQUIVALENCE = UNKNOWN
+PRODUCTION_ACCOUNT = UNRESOLVED
+AMD_PRODUCTION_ADMISSION = DEFER
+SELECTED_NEXT_TASK =
+  AMD-LOCALSERVICE-ACTIVE-SAMPLING-Q1 / AWAITING_HUMAN_AUTHORIZATION
+NEXT_GATE = HUMAN_AUTHORIZATION_LOCALSERVICE_ACTIVE_SAMPLING
+AMD_CLI_REAL_INVOCATIONS = 0
+AMD_API_REAL_INVOCATIONS = 0
+POWER_SAMPLING_RUNS = 0
+SERVICE_MUTATIONS = 0
+LSA_MUTATIONS = 0
+TOKEN_MUTATIONS = 0
+ACL_MUTATIONS = 0
+DRIVER_MUTATIONS = 0
+PLATFORM_SECURITY_MUTATIONS = 0
+RUNTIME_CODE_CHANGED = NO
+RUST_RUNTIME_CHANGED = NO
+HISTORICAL_RAW_EVIDENCE_CHANGED = NO
+CURRENT_HARNESS =
+  tools/amd-localservice-active-sampling/run-amd-localservice-active-sampling.ps1
+~~~
+
+The dry-run and offline regression suite passed without creating a service,
+starting an AMD process, consuming a live gate, or modifying historical
+evidence.
