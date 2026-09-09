@@ -2496,3 +2496,32 @@ QUALIFICATION_TEST_BLOCKER = PRE_EXISTING_PINNED_RELEASE_ARTIFACT_SHA256_MISMATC
 
 No live AMD operation, privilege experiment, production-account selection,
 I2H run, or Attempt #4 is authorized by this current marker.
+
+## Current-state additive marker: AMD LocalService active-sampling design Q1
+
+This marker is additive. It does not rewrite the historical execution-plan
+blocks above.
+
+~~~text
+AMD_LOCALSERVICE_ACTIVE_SAMPLING_DESIGN_Q1 = COMPLETE
+QUALIFICATION_ARTIFACT_BLOCKER_RELEVANCE = NON_BLOCKING_FOR_NEW_FROZEN_CONTRACT
+LIVE_RUN_DESIGN_READY = YES
+LIVE_RUN_AUTHORIZED = NO
+REAL_EXECUTION_ALLOWED = false
+PROXY_VERDICT = INSUFFICIENT
+ENUMERATION_AND_SAMPLING_EQUIVALENCE = UNKNOWN
+PRODUCTION_ACCOUNT = UNRESOLVED
+AMD_PRODUCTION_ADMISSION = DEFER
+I2H_JUSTIFIED = NO
+ATTEMPT4_AUTHORIZATION = NOT_GRANTED
+SELECTED_NEXT_TASK =
+  AMD-LOCALSERVICE-ACTIVE-SAMPLING-Q1 / AWAITING_HUMAN_AUTHORIZATION
+NEXT_GATE = HUMAN_AUTHORIZATION_LOCALSERVICE_ACTIVE_SAMPLING
+CURRENT_STATE_DOCUMENT =
+  docs/upgrade/amd-localservice-active-sampling-design-q1.md
+~~~
+
+The future operation remains subject to the document's mandatory preflight
+and explicit human authorization. No AMD operation, service mutation,
+privilege mutation, or live qualification run was performed while creating
+this marker.
