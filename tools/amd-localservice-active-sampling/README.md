@@ -7,8 +7,8 @@ collector, provider, installer, broker, or Rust runtime component.
 Current state:
 
 ~~~text
-HARNESS_IMPLEMENTATION = REVIEW_FIX_R2_COMPLETE
-Q1_LIVE_RUN = HARNESS_READY_PENDING_REVIEW
+HARNESS_IMPLEMENTATION = REVIEW_FIX_R3_COMPLETE
+Q1_LIVE_RUN = HARNESS_READY_PENDING_FINAL_REVIEW
 Q1_LIVE_RUN_AUTHORIZED = NO
 AMD_CLI_REAL_INVOCATIONS_DURING_IMPLEMENTATION = 0
 POWER_SAMPLING_RUNS_DURING_IMPLEMENTATION = 0
@@ -68,10 +68,11 @@ The future live path may materialize only the exact CONTROL baseline right on
 the newly created Q1 Service SID. It first proves that the right is absent,
 durably records the exact task/service/right pre-state and mutation intent,
 then reads back the exact assignment. Cleanup is driven by that durable intent
-and exact SID even if the materialization function fails after LSA add; it
-removes the right only when the Q1 pre-state proves ownership. An unavailable
-recovery readback fails closed and leaves the exact service registration for
-human diagnosis. It never changes the
+and an independently captured controller/service-definition Service SID, even
+if the materialization function fails after LSA add. Recovery cross-checks the
+intent, mutation-started, before, current, and available `sc.exe showsid`
+identities before any remove. An unavailable recovery readback fails closed
+and leaves the exact service registration for human diagnosis. It never changes the
 LocalService account-global rights, LocalSystem, Administrators membership,
 ProfileSingle, device ACLs, drivers, or platform security. A token mismatch
 blocks before AMD CLI launch.
@@ -86,9 +87,10 @@ pwsh -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File .\tools\am
 
 The dry run validates command construction, contract fields, fixture binary
 and driver identity, token expectations, run-root policy, one-shot budget, and
-package-power CSV parsing, LSA ownership/recovery decisions, exact Service SID
-ACL phases, evidence manifest hashing/sealing decisions, gate consumption
-semantics, and irreversible/ambiguous post-start invocation accounting. It simulates lifecycle
+package-power CSV parsing, LSA ownership/recovery decisions, independent SID
+anchor checks, exact Service SID ACL phases, evidence manifest hashing/sealing
+decisions, gate consumption semantics, and irreversible/ambiguous post-start
+invocation accounting. It simulates lifecycle
 state only. It does not create the ProgramData output base, register a
 service, call sc.exe, read an effective service token, read or mutate LSA
 policy, or invoke AMDuProfCLI.
@@ -143,17 +145,23 @@ Only a new run root is eligible for the output ACL. Staging grants only
 SYSTEM/Administrators control. After service creation and exact Service SID
 validation, only that Q1 Service SID receives Modify access; account-wide
 `S-1-5-19`/LocalService write access is never granted. After the worker and
-service stop, the controller inventories and hashes raw evidence, recursively
-removes Q1 Service SID write access, re-reads the ACL, and verifies the hashes.
-The completed run root is preserved after any live attempt, including FAIL,
+service stop, writer quiescence is verified independently of LSA cleanup. The
+controller then inventories and hashes raw evidence, recursively removes Q1
+Service SID write access, re-reads the ACL, and verifies the hashes even when
+LSA cleanup failed closed. If writers are not quiesced, sealing is explicitly
+blocked. The completed run root is preserved after any live attempt, including FAIL,
 timeout, parser failure, or cleanup failure.
 
 Raw process stdout, stderr, launch data, token data, process result, vendor
-output, and output hashes are retained under raw. Summary data is separate.
+output, and output hashes are retained under raw. Summary data is separate. A
+valid `cli-launch-start-failed.json` successor must match the frozen schema,
+command, working directory, and run output path before accounting can be
+confirmed zero; corrupt or mismatched successor evidence remains ambiguous.
 Cleanup stops the exact service, terminates only the owned worker/child tree
-when necessary, deletes only the exact temporary service, and records residue
-status. An unexpected child or remaining service/process is a harness failure,
-not a scientific POWER_UNAVAILABLE result.
+when necessary, deletes the exact temporary service only after verified LSA
+recovery and evidence sealing, and otherwise keeps registration for
+recovery/diagnosis. An unexpected child or remaining service/process is a
+harness failure, not a scientific POWER_UNAVAILABLE result.
 
 Live mutation capabilities and current-task accounting are separate. The
 harness supports exact temporary service lifecycle mutation, isolated output

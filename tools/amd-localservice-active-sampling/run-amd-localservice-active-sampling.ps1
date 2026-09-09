@@ -850,7 +850,8 @@ function Read-Q1EvidenceJson {
 function Recover-Q1LsaMutationIfNecessary {
     param(
         [Parameter(Mandatory = $true)]$Contract,
-        [Parameter(Mandatory = $true)][string]$RunRoot
+        [Parameter(Mandatory = $true)][string]$RunRoot,
+        [Parameter(Mandatory = $true)][AllowNull()][string]$ExpectedServiceSid
     )
 
     $rawRoot = Join-Path $RunRoot 'raw'
@@ -862,6 +863,7 @@ function Recover-Q1LsaMutationIfNecessary {
             added_by_run = $false
             recovery_state = 'NO_MUTATION_ATTEMPTED'
             residual_state = 'NONE'
+            expected_service_sid = Get-Q1CanonicalServiceSid -ServiceSid $ExpectedServiceSid
             reason = 'Q1 run did not durably record an LSA mutation attempt'
         }
     }
@@ -878,7 +880,7 @@ function Recover-Q1LsaMutationIfNecessary {
     catch {
         try {
             Write-JsonAtomic -Path (Join-Path $rawRoot 'lsa-recovery.json') -Value ([ordered]@{
-                schema = 'amd-localservice-active-sampling-q1/lsa-recovery/v2'
+                schema = 'amd-localservice-active-sampling-q1/lsa-recovery/v3'
                 recovery_state = 'FAILED_CLOSED'
                 residual_state = 'UNKNOWN'
                 cleanup_verified = $false
@@ -897,12 +899,55 @@ function Recover-Q1LsaMutationIfNecessary {
         }
         return
     }
-    $serviceSid = [string](Get-ContractPropertyValue -Object $intent -Name 'service_sid')
+    $serviceSid = Get-Q1CanonicalServiceSid -ServiceSid $ExpectedServiceSid
+    $serviceSidReadback = $null
+    $serviceSidReadbackEvidence = $null
+    if ($null -eq $serviceSid) {
+        try {
+            Write-JsonAtomic -Path (Join-Path $rawRoot 'lsa-recovery.json') -Value ([ordered]@{
+                schema = 'amd-localservice-active-sampling-q1/lsa-recovery/v3'
+                recovery_state = 'FAILED_CLOSED'
+                residual_state = 'UNKNOWN'
+                cleanup_verified = $false
+                lsa_remove_attempted = $false
+                controller_expected_service_sid = $ExpectedServiceSid
+                intent_service_sid = [string](Get-ContractPropertyValue -Object $intent -Name 'service_sid')
+                right = $Contract.allowed_lsa_right
+                error = 'controller-held expected Service SID is missing, invalid, or not a virtual Service SID'
+                recorded_at_utc = [DateTime]::UtcNow.ToString('o')
+            })
+        }
+        catch {}
+        return [pscustomobject]@{
+            attempted = $true
+            cleanup_verified = $false
+            added_by_run = $true
+            recovery_state = 'FAILED_CLOSED'
+            residual_state = 'UNKNOWN'
+            lsa_remove_attempted = $false
+            expected_service_sid = $null
+            intent_service_sid = [string](Get-ContractPropertyValue -Object $intent -Name 'service_sid')
+            error = 'controller-held expected Service SID is missing, invalid, or not a virtual Service SID'
+        }
+    }
+    try {
+        $serviceState = Get-ServiceSnapshot -ServiceName $Contract.service_name
+        if (-not $serviceState.query_failed -and $serviceState.present) {
+            $serviceSidReadbackEvidence = Get-ServiceSidEvidence -ServiceName $Contract.service_name
+            $serviceSidReadback = [string]$serviceSidReadbackEvidence.sid
+        }
+    }
+    catch {
+        $serviceSidReadbackEvidence = [pscustomobject]@{
+            valid = $false
+            sid = $null
+            error = $_.Exception.Message
+        }
+    }
     $plan = $null
     try {
-        $plan = Get-Q1LsaRecoveryPlan -Intent $intent -MutationStarted $started -Before $before -Current $null -ExpectedServiceName $Contract.service_name -ExpectedServiceSid $serviceSid -ExpectedRight $Contract.allowed_lsa_right
         $current = Get-Q1LsaSnapshot -Label 'CURRENT_Q1_RECOVERY_READBACK' -ServiceSid $serviceSid -Contract $Contract
-        $plan = Get-Q1LsaRecoveryPlan -Intent $intent -MutationStarted $started -Before $before -Current $current -ExpectedServiceName $Contract.service_name -ExpectedServiceSid $serviceSid -ExpectedRight $Contract.allowed_lsa_right
+        $plan = Get-Q1LsaRecoveryPlan -Intent $intent -MutationStarted $started -Before $before -Current $current -ExpectedServiceName $Contract.service_name -ExpectedServiceSid $serviceSid -ExpectedRight $Contract.allowed_lsa_right -ServiceSidReadback $serviceSidReadback
     }
     catch {
         $plan = [pscustomobject]@{
@@ -916,10 +961,15 @@ function Recover-Q1LsaMutationIfNecessary {
     if (-not $plan.valid) {
         try {
             Write-JsonAtomic -Path (Join-Path $rawRoot 'lsa-recovery.json') -Value ([ordered]@{
-                schema = 'amd-localservice-active-sampling-q1/lsa-recovery/v2'
+                schema = 'amd-localservice-active-sampling-q1/lsa-recovery/v3'
                 recovery_state = 'FAILED_CLOSED'
                 residual_state = if ($null -eq $plan.residual_state) { 'UNKNOWN' } else { $plan.residual_state }
                 cleanup_verified = $false
+                lsa_remove_attempted = $false
+                controller_expected_service_sid = $serviceSid
+                service_sid_readback = $serviceSidReadback
+                service_sid_readback_evidence = $serviceSidReadbackEvidence
+                intent_service_sid = [string](Get-ContractPropertyValue -Object $intent -Name 'service_sid')
                 service_sid = $serviceSid
                 right = $Contract.allowed_lsa_right
                 plan = $plan
@@ -933,6 +983,10 @@ function Recover-Q1LsaMutationIfNecessary {
             added_by_run = $true
             recovery_state = 'FAILED_CLOSED'
             residual_state = if ($null -eq $plan.residual_state) { 'UNKNOWN' } else { $plan.residual_state }
+            lsa_remove_attempted = $false
+            expected_service_sid = $serviceSid
+            service_sid_readback = $serviceSidReadback
+            service_sid_readback_evidence = $serviceSidReadbackEvidence
             plan = $plan
         }
     }
@@ -941,10 +995,15 @@ function Recover-Q1LsaMutationIfNecessary {
         try {
             Write-JsonAtomic -Path (Join-Path $rawRoot 'lsa-cleanup-after.json') -Value $current
             Write-JsonAtomic -Path (Join-Path $rawRoot 'lsa-recovery.json') -Value ([ordered]@{
-                schema = 'amd-localservice-active-sampling-q1/lsa-recovery/v2'
+                schema = 'amd-localservice-active-sampling-q1/lsa-recovery/v3'
                 recovery_state = 'RIGHT_ALREADY_ABSENT'
                 residual_state = 'ABSENT'
                 cleanup_verified = [bool]$cleanupGate.valid
+                lsa_remove_attempted = $false
+                controller_expected_service_sid = $serviceSid
+                service_sid_readback = $serviceSidReadback
+                service_sid_readback_evidence = $serviceSidReadbackEvidence
+                intent_service_sid = [string](Get-ContractPropertyValue -Object $intent -Name 'service_sid')
                 service_sid = $serviceSid
                 right = $Contract.allowed_lsa_right
                 plan = $plan
@@ -968,6 +1027,9 @@ function Recover-Q1LsaMutationIfNecessary {
             added_by_run = $true
             recovery_state = 'RIGHT_ALREADY_ABSENT'
             residual_state = 'ABSENT'
+            lsa_remove_attempted = $false
+            expected_service_sid = $serviceSid
+            service_sid_readback = $serviceSidReadback
             final = $current
             validation = $cleanupGate
         }
@@ -997,10 +1059,15 @@ function Recover-Q1LsaMutationIfNecessary {
         }
         Write-JsonAtomic -Path (Join-Path $rawRoot 'lsa-cleanup-after.json') -Value $final
         Write-JsonAtomic -Path (Join-Path $rawRoot 'lsa-recovery.json') -Value ([ordered]@{
-            schema = 'amd-localservice-active-sampling-q1/lsa-recovery/v2'
+            schema = 'amd-localservice-active-sampling-q1/lsa-recovery/v3'
             recovery_state = 'OWNED_RIGHT_REMOVED'
             residual_state = 'ABSENT'
             cleanup_verified = $true
+            lsa_remove_attempted = $true
+            controller_expected_service_sid = $serviceSid
+            service_sid_readback = $serviceSidReadback
+            service_sid_readback_evidence = $serviceSidReadbackEvidence
+            intent_service_sid = [string](Get-ContractPropertyValue -Object $intent -Name 'service_sid')
             service_sid = $serviceSid
             right = $Contract.allowed_lsa_right
             plan = $plan
@@ -1013,6 +1080,9 @@ function Recover-Q1LsaMutationIfNecessary {
             added_by_run = $true
             recovery_state = 'OWNED_RIGHT_REMOVED'
             residual_state = 'ABSENT'
+            lsa_remove_attempted = $true
+            expected_service_sid = $serviceSid
+            service_sid_readback = $serviceSidReadback
             final = $final
             validation = $gate
         }
@@ -1020,10 +1090,15 @@ function Recover-Q1LsaMutationIfNecessary {
     catch {
         try {
             Write-JsonAtomic -Path (Join-Path $rawRoot 'lsa-recovery.json') -Value ([ordered]@{
-                schema = 'amd-localservice-active-sampling-q1/lsa-recovery/v2'
+                schema = 'amd-localservice-active-sampling-q1/lsa-recovery/v3'
                 recovery_state = 'FAILED_CLOSED'
                 residual_state = 'UNKNOWN'
                 cleanup_verified = $false
+                lsa_remove_attempted = $true
+                controller_expected_service_sid = $serviceSid
+                service_sid_readback = $serviceSidReadback
+                service_sid_readback_evidence = $serviceSidReadbackEvidence
+                intent_service_sid = [string](Get-ContractPropertyValue -Object $intent -Name 'service_sid')
                 service_sid = $serviceSid
                 right = $Contract.allowed_lsa_right
                 error = $_.Exception.Message
@@ -1037,6 +1112,9 @@ function Recover-Q1LsaMutationIfNecessary {
             added_by_run = $true
             recovery_state = 'FAILED_CLOSED'
             residual_state = 'UNKNOWN'
+            lsa_remove_attempted = $true
+            expected_service_sid = $serviceSid
+            service_sid_readback = $serviceSidReadback
             error = $_.Exception.Message
         }
     }
@@ -1046,10 +1124,11 @@ function Remove-Q1LsaRightIfOwned {
     param(
         [Parameter(Mandatory = $true)]$Contract,
         [Parameter(Mandatory = $true)][string]$RunRoot,
-        [AllowNull()]$Materialization
+        [AllowNull()]$Materialization,
+        [Parameter(Mandatory = $true)][AllowNull()][string]$ExpectedServiceSid
     )
 
-    Recover-Q1LsaMutationIfNecessary -Contract $Contract -RunRoot $RunRoot
+    Recover-Q1LsaMutationIfNecessary -Contract $Contract -RunRoot $RunRoot -ExpectedServiceSid $ExpectedServiceSid
 }
 
 function Get-ServiceSnapshot {
@@ -1256,6 +1335,50 @@ function Stop-And-RemoveQualificationService {
     }
 }
 
+function Test-Q1WriterQuiescence {
+    param(
+        [Parameter(Mandatory = $true)]$Contract,
+        [Parameter(Mandatory = $true)][string]$RunRoot,
+        [AllowNull()]$StopResult
+    )
+
+    $failures = New-Object System.Collections.Generic.List[string]
+    $service = Get-ServiceSnapshot -ServiceName $Contract.service_name
+    $residue = Get-ResidualEvidence -Contract $Contract -RunRoot $RunRoot
+    if ($null -eq $StopResult -or -not [bool](Get-ContractPropertyValue -Object $StopResult -Name 'stop_verified' -Default $false)) {
+        [void]$failures.Add('qualification service stop was not verified')
+    }
+    if ($service.query_failed) {
+        [void]$failures.Add('qualification service state could not be read after stop')
+    }
+    elseif ($service.present -and ([string]$service.state -ine 'Stopped' -or [int]$service.process_id -ne 0)) {
+        [void]$failures.Add('qualification service is not stopped with process id zero')
+    }
+    if (@($residue.query_errors).Count -ne 0) {
+        foreach ($error in @($residue.query_errors)) { [void]$failures.Add([string]$error) }
+    }
+    $otherServices = @($residue.qualification_services | Where-Object {
+        [string]$_.Name -cne $Contract.service_name
+    })
+    if ($otherServices.Count -ne 0) {
+        [void]$failures.Add('unexpected qualification service residue remains')
+    }
+    if (@($residue.amd_processes).Count -ne 0) {
+        [void]$failures.Add('AMD process residue remains')
+    }
+    if (@($residue.harness_processes).Count -ne 0) {
+        [void]$failures.Add('Q1 service-host process residue remains')
+    }
+    [pscustomobject]@{
+        valid = ($failures.Count -eq 0)
+        writers_quiesced = ($failures.Count -eq 0)
+        writer_active = ($failures.Count -ne 0)
+        service = $service
+        residue = $residue
+        failures = @($failures)
+    }
+}
+
 function Remove-QualificationServiceRegistration {
     param(
         [Parameter(Mandatory = $true)]$Contract,
@@ -1372,7 +1495,7 @@ function Get-Manifest {
 function Write-Q1EvidenceManifest {
     param(
         [Parameter(Mandatory = $true)][string]$RunRoot,
-        [Parameter(Mandatory = $true)][string]$ServiceSid
+        [Parameter(Mandatory = $true)][AllowNull()][AllowEmptyString()][string]$ServiceSid
     )
 
     $entries = @(Get-Q1EvidenceManifestEntries -Root $RunRoot)
@@ -1401,7 +1524,7 @@ function Seal-Q1Evidence {
     param(
         [Parameter(Mandatory = $true)]$Contract,
         [Parameter(Mandatory = $true)][string]$RunRoot,
-        [Parameter(Mandatory = $true)][string]$ServiceSid
+        [Parameter(Mandatory = $true)][AllowNull()][AllowEmptyString()][string]$ServiceSid
     )
 
     try {
@@ -1415,7 +1538,9 @@ function Seal-Q1Evidence {
             throw 'post-seal ACL still grants qualification write access'
         }
         [pscustomobject]@{
+            attempted = $true
             valid = $true
+            state = 'SEALED'
             manifest_path = $manifestEvidence.path
             manifest = $manifestEvidence.manifest
             manifest_validation = $manifestGate
@@ -1427,7 +1552,9 @@ function Seal-Q1Evidence {
     }
     catch {
         [pscustomobject]@{
+            attempted = $true
             valid = $false
+            state = 'EVIDENCE_SEAL_FAILED'
             manifest_path = Join-Path $RunRoot 'raw\evidence-manifest.json'
             manifest = $null
             manifest_validation = $null
@@ -1631,6 +1758,9 @@ function Invoke-LiveRun {
     $cleanup = $null
     $lsaMaterialization = $null
     $lsaCleanup = $null
+    $writerQuiescence = $null
+    $sealDecision = $null
+    $registrationDecision = $null
     $outputRootEvidence = $null
     $outputServiceSidEvidence = $null
     $evidenceSeal = $null
@@ -1648,6 +1778,15 @@ function Invoke-LiveRun {
         $serviceHostPath = Join-Path $ToolRoot 'service-host.ps1'
         $serviceDefinition = New-QualificationService -Contract $Contract -ManifestPath $manifestPath -ServiceHostPath $serviceHostPath -RunRoot $runRoot
         $serviceCreated = $true
+        Write-JsonAtomic -Path (Join-Path $runRoot 'raw\service-definition.json') -Value ([ordered]@{
+            schema = 'amd-localservice-active-sampling-q1/service-definition/v1'
+            service_name = $serviceDefinition.service_name
+            service_account = $serviceDefinition.service_account
+            service_sid = $serviceDefinition.service_sid.sid
+            service_sid_evidence = $serviceDefinition.service_sid
+            independently_validated = [bool]$serviceDefinition.configuration_validation.valid
+            recorded_at_utc = [DateTime]::UtcNow.ToString('o')
+        })
         $outputServiceSidEvidence = Grant-Q1ServiceSidOutputAccess -RunRoot $runRoot -Contract $Contract -ServiceSid ([string]$serviceDefinition.service_sid.sid)
         $lsaMaterialization = Initialize-Q1LsaMaterialization -Contract $Contract -RunRoot $runRoot -ServiceSid ([string]$serviceDefinition.service_sid.sid)
         $manifest = Get-Manifest -Contract $Contract -RunId $runId -RunRoot $runRoot -Gate $gate -Preflight $preflight -ServiceDefinition $serviceDefinition
@@ -1665,25 +1804,95 @@ function Invoke-LiveRun {
     }
     finally {
         if ($serviceCreated) {
-            $cleanup = Stop-And-RemoveQualificationService -Contract $Contract -RunRoot $runRoot -KeepRegistration
-            $lsaCleanup = Recover-Q1LsaMutationIfNecessary -Contract $Contract -RunRoot $runRoot
-            if ($cleanup.stop_verified -and $lsaCleanup.cleanup_verified -and $null -ne $serviceDefinition) {
-                $evidenceSeal = Seal-Q1Evidence -Contract $Contract -RunRoot $runRoot -ServiceSid ([string]$serviceDefinition.service_sid.sid)
+            $stopCleanup = Stop-And-RemoveQualificationService -Contract $Contract -RunRoot $runRoot -KeepRegistration
+            $cleanup = $stopCleanup
+            $writerQuiescence = Test-Q1WriterQuiescence -Contract $Contract -RunRoot $runRoot -StopResult $stopCleanup
+            $expectedServiceSid = if ($null -ne $serviceDefinition) {
+                [string]$serviceDefinition.service_sid.sid
             }
-            if ($cleanup.stop_verified -and $lsaCleanup.cleanup_verified -and
-                $null -ne $evidenceSeal -and $evidenceSeal.valid) {
-                $registrationCleanup = Remove-QualificationServiceRegistration -Contract $Contract -RunRoot $runRoot
-                $cleanup = [pscustomobject]@{
-                    stop = $cleanup
-                    delete = Get-ContractPropertyValue -Object $registrationCleanup -Name 'delete'
-                    before = $cleanup.before
-                    after = $registrationCleanup.after
-                    stop_verified = [bool]$cleanup.stop_verified
-                    service_deleted = [bool]$registrationCleanup.removed
-                    registration_kept = -not [bool]$registrationCleanup.removed
-                    residue = $registrationCleanup.residue
-                    cleanup_verified = [bool]$registrationCleanup.cleanup_verified
+            else {
+                $null
+            }
+            if ($writerQuiescence.valid) {
+                try {
+                    $lsaCleanup = Recover-Q1LsaMutationIfNecessary -Contract $Contract -RunRoot $runRoot -ExpectedServiceSid $expectedServiceSid
                 }
+                catch {
+                    $lsaCleanup = [pscustomobject]@{
+                        attempted = $true
+                        cleanup_verified = $false
+                        added_by_run = $true
+                        recovery_state = 'FAILED_CLOSED'
+                        residual_state = 'UNKNOWN'
+                        lsa_remove_attempted = $false
+                        expected_service_sid = $expectedServiceSid
+                        error = $_.Exception.Message
+                    }
+                }
+                $sealDecision = Get-Q1EvidenceSealDecision -WritersQuiesced $true -LsaCleanupVerified ([bool]$lsaCleanup.cleanup_verified)
+                if ($sealDecision.seal_allowed) {
+                    $evidenceSeal = Seal-Q1Evidence -Contract $Contract -RunRoot $runRoot -ServiceSid $expectedServiceSid
+                }
+            }
+            else {
+                $lsaCleanup = [pscustomobject]@{
+                    attempted = $false
+                    cleanup_verified = $false
+                    added_by_run = $false
+                    recovery_state = 'NOT_ATTEMPTED_WRITER_NOT_QUIESCED'
+                    residual_state = 'UNKNOWN'
+                    lsa_remove_attempted = $false
+                    expected_service_sid = $expectedServiceSid
+                    reason = 'LSA recovery was not attempted while a Q1 writer may still be active'
+                }
+                $sealDecision = Get-Q1EvidenceSealDecision -WritersQuiesced $false -LsaCleanupVerified $false
+                $evidenceSeal = [pscustomobject]@{
+                    attempted = $false
+                    valid = $false
+                    state = 'BLOCKED_WRITER_NOT_QUIESCED'
+                    manifest_path = Join-Path $runRoot 'raw\evidence-manifest.json'
+                    manifest = $null
+                    manifest_validation = $null
+                    acl = $null
+                    post_seal_service_sid_write_access = $null
+                    hashes_match = $false
+                    evidence_preserved = (Test-Path -LiteralPath $runRoot -PathType Container)
+                    error = $sealDecision.reason
+                }
+            }
+            $registrationDecision = Get-Q1RegistrationDeletionDecision -WritersQuiesced ([bool]$writerQuiescence.valid) -LsaCleanupVerified ([bool]$lsaCleanup.cleanup_verified) -EvidenceSealValid ([bool]$evidenceSeal.valid)
+            if ($registrationDecision.delete_allowed -and $null -ne $serviceDefinition) {
+                $registrationCleanup = Remove-QualificationServiceRegistration -Contract $Contract -RunRoot $runRoot
+            }
+            else {
+                $registrationCleanup = [pscustomobject]@{
+                    attempted = $false
+                    removed = $false
+                    cleanup_verified = $false
+                    registration_kept = $true
+                    policy = $registrationDecision.policy
+                    registration_state = $registrationDecision.registration_state
+                    reason = $registrationDecision.reason
+                    before = $stopCleanup.after
+                    after = $stopCleanup.after
+                    delete = [pscustomobject]@{
+                        exit_code = $null
+                        output = 'service registration retained for recovery/diagnosis'
+                        arguments = @('delete', $Contract.service_name)
+                    }
+                    residue = $writerQuiescence.residue
+                }
+            }
+            $cleanup = [pscustomobject]@{
+                stop = $stopCleanup
+                delete = Get-ContractPropertyValue -Object $registrationCleanup -Name 'delete'
+                before = $stopCleanup.before
+                after = Get-ContractPropertyValue -Object $registrationCleanup -Name 'after' -Default $stopCleanup.after
+                stop_verified = [bool]$stopCleanup.stop_verified
+                service_deleted = [bool](Get-ContractPropertyValue -Object $registrationCleanup -Name 'removed' -Default $false)
+                registration_kept = [bool](Get-ContractPropertyValue -Object $registrationCleanup -Name 'registration_kept' -Default $false)
+                residue = Get-ContractPropertyValue -Object $registrationCleanup -Name 'residue' -Default $writerQuiescence.residue
+                cleanup_verified = [bool]$stopCleanup.stop_verified -and [bool](Get-ContractPropertyValue -Object $registrationCleanup -Name 'cleanup_verified' -Default $false)
             }
         }
         elseif ($null -eq $gate -and (Test-Path -LiteralPath $runRoot -PathType Container)) {
@@ -1744,11 +1953,14 @@ function Invoke-LiveRun {
         power_evidence = $powerEvidence
         pre_service_cleanup = $preServiceCleanup
         output_inventory = $finalInventory
+        writer_quiescence = $writerQuiescence
         cleanup = $cleanup
         output_root_mutation = $outputRootEvidence
         output_service_sid_acl = $outputServiceSidEvidence
         evidence_seal = $evidenceSeal
+        evidence_seal_decision = $sealDecision
         registration_cleanup = $registrationCleanup
+        registration_deletion_decision = $registrationDecision
         lsa_materialization = $lsaMaterialization
         lsa_cleanup = $lsaCleanup
         lsa_accounting = $lsaAccounting

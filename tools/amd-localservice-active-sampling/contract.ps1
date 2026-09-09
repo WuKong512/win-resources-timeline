@@ -48,10 +48,10 @@ function Get-AmdLocalServiceSamplingContract {
         authorization_environment_value = 'GRANTED_FOR_THIS_TASK_ONLY'
         gate_file_name = 'Q1-LIVE-GATE.json'
         harness_identity_mode = 'SOURCE_SHA256_PINNED'
-        contract_canonical_sha256 = '7B7D43CA282DB77940C93D49BC5DFEE36B773A0DA71C8A20F591B4F62B2052B1'
+        contract_canonical_sha256 = '24E404A14D9332638E8022CE31C81D90272AADBB1D444ADA09F26BE6FDE37ACC'
         harness_source_sha256 = [ordered]@{
-            contract = '7B7D43CA282DB77940C93D49BC5DFEE36B773A0DA71C8A20F591B4F62B2052B1'
-            runner = '87DFC3903DAD61A069CC4276C2EBE340F5B5AD4A0FC38FBE9093D3FDBCEEF4BA'
+            contract = '24E404A14D9332638E8022CE31C81D90272AADBB1D444ADA09F26BE6FDE37ACC'
+            runner = '9BF9D48157CBBDC014C78387BA86D595A855CD18373E51275F5DBBF9A3CF199E'
             service_host = 'E4F1F8AE2F25C91E7B2EF43C1A47C5251BF7BFCE8AF203445CDF41A086456C3E'
             sc_argument_contract = 'A238266DF382BFE2870E11ED40A14468EF7BCB58807D0F235D17C5A3C3F5E5FA'
             i2e_runtime_library = 'BC22E7599A64D61BC3B93351328B546656D1393EFABC87106630A86F43A71F08'
@@ -98,6 +98,25 @@ function Get-ContractPropertyValue {
         return $property[0].Value
     }
     $Default
+}
+
+function Get-Q1CanonicalServiceSid {
+    param([AllowNull()][AllowEmptyString()][string]$ServiceSid)
+
+    if ([string]::IsNullOrWhiteSpace($ServiceSid)) {
+        return $null
+    }
+    try {
+        $sid = [System.Security.Principal.SecurityIdentifier]::new($ServiceSid)
+        $canonical = [string]$sid.Value
+        if ($canonical -notmatch '^S-1-5-80-(?:\d+-){4}\d+$') {
+            return $null
+        }
+        $canonical
+    }
+    catch {
+        $null
+    }
 }
 
 function Get-HarnessSourcePaths {
@@ -207,6 +226,124 @@ function Test-HarnessSourceIdentity {
     Get-HarnessSourceIdentity -Root $Root -Contract $Contract
 }
 
+function Test-Q1LaunchIntentEvidence {
+    param(
+        [AllowNull()]$Evidence,
+        [Parameter(Mandatory = $true)]$Contract,
+        [Parameter(Mandatory = $true)][string]$RunRoot
+    )
+
+    $failures = New-Object System.Collections.Generic.List[string]
+    if ($null -eq $Evidence) {
+        [void]$failures.Add('launch intent evidence is missing or invalid JSON')
+    }
+    $outputDirectory = Join-Path $RunRoot 'raw\timechart-output'
+    $expectedArguments = @(Get-FixedAmdCliArguments -OutputDirectory $outputDirectory)
+    $actualArguments = @((Get-ContractPropertyValue -Object $Evidence -Name 'arguments' -Default @()) |
+        ForEach-Object { [string]$_ })
+    if ([string](Get-ContractPropertyValue -Object $Evidence -Name 'schema') -cne 'amd-localservice-active-sampling-q1/cli-launch-intent/v1') {
+        [void]$failures.Add('launch intent schema mismatch')
+    }
+    if ([string](Get-ContractPropertyValue -Object $Evidence -Name 'state') -cne 'LAUNCH_INTENT_DURABLE') {
+        [void]$failures.Add('launch intent state mismatch')
+    }
+    if ((Get-ContractPropertyValue -Object $Evidence -Name 'launch_attempt_permitted' -Default $false) -isnot [bool] -or
+        -not [bool](Get-ContractPropertyValue -Object $Evidence -Name 'launch_attempt_permitted' -Default $false)) {
+        [void]$failures.Add('launch intent permission is not true')
+    }
+    if ((Get-ContractPropertyValue -Object $Evidence -Name 'gate_consumed' -Default $false) -isnot [bool] -or
+        -not [bool](Get-ContractPropertyValue -Object $Evidence -Name 'gate_consumed' -Default $false)) {
+        [void]$failures.Add('launch intent gate is not durably consumed')
+    }
+    if ([string](Get-ContractPropertyValue -Object $Evidence -Name 'start_result') -cne 'UNKNOWN') {
+        [void]$failures.Add('launch intent start result is not UNKNOWN')
+    }
+    if ([string](Get-ContractPropertyValue -Object $Evidence -Name 'executable') -cne $Contract.amd_cli_path) {
+        [void]$failures.Add('launch intent executable mismatch')
+    }
+    if ((@($actualArguments) -join [char]0) -cne (@($expectedArguments) -join [char]0)) {
+        [void]$failures.Add('launch intent command arguments mismatch')
+    }
+    if ([string](Get-ContractPropertyValue -Object $Evidence -Name 'working_directory') -cne (Split-Path -Parent $Contract.amd_cli_path)) {
+        [void]$failures.Add('launch intent working directory mismatch')
+    }
+    if ([string](Get-ContractPropertyValue -Object $Evidence -Name 'output_directory') -cne $outputDirectory) {
+        [void]$failures.Add('launch intent output directory mismatch')
+    }
+    [pscustomobject]@{
+        valid = ($failures.Count -eq 0)
+        failures = @($failures)
+        expected_output_directory = $outputDirectory
+        expected_arguments = $expectedArguments
+    }
+}
+
+function Test-Q1LaunchStartFailedEvidence {
+    param(
+        [AllowNull()]$Evidence,
+        [AllowNull()]$LaunchIntent,
+        [Parameter(Mandatory = $true)]$Contract,
+        [Parameter(Mandatory = $true)][string]$RunRoot
+    )
+
+    $failures = New-Object System.Collections.Generic.List[string]
+    $intentGate = Test-Q1LaunchIntentEvidence -Evidence $LaunchIntent -Contract $Contract -RunRoot $RunRoot
+    foreach ($failure in @($intentGate.failures)) { [void]$failures.Add([string]$failure) }
+    if ($null -eq $Evidence) {
+        [void]$failures.Add('launch start-failed evidence is missing or invalid JSON')
+    }
+    $expectedOutputDirectory = Join-Path $RunRoot 'raw\timechart-output'
+    $expectedArguments = @(Get-FixedAmdCliArguments -OutputDirectory $expectedOutputDirectory)
+    $actualArguments = @((Get-ContractPropertyValue -Object $Evidence -Name 'arguments' -Default @()) |
+        ForEach-Object { [string]$_ })
+    if ([string](Get-ContractPropertyValue -Object $Evidence -Name 'schema') -cne 'amd-localservice-active-sampling-q1/cli-launch-start-failed/v1') {
+        [void]$failures.Add('launch start-failed schema mismatch')
+    }
+    if ([string](Get-ContractPropertyValue -Object $Evidence -Name 'state') -cne 'PROCESS_START_FAILED') {
+        [void]$failures.Add('launch start-failed state mismatch')
+    }
+    $processStarted = Get-ContractPropertyValue -Object $Evidence -Name 'process_started' -Default $null
+    if ($processStarted -isnot [bool] -or [bool]$processStarted) {
+        [void]$failures.Add('start-failed evidence process_started is not false')
+    }
+    if ([string](Get-ContractPropertyValue -Object $Evidence -Name 'invocation_attempted') -cne '0') {
+        [void]$failures.Add('start-failed evidence invocation_attempted is not zero')
+    }
+    if ([string](Get-ContractPropertyValue -Object $Evidence -Name 'power_sampling_runs') -cne '0') {
+        [void]$failures.Add('start-failed evidence power_sampling_runs is not zero')
+    }
+    $launchPermitted = Get-ContractPropertyValue -Object $Evidence -Name 'launch_attempt_permitted' -Default $null
+    if ($launchPermitted -isnot [bool] -or -not [bool]$launchPermitted) {
+        [void]$failures.Add('start-failed evidence launch permission is not true')
+    }
+    $gateConsumed = Get-ContractPropertyValue -Object $Evidence -Name 'gate_consumed' -Default $null
+    if ($gateConsumed -isnot [bool] -or -not [bool]$gateConsumed) {
+        [void]$failures.Add('start-failed evidence gate is not true')
+    }
+    if ([string](Get-ContractPropertyValue -Object $Evidence -Name 'start_result') -cne 'FAILED') {
+        [void]$failures.Add('start-failed evidence start result is not FAILED')
+    }
+    if ([string](Get-ContractPropertyValue -Object $Evidence -Name 'executable') -cne $Contract.amd_cli_path) {
+        [void]$failures.Add('start-failed executable mismatch')
+    }
+    if ((@($actualArguments) -join [char]0) -cne (@($expectedArguments) -join [char]0)) {
+        [void]$failures.Add('start-failed command arguments mismatch')
+    }
+    if ([string](Get-ContractPropertyValue -Object $Evidence -Name 'working_directory') -cne (Split-Path -Parent $Contract.amd_cli_path)) {
+        [void]$failures.Add('start-failed working directory mismatch')
+    }
+    if ([string](Get-ContractPropertyValue -Object $Evidence -Name 'output_directory') -cne $expectedOutputDirectory) {
+        [void]$failures.Add('start-failed output directory mismatch')
+    }
+    [pscustomobject]@{
+        valid = ($failures.Count -eq 0)
+        failures = @($failures)
+        launch_intent_valid = [bool]$intentGate.valid
+        expected_output_directory = $expectedOutputDirectory
+        expected_arguments = $expectedArguments
+    }
+}
+
 function Get-InvocationAccounting {
     param(
         [AllowNull()]$ProcessResult,
@@ -217,6 +354,9 @@ function Get-InvocationAccounting {
     $launchStartedPath = $null
     $launchFailedPath = $null
     $launchIntent = $null
+    $launchFailed = $null
+    $launchIntentValidation = $null
+    $launchFailedValidation = $null
     if (-not [string]::IsNullOrWhiteSpace($RunRoot)) {
         $rawRoot = Join-Path $RunRoot 'raw'
         $launchIntentPath = Join-Path $rawRoot 'cli-launch-intent.json'
@@ -225,6 +365,9 @@ function Get-InvocationAccounting {
         if (Test-Path -LiteralPath $launchIntentPath -PathType Leaf) {
             try { $launchIntent = Get-Content -LiteralPath $launchIntentPath -Raw | ConvertFrom-Json } catch { $launchIntent = $null }
         }
+        if (Test-Path -LiteralPath $launchFailedPath -PathType Leaf) {
+            try { $launchFailed = Get-Content -LiteralPath $launchFailedPath -Raw | ConvertFrom-Json } catch { $launchFailed = $null }
+        }
     }
     $durableLaunchIntent = -not [string]::IsNullOrWhiteSpace($launchIntentPath) -and
         (Test-Path -LiteralPath $launchIntentPath -PathType Leaf)
@@ -232,18 +375,33 @@ function Get-InvocationAccounting {
         (Test-Path -LiteralPath $launchStartedPath -PathType Leaf)
     $durableLaunchFailed = -not [string]::IsNullOrWhiteSpace($launchFailedPath) -and
         (Test-Path -LiteralPath $launchFailedPath -PathType Leaf)
+    if ($durableLaunchIntent) {
+        $launchIntentValidation = Test-Q1LaunchIntentEvidence -Evidence $launchIntent -Contract (Get-AmdLocalServiceSamplingContract) -RunRoot $RunRoot
+    }
+    if ($durableLaunchFailed) {
+        $launchFailedValidation = Test-Q1LaunchStartFailedEvidence -Evidence $launchFailed -LaunchIntent $launchIntent -Contract (Get-AmdLocalServiceSamplingContract) -RunRoot $RunRoot
+    }
     $processStarted = [bool](Get-ContractPropertyValue -Object $ProcessResult -Name 'process_started' -Default $false)
     $invocationAttempted = [bool](Get-ContractPropertyValue -Object $ProcessResult -Name 'invocation_attempted' -Default $false)
     $samplingRuns = [int](Get-ContractPropertyValue -Object $ProcessResult -Name 'power_sampling_runs' -Default 0)
     $gateConsumed = [bool](Get-ContractPropertyValue -Object $launchIntent -Name 'gate_consumed' -Default $false)
     $state = [string](Get-ContractPropertyValue -Object $ProcessResult -Name 'state' -Default $null)
+    $evidenceConflict = $durableLaunchStarted -and $durableLaunchFailed
     if ($durableLaunchStarted -or $processStarted -or $invocationAttempted -or ($samplingRuns -gt 0)) {
         $certainty = 'CONFIRMED_ONE'
         $accountingState = 'CONFIRMED_STARTED'
         $started = $true
         $count = 1
     }
-    elseif ($durableLaunchIntent -and -not $durableLaunchFailed) {
+    elseif ($durableLaunchIntent -and
+        $null -ne $launchIntentValidation -and $launchIntentValidation.valid -and
+        $durableLaunchFailed -and $null -ne $launchFailedValidation -and $launchFailedValidation.valid) {
+        $certainty = 'CONFIRMED_ZERO'
+        $accountingState = 'LAUNCH_FAILED'
+        $started = $false
+        $count = 0
+    }
+    elseif ($durableLaunchIntent) {
         $certainty = 'AMBIGUOUS'
         $accountingState = 'AMBIGUOUS_AFTER_LAUNCH_INTENT'
         $started = $false
@@ -265,6 +423,11 @@ function Get-InvocationAccounting {
         launch_intent_path = $launchIntentPath
         launch_started_path = $launchStartedPath
         launch_failed_path = $launchFailedPath
+        launch_intent_valid = if ($null -ne $launchIntentValidation) { [bool]$launchIntentValidation.valid } else { $false }
+        launch_failed_valid = if ($null -ne $launchFailedValidation) { [bool]$launchFailedValidation.valid } else { $false }
+        launch_intent_validation = $launchIntentValidation
+        launch_failed_validation = $launchFailedValidation
+        evidence_conflict = $evidenceConflict
         gate_consumed = $gateConsumed -or $durableLaunchIntent
         second_run_forbidden = ($gateConsumed -or $durableLaunchIntent)
         process_started = $started
@@ -511,6 +674,53 @@ function Test-Q1LsaCleanupEvidence {
     }
 }
 
+function Get-Q1EvidenceSealDecision {
+    param(
+        [Parameter(Mandatory = $true)][bool]$WritersQuiesced,
+        [Parameter(Mandatory = $true)][bool]$LsaCleanupVerified
+    )
+
+    if (-not $WritersQuiesced) {
+        return [pscustomobject]@{
+            seal_allowed = $false
+            seal_attempted = $false
+            state = 'BLOCKED_WRITER_NOT_QUIESCED'
+            lsa_cleanup_verified = $LsaCleanupVerified
+            reason = 'a Q1 service, worker, or AMD process may still write evidence'
+        }
+    }
+    [pscustomobject]@{
+        seal_allowed = $true
+        seal_attempted = $true
+        state = 'ELIGIBLE_INDEPENDENT_OF_LSA_CLEANUP'
+        lsa_cleanup_verified = $LsaCleanupVerified
+        reason = 'all Q1 writers are confirmed stopped; LSA cleanup result does not gate evidence sealing'
+    }
+}
+
+function Get-Q1RegistrationDeletionDecision {
+    param(
+        [Parameter(Mandatory = $true)][bool]$WritersQuiesced,
+        [Parameter(Mandatory = $true)][bool]$LsaCleanupVerified,
+        [Parameter(Mandatory = $true)][bool]$EvidenceSealValid
+    )
+
+    if ($WritersQuiesced -and $LsaCleanupVerified -and $EvidenceSealValid) {
+        return [pscustomobject]@{
+            delete_allowed = $true
+            policy = 'DELETE_AFTER_VERIFIED_LSA_AND_EVIDENCE_CLEANUP'
+            registration_state = 'DELETE'
+            reason = 'writer quiescence, LSA recovery, and evidence sealing all passed'
+        }
+    }
+    [pscustomobject]@{
+        delete_allowed = $false
+        policy = 'KEEP_FOR_RECOVERY'
+        registration_state = 'KEPT_FOR_RECOVERY'
+        reason = 'service registration remains available for diagnosis or recovery after cleanup failure'
+    }
+}
+
 function Get-Q1LsaRecoveryPlan {
     param(
         [AllowNull()]$Intent,
@@ -518,11 +728,13 @@ function Get-Q1LsaRecoveryPlan {
         [AllowNull()]$Before,
         [AllowNull()]$Current,
         [Parameter(Mandatory = $true)][string]$ExpectedServiceName,
-        [Parameter(Mandatory = $true)][string]$ExpectedServiceSid,
-        [Parameter(Mandatory = $true)][string]$ExpectedRight
+        [Parameter(Mandatory = $true)][AllowNull()][string]$ExpectedServiceSid,
+        [Parameter(Mandatory = $true)][string]$ExpectedRight,
+        [AllowNull()][string]$ServiceSidReadback
     )
 
     $failures = New-Object System.Collections.Generic.List[string]
+    $expectedCanonicalSid = Get-Q1CanonicalServiceSid -ServiceSid $ExpectedServiceSid
     $mutationAttempted = [bool](Get-ContractPropertyValue -Object $MutationStarted -Name 'mutation_attempted' -Default $false) -or
         [string](Get-ContractPropertyValue -Object $MutationStarted -Name 'state' -Default $null) -eq 'MUTATION_ATTEMPTED'
     if (-not $mutationAttempted) {
@@ -532,10 +744,14 @@ function Get-Q1LsaRecoveryPlan {
             recovery_state = 'NO_MUTATION_ATTEMPTED'
             residual_state = 'NONE'
             mutation_attempted = $false
-            service_sid = $ExpectedServiceSid
+            expected_service_sid = $expectedCanonicalSid
+            service_sid = $expectedCanonicalSid
             right = $ExpectedRight
             failures = @()
         }
+    }
+    if ($null -eq $expectedCanonicalSid) {
+        [void]$failures.Add('controller-held expected Service SID is missing, invalid, or not a virtual Service SID')
     }
     if ($null -eq $Intent) { [void]$failures.Add('durable LSA mutation intent is missing') }
     if ($null -eq $Before) { [void]$failures.Add('durable LSA pre-mutation snapshot is missing') }
@@ -545,7 +761,8 @@ function Get-Q1LsaRecoveryPlan {
     if ([string](Get-ContractPropertyValue -Object $Intent -Name 'service_name') -cne $ExpectedServiceName) {
         [void]$failures.Add('LSA mutation intent service name mismatch')
     }
-    if ([string](Get-ContractPropertyValue -Object $Intent -Name 'service_sid') -cne $ExpectedServiceSid) {
+    $intentSid = Get-Q1CanonicalServiceSid -ServiceSid ([string](Get-ContractPropertyValue -Object $Intent -Name 'service_sid'))
+    if ($null -eq $expectedCanonicalSid -or $intentSid -cne $expectedCanonicalSid) {
         [void]$failures.Add('LSA mutation intent Service SID mismatch')
     }
     if ([string](Get-ContractPropertyValue -Object $Intent -Name 'right') -cne $ExpectedRight) {
@@ -564,13 +781,29 @@ function Get-Q1LsaRecoveryPlan {
     if ([string](Get-ContractPropertyValue -Object $Intent -Name 'cleanup_if_ambiguous') -cne 'REQUIRED') {
         [void]$failures.Add('ambiguous LSA cleanup was not marked required')
     }
-    if ([string](Get-ContractPropertyValue -Object $MutationStarted -Name 'service_sid') -cne $ExpectedServiceSid -or
+    $startedSid = Get-Q1CanonicalServiceSid -ServiceSid ([string](Get-ContractPropertyValue -Object $MutationStarted -Name 'service_sid'))
+    $beforeSid = Get-Q1CanonicalServiceSid -ServiceSid ([string](Get-ContractPropertyValue -Object $Before -Name 'service_sid'))
+    $currentSid = Get-Q1CanonicalServiceSid -ServiceSid ([string](Get-ContractPropertyValue -Object $Current -Name 'service_sid'))
+    $serviceSidReadbackCanonical = Get-Q1CanonicalServiceSid -ServiceSid $ServiceSidReadback
+    if ($null -eq $expectedCanonicalSid -or $startedSid -cne $expectedCanonicalSid -or
+        [string](Get-ContractPropertyValue -Object $MutationStarted -Name 'service_name') -cne $ExpectedServiceName -or
+        [string](Get-ContractPropertyValue -Object $MutationStarted -Name 'target') -cne 'EXACT_Q1_SERVICE_SID_ONLY' -or
         [string](Get-ContractPropertyValue -Object $MutationStarted -Name 'right') -cne $ExpectedRight) {
         [void]$failures.Add('LSA mutation-started evidence target mismatch')
     }
+    if ($null -eq $expectedCanonicalSid -or $beforeSid -cne $expectedCanonicalSid) {
+        [void]$failures.Add('LSA pre-mutation snapshot Service SID mismatch')
+    }
+    if ($null -eq $expectedCanonicalSid -or $currentSid -cne $expectedCanonicalSid) {
+        [void]$failures.Add('current LSA readback Service SID mismatch')
+    }
+    if (-not [string]::IsNullOrWhiteSpace($ServiceSidReadback) -and
+        ($null -eq $serviceSidReadbackCanonical -or $serviceSidReadbackCanonical -cne $expectedCanonicalSid)) {
+        [void]$failures.Add('independent service SID readback mismatch')
+    }
     $beforeGate = $null
-    if ($null -ne $Before) {
-        $beforeGate = Test-Q1LsaBeforeMaterialization -Snapshot $Before -ServiceSid $ExpectedServiceSid -Right $ExpectedRight
+    if ($null -ne $Before -and $null -ne $expectedCanonicalSid) {
+        $beforeGate = Test-Q1LsaBeforeMaterialization -Snapshot $Before -ServiceSid $expectedCanonicalSid -Right $ExpectedRight
         if (-not $beforeGate.valid) {
             foreach ($failure in @($beforeGate.failures)) { [void]$failures.Add([string]$failure) }
         }
@@ -591,7 +824,7 @@ function Get-Q1LsaRecoveryPlan {
         [void]$failures.Add(('unexpected direct rights are present: {0}' -f ($unexpected -join ', ')))
     }
     $directPresent = $currentDirectRights -contains $ExpectedRight
-    $assignedPresent = [bool]($currentAssigned | Where-Object { $_ -ieq $ExpectedServiceSid })
+    $assignedPresent = [bool]($currentAssigned | Where-Object { $_ -ieq $expectedCanonicalSid })
     if ($directPresent -xor $assignedPresent) {
         [void]$failures.Add('current exact-right direct and assignment readbacks disagree')
     }
@@ -602,7 +835,9 @@ function Get-Q1LsaRecoveryPlan {
             recovery_state = if ($currentDirectStatus -eq 'READ' -and $currentAssignmentStatus -eq 'READ') { 'FAILED_CLOSED' } else { 'FAILED_CLOSED' }
             residual_state = if ($currentDirectStatus -eq 'READ' -and $currentAssignmentStatus -eq 'READ') { 'PRESENT_OR_UNKNOWN' } else { 'UNKNOWN' }
             mutation_attempted = $true
-            service_sid = $ExpectedServiceSid
+            expected_service_sid = $expectedCanonicalSid
+            service_sid = $expectedCanonicalSid
+            service_sid_readback = $serviceSidReadbackCanonical
             right = $ExpectedRight
             before = $beforeGate
             current_direct_rights = $currentDirectRights
@@ -618,7 +853,9 @@ function Get-Q1LsaRecoveryPlan {
             recovery_state = 'RIGHT_ALREADY_ABSENT'
             residual_state = 'ABSENT'
             mutation_attempted = $true
-            service_sid = $ExpectedServiceSid
+            expected_service_sid = $expectedCanonicalSid
+            service_sid = $expectedCanonicalSid
+            service_sid_readback = $serviceSidReadbackCanonical
             right = $ExpectedRight
             before = $beforeGate
             current_direct_rights = $currentDirectRights
@@ -632,7 +869,9 @@ function Get-Q1LsaRecoveryPlan {
         recovery_state = 'OWNED_RIGHT_REMOVAL_REQUIRED'
         residual_state = 'PRESENT'
         mutation_attempted = $true
-        service_sid = $ExpectedServiceSid
+        expected_service_sid = $expectedCanonicalSid
+        service_sid = $expectedCanonicalSid
+        service_sid_readback = $serviceSidReadbackCanonical
         right = $ExpectedRight
         before = $beforeGate
         current_direct_rights = $currentDirectRights

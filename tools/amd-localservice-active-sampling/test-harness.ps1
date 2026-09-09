@@ -183,11 +183,14 @@ $driftIdentity = Test-HarnessSourceIdentity -Root $ToolRoot -Contract $driftCont
 Assert-True -Condition (-not $driftIdentity.valid) -Message 'harness source/checkpoint drift must block'
 
 $lsaSid = $expectedServiceSid
+$differentServiceSidFixture = 'S-1-5-80-9999999999-8888888888-7777777777-6666666666-5555'
 $lsaBefore = [pscustomobject]@{
+    service_sid = $lsaSid
     direct = [pscustomobject]@{ status = 'READ'; direct_rights = @() }
     assignment = [pscustomobject]@{ status = 'READ'; assigned_principals = @() }
 }
 $lsaAfter = [pscustomobject]@{
+    service_sid = $lsaSid
     direct = [pscustomobject]@{ status = 'READ'; direct_rights = @('SeSystemProfilePrivilege') }
     assignment = [pscustomobject]@{ status = 'READ'; assigned_principals = @($lsaSid) }
 }
@@ -219,10 +222,12 @@ $lsaIntentFixture = [pscustomobject]@{
 $lsaStartedFixture = [pscustomobject]@{
     state = 'MUTATION_ATTEMPTED'
     mutation_attempted = $true
+    service_name = $contract.service_name
     service_sid = $lsaSid
     right = $contract.allowed_lsa_right
+    target = $contract.allowed_lsa_target
 }
-$lsaRecoveryPlan = Get-Q1LsaRecoveryPlan -Intent $lsaIntentFixture -MutationStarted $lsaStartedFixture -Before $lsaBefore -Current $lsaAfter -ExpectedServiceName $contract.service_name -ExpectedServiceSid $lsaSid -ExpectedRight $contract.allowed_lsa_right
+$lsaRecoveryPlan = Get-Q1LsaRecoveryPlan -Intent $lsaIntentFixture -MutationStarted $lsaStartedFixture -Before $lsaBefore -Current $lsaAfter -ExpectedServiceName $contract.service_name -ExpectedServiceSid $lsaSid -ExpectedRight $contract.allowed_lsa_right -ServiceSidReadback $lsaSid
 Assert-True -Condition $lsaRecoveryPlan.valid -Message 'LSA post-add exception has a valid durable recovery plan'
 Assert-Equal -Actual $lsaRecoveryPlan.action -Expected 'REMOVE_EXACT_RIGHT' -Message 'LSA post-add exception requires exact removal'
 $lsaRecoveryAfterRemoval = [pscustomobject]@{
@@ -233,6 +238,19 @@ $lsaRecoveryCleanup = Test-Q1LsaCleanupEvidence -Snapshot $lsaRecoveryAfterRemov
 Assert-True -Condition $lsaRecoveryCleanup.valid -Message 'LSA post-add exception cleanup verifies exact right absence'
 $lsaRecoveryWithoutOwnership = Get-Q1LsaRecoveryPlan -Intent $lsaIntentFixture -MutationStarted $lsaStartedFixture -Before $lsaBefore -Current $lsaAfter -ExpectedServiceName $contract.service_name -ExpectedServiceSid $lsaSid -ExpectedRight $contract.allowed_lsa_right
 Assert-Equal -Actual $lsaRecoveryWithoutOwnership.action -Expected 'REMOVE_EXACT_RIGHT' -Message 'LSA recovery does not depend on ownership JSON return'
+$lsaTamperedIntent = $lsaIntentFixture | ConvertTo-Json -Depth 20 | ConvertFrom-Json
+$lsaTamperedIntent.service_sid = $differentServiceSidFixture
+$lsaTamperedIntentPlan = Get-Q1LsaRecoveryPlan -Intent $lsaTamperedIntent -MutationStarted $lsaStartedFixture -Before $lsaBefore -Current $lsaAfter -ExpectedServiceName $contract.service_name -ExpectedServiceSid $lsaSid -ExpectedRight $contract.allowed_lsa_right
+Assert-True -Condition (-not $lsaTamperedIntentPlan.valid) -Message 'tampered valid Service SID in intent is blocked by controller anchor'
+Assert-Equal -Actual $lsaTamperedIntentPlan.action -Expected 'FAILED_CLOSED' -Message 'tampered intent cannot authorize LSA removal'
+$lsaTamperedStarted = $lsaStartedFixture | ConvertTo-Json -Depth 20 | ConvertFrom-Json
+$lsaTamperedStarted.service_sid = $differentServiceSidFixture
+$lsaTamperedStartedPlan = Get-Q1LsaRecoveryPlan -Intent $lsaIntentFixture -MutationStarted $lsaTamperedStarted -Before $lsaBefore -Current $lsaAfter -ExpectedServiceName $contract.service_name -ExpectedServiceSid $lsaSid -ExpectedRight $contract.allowed_lsa_right
+Assert-True -Condition (-not $lsaTamperedStartedPlan.valid) -Message 'tampered mutation-started SID is blocked'
+$lsaTamperedReadbackPlan = Get-Q1LsaRecoveryPlan -Intent $lsaIntentFixture -MutationStarted $lsaStartedFixture -Before $lsaBefore -Current $lsaAfter -ExpectedServiceName $contract.service_name -ExpectedServiceSid $lsaSid -ExpectedRight $contract.allowed_lsa_right -ServiceSidReadback $differentServiceSidFixture
+Assert-True -Condition (-not $lsaTamperedReadbackPlan.valid) -Message 'mismatched independent service showsid readback is blocked'
+$lsaInvalidAnchorPlan = Get-Q1LsaRecoveryPlan -Intent $lsaIntentFixture -MutationStarted $lsaStartedFixture -Before $lsaBefore -Current $lsaAfter -ExpectedServiceName $contract.service_name -ExpectedServiceSid 'S-1-5-19' -ExpectedRight $contract.allowed_lsa_right
+Assert-True -Condition (-not $lsaInvalidAnchorPlan.valid) -Message 'non-Service-SID controller anchor is blocked'
 $lsaUnavailable = [pscustomobject]@{
     direct = [pscustomobject]@{ status = 'UNAVAILABLE'; direct_rights = @() }
     assignment = [pscustomobject]@{ status = 'UNAVAILABLE'; assigned_principals = @() }
@@ -250,8 +268,21 @@ $lsaUnexpectedPlan = Get-Q1LsaRecoveryPlan -Intent $lsaIntentFixture -MutationSt
 Assert-True -Condition (-not $lsaUnexpectedPlan.valid) -Message 'unexpected unrelated LSA right blocks recovery'
 Assert-Equal -Actual $lsaUnexpectedPlan.action -Expected 'FAILED_CLOSED' -Message 'unexpected unrelated right cannot trigger broad removal'
 
+$sealWithLsaPass = Get-Q1EvidenceSealDecision -WritersQuiesced $true -LsaCleanupVerified $true
+Assert-True -Condition $sealWithLsaPass.seal_allowed -Message 'stopped service with successful LSA cleanup may seal evidence'
+$sealWithLsaFailure = Get-Q1EvidenceSealDecision -WritersQuiesced $true -LsaCleanupVerified $false
+Assert-True -Condition $sealWithLsaFailure.seal_allowed -Message 'LSA cleanup failure does not block evidence sealing'
+Assert-True -Condition $sealWithLsaFailure.seal_attempted -Message 'LSA cleanup failure still attempts evidence sealing'
+$sealWithWriterActive = Get-Q1EvidenceSealDecision -WritersQuiesced $false -LsaCleanupVerified $false
+Assert-True -Condition (-not $sealWithWriterActive.seal_allowed) -Message 'active writer blocks evidence sealing'
+Assert-Equal -Actual $sealWithWriterActive.state -Expected 'BLOCKED_WRITER_NOT_QUIESCED' -Message 'active writer sealing state is explicit'
+$deleteAfterPass = Get-Q1RegistrationDeletionDecision -WritersQuiesced $true -LsaCleanupVerified $true -EvidenceSealValid $true
+Assert-True -Condition $deleteAfterPass.delete_allowed -Message 'service deletion follows verified cleanup'
+$keepAfterFailure = Get-Q1RegistrationDeletionDecision -WritersQuiesced $true -LsaCleanupVerified $false -EvidenceSealValid $true
+Assert-True -Condition (-not $keepAfterFailure.delete_allowed) -Message 'LSA failure keeps registration for recovery'
+Assert-Equal -Actual $keepAfterFailure.registration_state -Expected 'KEPT_FOR_RECOVERY' -Message 'LSA failure registration policy is explicit'
+
 $q1ServiceSidFixture = 'S-1-5-80-1111111111-2222222222-3333333333-4444444444-5555'
-$differentServiceSidFixture = 'S-1-5-80-9999999999-8888888888-7777777777-6666666666-5555'
 $stagingAclModel = Get-Q1OutputAclModel -Phase STAGING
 $stagingAclGate = Test-Q1OutputAclModel -Model $stagingAclModel -ExpectedPhase STAGING -ExpectedServiceSid $q1ServiceSidFixture
 Assert-True -Condition $stagingAclGate.valid -Message 'staging ACL excludes account-wide LocalService write access'
@@ -331,7 +362,35 @@ $launchEvidenceRoot = New-TestRoot
 try {
     $launchEvidenceRaw = Join-Path $launchEvidenceRoot 'raw'
     New-Item -ItemType Directory -Path $launchEvidenceRaw | Out-Null
-    [IO.File]::WriteAllText((Join-Path $launchEvidenceRaw 'cli-launch-intent.json'), '{"launch_attempt_permitted":true,"gate_consumed":true,"start_result":"UNKNOWN"}')
+    $launchOutputDirectory = Join-Path $launchEvidenceRoot 'raw\timechart-output'
+    $launchArguments = @(Get-FixedAmdCliArguments -OutputDirectory $launchOutputDirectory)
+    $launchIntentFixture = [ordered]@{
+        schema = 'amd-localservice-active-sampling-q1/cli-launch-intent/v1'
+        state = 'LAUNCH_INTENT_DURABLE'
+        launch_attempt_permitted = $true
+        gate_consumed = $true
+        start_result = 'UNKNOWN'
+        executable = $contract.amd_cli_path
+        arguments = $launchArguments
+        working_directory = (Split-Path -Parent $contract.amd_cli_path)
+        output_directory = $launchOutputDirectory
+    }
+    $launchFailedFixture = [ordered]@{
+        schema = 'amd-localservice-active-sampling-q1/cli-launch-start-failed/v1'
+        state = 'PROCESS_START_FAILED'
+        process_started = $false
+        invocation_attempted = 0
+        power_sampling_runs = 0
+        launch_attempt_permitted = $true
+        gate_consumed = $true
+        start_result = 'FAILED'
+        executable = $contract.amd_cli_path
+        arguments = $launchArguments
+        working_directory = (Split-Path -Parent $contract.amd_cli_path)
+        output_directory = $launchOutputDirectory
+        error = 'offline fixture'
+    }
+    [IO.File]::WriteAllText((Join-Path $launchEvidenceRaw 'cli-launch-intent.json'), ($launchIntentFixture | ConvertTo-Json -Depth 20))
     $ambiguousAccounting = Get-InvocationAccounting -ProcessResult ([pscustomobject]@{
         state = 'NOT_ATTEMPTED'
         process_started = $false
@@ -342,7 +401,7 @@ try {
     Assert-Equal -Actual $ambiguousAccounting.amd_cli_real_invocations -Expected 'UNKNOWN_0_OR_1' -Message 'ambiguous launch is not numeric zero'
     Assert-True -Condition $ambiguousAccounting.gate_consumed -Message 'ambiguous launch keeps the one-shot gate consumed'
     Assert-True -Condition $ambiguousAccounting.second_run_forbidden -Message 'ambiguous launch forbids a second run'
-    [IO.File]::WriteAllText((Join-Path $launchEvidenceRaw 'cli-launch-start-failed.json'), '{"state":"PROCESS_START_FAILED"}')
+    [IO.File]::WriteAllText((Join-Path $launchEvidenceRaw 'cli-launch-start-failed.json'), ($launchFailedFixture | ConvertTo-Json -Depth 20))
     $failedAccounting = Get-InvocationAccounting -ProcessResult ([pscustomobject]@{
         state = 'LAUNCH_FAILED'
         process_started = $false
@@ -350,7 +409,49 @@ try {
         power_sampling_runs = 0
     }) -RunRoot $launchEvidenceRoot
     Assert-Equal -Actual $failedAccounting.invocation_certainty -Expected 'CONFIRMED_ZERO' -Message 'durable start-failed successor is confirmed zero'
+    Assert-True -Condition $failedAccounting.launch_failed_valid -Message 'valid start-failed successor is schema and command validated'
+    $corruptStartFailed = Join-Path $launchEvidenceRaw 'cli-launch-start-failed.json'
+    [IO.File]::WriteAllText($corruptStartFailed, '{not-json')
+    $corruptAccounting = Get-InvocationAccounting -ProcessResult ([pscustomobject]@{
+        state = 'LAUNCH_FAILED'
+        process_started = $false
+        invocation_attempted = 0
+        power_sampling_runs = 0
+    }) -RunRoot $launchEvidenceRoot
+    Assert-Equal -Actual $corruptAccounting.invocation_certainty -Expected 'AMBIGUOUS' -Message 'corrupt start-failed successor is ambiguous'
+    [IO.File]::WriteAllText($corruptStartFailed, ($launchFailedFixture | ConvertTo-Json -Depth 20))
+    $wrongExecutable = $launchFailedFixture | ConvertTo-Json -Depth 20 | ConvertFrom-Json
+    $wrongExecutable.executable = 'D:\wrong\AMDuProfCLI.exe'
+    [IO.File]::WriteAllText($corruptStartFailed, ($wrongExecutable | ConvertTo-Json -Depth 20))
+    $wrongExecutableAccounting = Get-InvocationAccounting -ProcessResult ([pscustomobject]@{
+        state = 'LAUNCH_FAILED'
+        process_started = $false
+        invocation_attempted = 0
+        power_sampling_runs = 0
+    }) -RunRoot $launchEvidenceRoot
+    Assert-Equal -Actual $wrongExecutableAccounting.invocation_certainty -Expected 'AMBIGUOUS' -Message 'mismatched start-failed executable is ambiguous'
+    $wrongArguments = $launchFailedFixture | ConvertTo-Json -Depth 20 | ConvertFrom-Json
+    $wrongArguments.arguments = @('timechart', '--event', 'frequency')
+    [IO.File]::WriteAllText($corruptStartFailed, ($wrongArguments | ConvertTo-Json -Depth 20))
+    $wrongArgumentsAccounting = Get-InvocationAccounting -ProcessResult ([pscustomobject]@{
+        state = 'LAUNCH_FAILED'
+        process_started = $false
+        invocation_attempted = 0
+        power_sampling_runs = 0
+    }) -RunRoot $launchEvidenceRoot
+    Assert-Equal -Actual $wrongArgumentsAccounting.invocation_certainty -Expected 'AMBIGUOUS' -Message 'mismatched start-failed arguments are ambiguous'
+    [IO.File]::WriteAllText($corruptStartFailed, ($launchFailedFixture | ConvertTo-Json -Depth 20))
+    [IO.File]::WriteAllText((Join-Path $launchEvidenceRaw 'cli-launch-started.json'), '{"process_started":true}')
+    $contradictoryAccounting = Get-InvocationAccounting -ProcessResult ([pscustomobject]@{
+        state = 'NOT_ATTEMPTED'
+        process_started = $false
+        invocation_attempted = 0
+        power_sampling_runs = 0
+    }) -RunRoot $launchEvidenceRoot
+    Assert-Equal -Actual $contradictoryAccounting.invocation_certainty -Expected 'CONFIRMED_ONE' -Message 'started successor dominates contradictory failure successor'
+    Assert-True -Condition $contradictoryAccounting.evidence_conflict -Message 'contradictory launch successors are flagged'
     Remove-Item -LiteralPath (Join-Path $launchEvidenceRaw 'cli-launch-start-failed.json') -Force
+    Remove-Item -LiteralPath (Join-Path $launchEvidenceRaw 'cli-launch-started.json') -Force
     [IO.File]::WriteAllText((Join-Path $launchEvidenceRaw 'cli-launch-started.json'), '{"process_started":true}')
     $durableAccounting = Get-InvocationAccounting -ProcessResult ([pscustomobject]@{
         state = 'NOT_ATTEMPTED'
@@ -423,6 +524,10 @@ Assert-Contains -Text $runnerText -Needle 'Acquire-OneShotGate' -Message 'one-sh
 Assert-Contains -Text $runnerText -Needle 'New-QualificationServiceCreateArguments' -Message 'qualified sc.exe argv helper is reused'
 Assert-Contains -Text $runnerText -Needle 'Initialize-Q1LsaMaterialization' -Message 'CONTROL baseline LSA materialization exists'
 Assert-Contains -Text $runnerText -Needle 'Recover-Q1LsaMutationIfNecessary' -Message 'durable LSA recovery path exists'
+Assert-Contains -Text $runnerText -Needle '-ExpectedServiceSid $expectedServiceSid' -Message 'LSA recovery uses controller-held Service SID anchor'
+Assert-Contains -Text $runnerText -Needle 'raw\service-definition.json' -Message 'independent service-definition SID anchor is durable before LSA mutation'
+Assert-Contains -Text $runnerText -Needle 'Test-Q1WriterQuiescence' -Message 'writer quiescence gate exists'
+Assert-Contains -Text $runnerText -Needle 'Get-Q1EvidenceSealDecision' -Message 'evidence sealing is independent of LSA cleanup result'
 Assert-Contains -Text $runnerText -Needle 'Grant-Q1ServiceSidOutputAccess' -Message 'exact Service SID output authorization exists'
 Assert-Contains -Text $runnerText -Needle 'Seal-Q1Evidence' -Message 'raw evidence sealing path exists'
 Assert-Contains -Text $runnerText -Needle 'KeepRegistration' -Message 'service deletion is deferred until recovery/sealing'
@@ -435,6 +540,7 @@ Assert-Contains -Text $serviceText -Needle 'taskkill.exe' -Message 'owned proces
 Assert-Contains -Text $serviceText -Needle 'cli-launch-started.json' -Message 'irreversible launch evidence exists'
 Assert-Contains -Text $serviceText -Needle 'cli-launch-start-failed.json' -Message 'explicit launch-failure successor evidence exists'
 Assert-Contains -Text $contractText -Needle 'AMBIGUOUS_AFTER_LAUNCH_INTENT' -Message 'ambiguous launch state is represented'
+Assert-Contains -Text $contractText -Needle 'Test-Q1LaunchStartFailedEvidence' -Message 'launch-failure successor schema validation exists'
 Assert-Contains -Text $serviceText -Needle 'PROCESS_FAILED_AFTER_START' -Message 'post-start harness failure is classified'
 Assert-True -Condition (-not ($runnerText -match 'I2G_REAL_RUN_AUTHORIZATION')) -Message 'I2G authorization marker is not reused'
 
@@ -482,8 +588,12 @@ Assert-True -Condition ($null -eq $residualProcess) -Message 'offline tests star
     binary_driver_contract = 'PASS'
     csv_validation = 'PASS'
     lsa_recovery_fault_injection = 'PASS'
+    independent_service_sid_anchor = 'PASS'
+    seal_on_lsa_cleanup_failure = 'PASS'
+    writer_quiescence_seal_gate = 'PASS'
     exact_service_sid_acl = 'PASS'
     evidence_manifest_sealing = 'PASS'
+    launch_failure_successor_validation = 'PASS'
     invocation_ambiguity_accounting = 'PASS'
     live_default_fail_closed = 'PASS'
     amd_cli_real_invocations = 0
