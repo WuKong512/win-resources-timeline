@@ -100,6 +100,7 @@ static SYSTEM_COUNTER_CONFIG: OnceLock<SystemCounterConfig> = OnceLock::new();
 static SERVICE_PROFILE_COUNTER_CONFIG: OnceLock<ServiceProfileCounterConfig> = OnceLock::new();
 static SERVICE_PROFILE_ENABLE_COUNTER_CONFIG: OnceLock<ServiceProfileEnableCounterConfig> =
     OnceLock::new();
+static I2G_REAL_SERVICE_CONFIG: OnceLock<I2gRealServiceConfig> = OnceLock::new();
 static STOP_EVENT: Mutex<Option<isize>> = Mutex::new(None);
 static STATUS_HANDLE: Mutex<Option<isize>> = Mutex::new(None);
 static SERVICE_ERROR_DETAILS: Mutex<Option<Value>> = Mutex::new(None);
@@ -235,6 +236,24 @@ struct ServiceProfileEnableCounterConfig {
     expected_amd_cli_architecture: String,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+struct I2gRealServiceConfig {
+    schema: String,
+    service_name: String,
+    service_account: String,
+    service_account_sid: String,
+    service_sid: String,
+    scope: String,
+    output_root: String,
+    phase: String,
+    expected_profile_single_process_privilege: bool,
+    expected_amd_cli_path: String,
+    expected_amd_cli_sha256: String,
+    expected_amd_cli_version: String,
+    expected_amd_cli_architecture: String,
+    harness_artifact_sha256: String,
+}
+
 #[derive(Clone)]
 struct BrokerState {
     config: BrokerConfig,
@@ -335,6 +354,30 @@ pub fn run_service_profile_enable_counter_service() -> Result<(), String> {
         SERVICE_TABLE_ENTRYW {
             lpServiceName: PWSTR::from_raw(service_name.as_mut_ptr()),
             lpServiceProc: Some(service_profile_enable_counter_service_main),
+        },
+        SERVICE_TABLE_ENTRYW {
+            lpServiceName: PWSTR::null(),
+            lpServiceProc: None,
+        },
+    ];
+    unsafe { StartServiceCtrlDispatcherW(table.as_ptr()) }
+        .map_err(|error| format!("StartServiceCtrlDispatcherW failed: {error}"))
+}
+
+/// Run the single authorized I2G real-service phase.  The PowerShell entrypoint owns the
+/// paired experiment, LSA mutation journal, and rollback; this service process owns only the
+/// fixed LocalService/Service-SID token gates and one bounded `timechart --list` child.
+pub fn run_i2g_real_service() -> Result<(), String> {
+    let config = load_i2g_real_service_config()?;
+    I2G_REAL_SERVICE_CONFIG
+        .set(config)
+        .map_err(|_| "I2G real-service configuration was initialized twice".to_owned())?;
+    STOP_REQUESTED.store(false, Ordering::SeqCst);
+    let mut service_name = wide_null(crate::i2g::I2G_SERVICE_NAME);
+    let table = [
+        SERVICE_TABLE_ENTRYW {
+            lpServiceName: PWSTR::from_raw(service_name.as_mut_ptr()),
+            lpServiceProc: Some(i2g_real_service_main),
         },
         SERVICE_TABLE_ENTRYW {
             lpServiceName: PWSTR::null(),
@@ -505,6 +548,48 @@ unsafe extern "system" fn service_profile_enable_counter_service_main(
         Err(error) => {
             let _ = crate::write_json(
                 &root.join("I2F-SERVICE-HARNESS-ERROR.json"),
+                &service_error_evidence_for(&config.service_name, error),
+            );
+            let _ = set_service_status(status_handle, SERVICE_STOPPED, 1, 0, 0);
+        }
+    }
+    clear_status_handle(status_handle);
+}
+
+unsafe extern "system" fn i2g_real_service_main(_argc: u32, _argv: *mut PWSTR) {
+    let Some(config) = I2G_REAL_SERVICE_CONFIG.get().cloned() else {
+        return;
+    };
+    let root = PathBuf::from(&config.output_root);
+    let _ = fs::create_dir_all(&root);
+    let service_name = wide_null(&config.service_name);
+    let handler = unsafe {
+        RegisterServiceCtrlHandlerExW(
+            PCWSTR::from_raw(service_name.as_ptr()),
+            Some(service_handler),
+            None,
+        )
+    };
+    let Ok(status_handle) = handler else {
+        let _ = crate::i2g::atomic_write_json(
+            &root.join("I2G-SERVICE-HARNESS-ERROR.json"),
+            &service_error_evidence_for(
+                &config.service_name,
+                "RegisterServiceCtrlHandlerExW failed".to_owned(),
+            ),
+        );
+        return;
+    };
+
+    set_status_handle(status_handle);
+    let _ = set_service_status(status_handle, SERVICE_START_PENDING, 0, 1, 30_000);
+    match i2g_real_service_entry(status_handle, &config) {
+        Ok(()) => {
+            let _ = set_service_status(status_handle, SERVICE_STOPPED, 0, 0, 0);
+        }
+        Err(error) => {
+            let _ = crate::i2g::atomic_write_json(
+                &root.join("I2G-SERVICE-HARNESS-ERROR.json"),
                 &service_error_evidence_for(&config.service_name, error),
             );
             let _ = set_service_status(status_handle, SERVICE_STOPPED, 1, 0, 0);
@@ -791,6 +876,340 @@ fn service_profile_counter_service_entry(
     Ok(())
 }
 
+fn i2g_real_service_entry(
+    status_handle: SERVICE_STATUS_HANDLE,
+    config: &I2gRealServiceConfig,
+) -> Result<(), String> {
+    let root = Path::new(&config.output_root);
+    let phase = config.phase.as_str();
+    let context = collect_service_context_for(
+        &config.service_name,
+        &config.service_account,
+        &config.service_account_sid,
+        Some(config.service_sid.clone()),
+        "amd-i2g-real-service-context/v1",
+    )?;
+    let materialized_gate = i2g_real_token_gate(&context, config, "PRE");
+    crate::i2g::atomic_write_json(
+        &root.join(format!("{phase}-TOKEN-PRE.json")),
+        &json!({
+            "schema": "amd-i2g-token-pre/v1",
+            "qualification_only": QUALIFICATION_ONLY,
+            "phase": phase,
+            "context": context,
+            "gate": materialized_gate,
+        }),
+    )
+    .map_err(|error| format!("writing {phase}-TOKEN-PRE.json failed: {error}"))?;
+    if !materialized_gate
+        .get("gate_pass")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+    {
+        return Err(format!("I2G {phase} materialized token gate failed"));
+    }
+
+    let (system_adjustment, system_adjustment_pass) = enable_named_privilege(
+        crate::i2g::CONTROL_REQUIRED_RIGHT,
+        "amd-i2g-adjust-system-profile/v1",
+    );
+    crate::i2g::atomic_write_json(
+        &root.join(format!("{phase}-ADJUST-SYSTEMPROFILE.json")),
+        &system_adjustment,
+    )
+    .map_err(|error| format!("writing {phase} SystemProfile adjustment failed: {error}"))?;
+    if !system_adjustment_pass {
+        return Err(format!("I2G {phase} SystemProfile enable failed"));
+    }
+
+    let after_system_profile = collect_service_context_for(
+        &config.service_name,
+        &config.service_account,
+        &config.service_account_sid,
+        Some(config.service_sid.clone()),
+        "amd-i2g-real-service-context-system-profile/v1",
+    )?;
+    let system_profile_gate = i2g_real_token_gate(&after_system_profile, config, "SYSTEMPROFILE");
+    let system_profile_snapshot = json!({
+        "schema": "amd-i2g-token-system-profile/v1",
+        "qualification_only": QUALIFICATION_ONLY,
+        "phase": phase,
+        "context": after_system_profile,
+        "adjustment": system_adjustment,
+        "gate": system_profile_gate,
+    });
+    if phase == "CONTROL" {
+        crate::i2g::atomic_write_json(
+            &root.join("CONTROL-TOKEN-POST.json"),
+            &system_profile_snapshot,
+        )
+        .map_err(|error| format!("writing CONTROL-TOKEN-POST.json failed: {error}"))?;
+    } else {
+        crate::i2g::atomic_write_json(
+            &root.join("TREATMENT-TOKEN-SYSTEMPROFILE.json"),
+            &system_profile_snapshot,
+        )
+        .map_err(|error| format!("writing TREATMENT-TOKEN-SYSTEMPROFILE.json failed: {error}"))?;
+    }
+    if !system_profile_gate
+        .get("gate_pass")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+    {
+        return Err(format!("I2G {phase} SystemProfile token gate failed"));
+    }
+
+    if phase == "TREATMENT" {
+        let (profile_adjustment, profile_adjustment_pass) = enable_named_privilege(
+            crate::i2g::TREATMENT_RIGHT,
+            "amd-i2g-adjust-profile-single/v1",
+        );
+        crate::i2g::atomic_write_json(
+            &root.join("TREATMENT-ADJUST-PROFILE-SINGLE.json"),
+            &profile_adjustment,
+        )
+        .map_err(|error| format!("writing TREATMENT ProfileSingle adjustment failed: {error}"))?;
+        if !profile_adjustment_pass {
+            return Err("I2G TREATMENT ProfileSingle enable failed".to_owned());
+        }
+        let final_context = collect_service_context_for(
+            &config.service_name,
+            &config.service_account,
+            &config.service_account_sid,
+            Some(config.service_sid.clone()),
+            "amd-i2g-real-service-context-final/v1",
+        )?;
+        let final_gate = i2g_real_token_gate(&final_context, config, "FINAL");
+        crate::i2g::atomic_write_json(
+            &root.join("TREATMENT-TOKEN-FINAL.json"),
+            &json!({
+                "schema": "amd-i2g-token-final/v1",
+                "qualification_only": QUALIFICATION_ONLY,
+                "phase": phase,
+                "context": final_context,
+                "adjustment": profile_adjustment,
+                "gate": final_gate,
+            }),
+        )
+        .map_err(|error| format!("writing TREATMENT-TOKEN-FINAL.json failed: {error}"))?;
+        if !final_gate
+            .get("gate_pass")
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+        {
+            return Err("I2G TREATMENT final token gate failed".to_owned());
+        }
+    } else if !system_profile_gate
+        .get("gate_pass")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+    {
+        return Err("I2G CONTROL final token gate failed".to_owned());
+    }
+
+    validate_i2g_real_amd_cli_identity(config, root, phase)?;
+    if STOP_REQUESTED.load(Ordering::Acquire) {
+        return Err(format!("I2G {phase} stop requested before discovery"));
+    }
+
+    crate::i2g::atomic_write_json(
+        &root.join(format!("{phase}-DISCOVERY-SPAWN-INTENT.json")),
+        &json!({
+            "schema": "amd-i2g-discovery-spawn-intent/v1",
+            "qualification_only": QUALIFICATION_ONLY,
+            "phase": phase,
+            "operation": crate::i2g::I2G_OPERATION,
+            "fixed_cli_arguments": crate::i2g::I2G_FIXED_AMD_ARGUMENTS,
+            "sampling": false,
+            "run_budget_consumed_on_uncertain_spawn": true,
+            "recorded_at_unix_ms": crate::unix_time_millis(),
+        }),
+    )
+    .map_err(|error| format!("writing {phase} discovery spawn intent failed: {error}"))?;
+    set_service_status(status_handle, SERVICE_RUNNING, 0, 0, 0)?;
+
+    let request_id = format!("i2g-real-{}", phase.to_ascii_lowercase());
+    let status = execute_i2g_checked_counter_discovery(
+        root,
+        root,
+        &request_id,
+        &format!("{phase}-AMD-DISCOVERY"),
+        Some(config),
+    )?;
+    let runner_result = root.join(format!("{phase}-AMD-DISCOVERY-RESULT.json"));
+    let runner_result_value = fs::read(&runner_result)
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
+        .unwrap_or_else(|| json!({"result_file": runner_result}));
+    crate::i2g::atomic_write_json(
+        &root.join(format!("{phase}-DISCOVERY.json")),
+        &json!({
+            "schema": "amd-i2g-discovery/v1",
+            "qualification_only": QUALIFICATION_ONLY,
+            "phase": phase,
+            "operation": crate::i2g::I2G_OPERATION,
+            "fixed_cli_arguments": crate::i2g::I2G_FIXED_AMD_ARGUMENTS,
+            "sampling": false,
+            "actual_run_count_incremented": true,
+            "availability": status.availability.as_str(),
+            "cli_exit_code": status.cli_exit_code,
+            "power_category_present": status.power_category_present,
+            "no_orphan_child": status.no_orphan_child,
+            "runner_result": runner_result_value,
+        }),
+    )
+    .map_err(|error| format!("writing {phase}-DISCOVERY.json failed: {error}"))?;
+    crate::i2g::atomic_write_json(
+        &root.join(format!("{phase}-DISCOVERY-COMPLETION.json")),
+        &json!({
+            "schema": "amd-i2g-discovery-completion/v1",
+            "qualification_only": QUALIFICATION_ONLY,
+            "phase": phase,
+            "completion_observed_durable": true,
+            "sampling": false,
+            "recorded_at_unix_ms": crate::unix_time_millis(),
+        }),
+    )
+    .map_err(|error| format!("writing {phase} discovery completion failed: {error}"))?;
+    Ok(())
+}
+
+fn i2g_real_privilege_state(context: &ServiceContextEvidence, privilege: &str) -> &'static str {
+    if context
+        .enabled_privileges
+        .iter()
+        .any(|value| value.eq_ignore_ascii_case(privilege))
+    {
+        "PRESENT + ENABLED"
+    } else if context
+        .disabled_privileges
+        .iter()
+        .any(|value| value.eq_ignore_ascii_case(privilege))
+    {
+        "PRESENT + DISABLED"
+    } else {
+        "ABSENT"
+    }
+}
+
+fn i2g_real_token_gate(
+    context: &ServiceContextEvidence,
+    config: &I2gRealServiceConfig,
+    stage: &str,
+) -> Value {
+    let expected_system = if stage == "PRE" {
+        "PRESENT + DISABLED"
+    } else {
+        "PRESENT + ENABLED"
+    };
+    let expected_profile = if config.expected_profile_single_process_privilege {
+        if stage == "FINAL" {
+            "PRESENT + ENABLED"
+        } else {
+            "PRESENT + DISABLED"
+        }
+    } else {
+        "ABSENT"
+    };
+    let system_state = i2g_real_privilege_state(context, crate::i2g::CONTROL_REQUIRED_RIGHT);
+    let profile_state = i2g_real_privilege_state(context, crate::i2g::TREATMENT_RIGHT);
+    let administrators_sid_present = context
+        .token_groups_relevant_to_access
+        .iter()
+        .any(|value| token_group_sid(value).eq_ignore_ascii_case("S-1-5-32-544"));
+    let debug_enabled = context
+        .enabled_privileges
+        .iter()
+        .any(|value| value.eq_ignore_ascii_case("SeDebugPrivilege"));
+    let mut mismatches = Vec::new();
+    if system_state != expected_system {
+        mismatches.push(format!(
+            "SeSystemProfilePrivilege expected {expected_system}, got {system_state}"
+        ));
+    }
+    if profile_state != expected_profile {
+        mismatches.push(format!(
+            "SeProfileSingleProcessPrivilege expected {expected_profile}, got {profile_state}"
+        ));
+    }
+    if administrators_sid_present {
+        mismatches.push("Administrators SID is present".to_owned());
+    }
+    if debug_enabled {
+        mismatches.push("SeDebugPrivilege is enabled".to_owned());
+    }
+    if !context.context_valid {
+        mismatches.push("service context is not valid".to_owned());
+    }
+    json!({
+        "schema": "amd-i2g-token-gate/v1",
+        "qualification_only": QUALIFICATION_ONLY,
+        "phase": config.phase,
+        "stage": stage,
+        "service_name": config.service_name,
+        "service_sid": config.service_sid,
+        "account_sid": context.account_sid,
+        "session_id": context.session_id,
+        "process_architecture": context.process_architecture,
+        "service_sid_type": context.service_sid_type,
+        "context_valid": context.context_valid,
+        "se_system_profile_privilege_state": system_state,
+        "se_profile_single_process_privilege_state": profile_state,
+        "expected_se_system_profile_privilege_state": expected_system,
+        "expected_se_profile_single_process_privilege_state": expected_profile,
+        "administrators_sid_present": administrators_sid_present,
+        "se_debug_privilege_enabled": debug_enabled,
+        "mismatches": mismatches,
+        "gate_pass": mismatches.is_empty(),
+    })
+}
+
+fn validate_i2g_real_amd_cli_identity(
+    config: &I2gRealServiceConfig,
+    root: &Path,
+    phase: &str,
+) -> Result<(), String> {
+    let (actual_path, actual) = discover_cli()?;
+    let path_match = actual_path
+        .to_string_lossy()
+        .eq_ignore_ascii_case(&config.expected_amd_cli_path);
+    let sha256_match = actual
+        .sha256
+        .eq_ignore_ascii_case(&config.expected_amd_cli_sha256);
+    let version_match = actual
+        .file_version
+        .as_deref()
+        .is_some_and(|value| value == config.expected_amd_cli_version);
+    let architecture_match = actual
+        .architecture
+        .eq_ignore_ascii_case(&config.expected_amd_cli_architecture);
+    let pass =
+        actual.identity_valid && path_match && sha256_match && version_match && architecture_match;
+    crate::i2g::atomic_write_json(
+        &root.join(format!("{phase}-AMD-IDENTITY.json")),
+        &json!({
+            "schema": "amd-i2g-amd-cli-identity/v1",
+            "qualification_only": QUALIFICATION_ONLY,
+            "phase": phase,
+            "expected_path": config.expected_amd_cli_path,
+            "expected_sha256": config.expected_amd_cli_sha256,
+            "expected_version": config.expected_amd_cli_version,
+            "expected_architecture": config.expected_amd_cli_architecture,
+            "actual": actual,
+            "path_match": path_match,
+            "sha256_match": sha256_match,
+            "version_match": version_match,
+            "architecture_match": architecture_match,
+            "pass": pass,
+        }),
+    )
+    .map_err(|error| format!("writing {phase}-AMD-IDENTITY.json failed: {error}"))?;
+    if !pass {
+        return Err(format!("I2G {phase} AMD CLI identity mismatch"));
+    }
+    Ok(())
+}
+
 fn service_profile_enable_counter_service_entry(
     status_handle: SERVICE_STATUS_HANDLE,
     config: &ServiceProfileEnableCounterConfig,
@@ -957,11 +1376,11 @@ fn service_profile_enable_token_gate(
     })
 }
 
-fn enable_service_profile_privilege() -> (Value, bool) {
+fn enable_named_privilege(privilege: &str, schema: &str) -> (Value, bool) {
     let mut evidence = json!({
-        "schema": "amd-i2f-adjust-token-privileges/v1",
+        "schema": schema,
         "qualification_only": QUALIFICATION_ONLY,
-        "target_privilege": crate::SERVICE_PROFILE_REQUIRED_PRIVILEGE,
+        "target_privilege": privilege,
         "requested_state": "ENABLED",
         "disable_all_privileges": false,
     });
@@ -976,7 +1395,7 @@ fn enable_service_profile_privilege() -> (Value, bool) {
             return (evidence, false);
         }
     };
-    let privilege_name = wide_null(crate::SERVICE_PROFILE_REQUIRED_PRIVILEGE);
+    let privilege_name = wide_null(privilege);
     let mut luid = LUID::default();
     if let Err(error) = unsafe {
         LookupPrivilegeValueW(
@@ -1024,6 +1443,13 @@ fn enable_service_profile_privilege() -> (Value, bool) {
             (evidence, true)
         }
     }
+}
+
+fn enable_service_profile_privilege() -> (Value, bool) {
+    enable_named_privilege(
+        crate::SERVICE_PROFILE_REQUIRED_PRIVILEGE,
+        "amd-i2f-adjust-token-privileges/v1",
+    )
 }
 
 fn i2f_token_enable_delta(
@@ -1856,7 +2282,41 @@ fn execute_counter_discovery_at_with_prefix(
     request_id: &str,
     evidence_prefix: &str,
 ) -> Result<CounterDiscoveryStatus, String> {
+    execute_i2g_checked_counter_discovery(
+        output_root,
+        discovery_root,
+        request_id,
+        evidence_prefix,
+        None,
+    )
+}
+
+fn execute_i2g_checked_counter_discovery(
+    output_root: &Path,
+    discovery_root: &Path,
+    request_id: &str,
+    evidence_prefix: &str,
+    expected_i2g: Option<&I2gRealServiceConfig>,
+) -> Result<CounterDiscoveryStatus, String> {
     let (cli_path, artifact) = discover_cli()?;
+    if let Some(expected) = expected_i2g {
+        let path_match = cli_path
+            .to_string_lossy()
+            .eq_ignore_ascii_case(&expected.expected_amd_cli_path);
+        let sha256_match = artifact
+            .sha256
+            .eq_ignore_ascii_case(&expected.expected_amd_cli_sha256);
+        let version_match = artifact
+            .file_version
+            .as_deref()
+            .is_some_and(|value| value == expected.expected_amd_cli_version);
+        let architecture_match = artifact
+            .architecture
+            .eq_ignore_ascii_case(&expected.expected_amd_cli_architecture);
+        if !(path_match && sha256_match && version_match && architecture_match) {
+            return Err("I2G AMD CLI identity changed before discovery spawn".to_owned());
+        }
+    }
     let _ = crate::write_json(&output_root.join("CLI-ARTIFACT-IDENTITY.json"), &artifact);
     fs::create_dir_all(discovery_root)
         .map_err(|error| format!("creating counter-discovery evidence root failed: {error}"))?;
@@ -2384,6 +2844,20 @@ fn read_bounded_text(path: &Path) -> Result<String, String> {
         ));
     }
     Ok(String::from_utf8_lossy(&bytes).into_owned())
+}
+
+fn sha256_file(path: &Path) -> Result<String, String> {
+    let mut file = File::open(path).map_err(|error| error.to_string())?;
+    let mut digest = Sha256::new();
+    let mut buffer = [0_u8; 64 * 1024];
+    loop {
+        let read = file.read(&mut buffer).map_err(|error| error.to_string())?;
+        if read == 0 {
+            break;
+        }
+        digest.update(&buffer[..read]);
+    }
+    Ok(format!("{:X}", digest.finalize()))
 }
 
 fn find_output_csv(root: &Path) -> Result<PathBuf, String> {
@@ -3977,6 +4451,55 @@ fn load_service_profile_enable_counter_config() -> Result<ServiceProfileEnableCo
     Ok(config)
 }
 
+fn load_i2g_real_service_config() -> Result<I2gRealServiceConfig, String> {
+    let path = i2g_real_config_path();
+    let bytes = fs::read(&path)
+        .map_err(|error| format!("reading I2G real-service config failed: {error}"))?;
+    let config: I2gRealServiceConfig = serde_json::from_slice(&bytes)
+        .map_err(|error| format!("I2G real-service config is invalid: {error}"))?;
+    let expected_output_root = program_data_root()
+        .join(crate::i2g::I2G_REAL_OUTPUT_SUBDIRECTORY)
+        .join(&config.scope);
+    let output_root_matches = Path::new(&config.output_root)
+        .to_string_lossy()
+        .eq_ignore_ascii_case(&expected_output_root.to_string_lossy());
+    let phase_valid = matches!(config.phase.as_str(), "CONTROL" | "TREATMENT");
+    let expected_profile = config.phase == "TREATMENT";
+    let harness_sha256_is_hex = config.harness_artifact_sha256.len() == 64
+        && config
+            .harness_artifact_sha256
+            .chars()
+            .all(|character| character.is_ascii_hexdigit());
+    let harness_sha256_matches_running_artifact = std::env::current_exe()
+        .ok()
+        .and_then(|path| sha256_file(&path).ok())
+        .is_some_and(|actual| actual.eq_ignore_ascii_case(&config.harness_artifact_sha256));
+    if config.schema != "amd-i2g-real-service-config/v1"
+        || config.service_name != crate::i2g::I2G_SERVICE_NAME
+        || config.service_account != crate::i2g::I2G_SERVICE_ACCOUNT
+        || config.service_account_sid != crate::i2g::I2G_SERVICE_ACCOUNT_SID
+        || config.service_sid.is_empty()
+        || !config.service_sid.starts_with("S-1-5-80-")
+        || crate::validate_scope(&config.scope).is_err()
+        || !output_root_matches
+        || !phase_valid
+        || config.expected_profile_single_process_privilege != expected_profile
+        || config.expected_amd_cli_path != crate::i2g::I2G_FIXED_AMD_CLI_PATH
+        || !config
+            .expected_amd_cli_sha256
+            .eq_ignore_ascii_case(crate::i2g::I2G_FIXED_AMD_CLI_SHA256)
+        || config.expected_amd_cli_version != crate::i2g::I2G_FIXED_AMD_CLI_VERSION
+        || config.expected_amd_cli_architecture != crate::i2g::I2G_FIXED_AMD_CLI_ARCHITECTURE
+        || !harness_sha256_is_hex
+        || !harness_sha256_matches_running_artifact
+    {
+        return Err(
+            "I2G real-service config is outside the fixed qualification contract".to_owned(),
+        );
+    }
+    Ok(config)
+}
+
 fn load_config() -> Result<BrokerConfig, String> {
     let path = config_path();
     let bytes =
@@ -4022,6 +4545,12 @@ pub fn service_profile_enable_counter_config_path() -> PathBuf {
     program_data_root()
         .join(crate::SERVICE_PROFILE_ENABLE_COUNTER_OUTPUT_SUBDIRECTORY)
         .join("I2F-CONFIG.json")
+}
+
+pub fn i2g_real_config_path() -> PathBuf {
+    program_data_root()
+        .join(crate::i2g::I2G_REAL_OUTPUT_SUBDIRECTORY)
+        .join("I2G-CONFIG.json")
 }
 
 pub fn program_data_root() -> PathBuf {

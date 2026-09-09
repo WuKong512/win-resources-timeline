@@ -1,10 +1,13 @@
 # AMD-PRIVILEGE-I2G variable selection
 
-This document is the read-only closure for the next AMD privilege experiment.
-It selects a future single variable; it does not implement, authorize, or run
-I2G. No AMD process, service, driver, device, IOCTL, sampling session, LSA
-mutation, token mutation, ACL mutation, registry mutation, or historical
-evidence mutation was performed for this review.
+This document preserves the original read-only closure for the AMD privilege
+I2G variable. Its design-history sections do not implement, authorize, or run
+I2G. The completed current state is recorded in the later
+`CURRENT STATE — OFFLINE IMPLEMENTATION COMPLETE` section and in
+[`amd-i2g-harness.md`](amd-i2g-harness.md). No AMD process, service, driver,
+device, IOCTL, sampling session, LSA mutation, token mutation, ACL mutation,
+registry mutation, or historical evidence mutation was performed while
+creating this documentation closure.
 
 ```text
 REVIEW = AMD-PRIVILEGE-I2G-VARIABLE-SELECTION
@@ -480,7 +483,7 @@ INVALID_RESULT_BASELINE_GATE =
   identity differs; sampling is not false; or rollback is incomplete
 
 ONE_TIME_GATE =
-  I2G_GATE_CONSUMED = false;
+  I2G_GATE_CONSUMED = true;
   I2G_REAL_EXECUTION_ALLOWED = false by default;
   a separate explicit human authorization is required after offline harness
   implementation and review; this task creates no executable gate
@@ -737,7 +740,7 @@ RESULT_CLASSIFICATION =
   INVALID_NO_CAUSAL_INTERPRETATION
 
 ONE_TIME_GATE =
-  I2G_GATE_CONSUMED = false;
+  I2G_GATE_CONSUMED = true;
   I2G_REAL_EXECUTION_ALLOWED = false by default;
   separate explicit human authorization is required after offline harness
   implementation and review; this task creates no executable gate
@@ -805,3 +808,75 @@ harness artifact. No I2G harness exists yet and no real experiment is
 authorized. The next task is offline I2G harness design/implementation
 followed by review. Human authorization for the paired non-sampling runs can
 only be considered after that separate review passes.
+
+## CURRENT STATE — OFFLINE IMPLEMENTATION COMPLETE
+
+The preceding sections are preserved as read-only design history. The default
+implementation is the fail-closed, synthetic harness in
+`tools/amd-privilege-qualification`; see
+[`amd-i2g-harness.md`](amd-i2g-harness.md) for the complete contract.
+
+```text
+I2G_HARNESS = IMPLEMENTED_OFFLINE
+I2G_HARNESS_IMPLEMENTED = true
+I2G_VARIABLE = SeProfileSingleProcessPrivilege
+I2G_SELECTION_CONFIDENCE = MEDIUM
+I2G_EXPERIMENT_SHAPE = PAIRED_CONTROL_TREATMENT
+HISTORICAL_I2F_ROLE = PREDECESSOR_EVIDENCE_ONLY
+HISTORICAL_I2F_IS_ACTIVE_CAUSAL_CONTROL = false
+I2G_GATE_CONSUMED = true
+I2G_REAL_GATE_CONSUMED = true
+I2G_REAL_EXECUTION_ALLOWED = false
+I2G_REAL_CLEANUP_ALLOWED = false
+I2G_HUMAN_REAL_RUN_AUTHORIZATION = CONSUMED
+I2G_REAL_RUNTIME = ATTEMPT3_COMPLETE
+I2G_REAL_QUALIFICATION = PASS_AMD_PRIVILEGE_I2G_REAL_QUALIFICATION
+I2G_REAL_SCIENTIFIC_RESULT = PROFILE_SINGLE_INSUFFICIENT_IN_PAIRED_I2G_CONTEXT
+I2G_CAUSAL_INTERPRETATION_VALID = true
+I2G_CONTROL_RESULT = POWER_UNAVAILABLE
+I2G_TREATMENT_RESULT = POWER_UNAVAILABLE
+I2G_CONTROL_TOKEN_GATE = PASS
+I2G_TREATMENT_TOKEN_GATE = PASS
+I2G_PAIRED_CONFIG_DELTA = PASS
+I2G_PAIRED_TOKEN_DELTA = PASS
+I2G_CONTROL_RUNS = 1
+I2G_TREATMENT_RUNS = 1
+I2G_TOTAL_DISCOVERY_RUNS = 2
+I2G_RETRY_OCCURRED = false
+I2G_POWER_SAMPLING_RUNS = 0
+I2G_ROLLBACK = PASS
+I2G_FINAL_MACHINE_STATE = CLEAN
+I2G_RECOVERY_REQUIRED = false
+I2G_ATTEMPT3_AUTHORIZATION = CONSUMED
+I2G_OFFLINE_VALIDATION = PASS
+I2G_HARNESS_ARTIFACT_ARCHITECTURE = x64
+I2G_HARNESS_ARTIFACT_PATH = tools/amd-privilege-qualification/target/release/amd-privilege-qualification.exe
+I2G_HARNESS_ARTIFACT_SHA256 = 2613129D179EA2A0496AD680E68E77A79FFFBB569D0802A11AC03346E162DD80
+I2G_EXECUTION_SURFACE = SYNTHETIC_OFFLINE_FAIL_CLOSED
+I2G_SHARED_EXECUTABLE_OFFLINE_ONLY = false
+I2G_TASK_LOCAL_REAL_RUNNER = ONE_SHOT_EXACT_AUTHORIZATION_ONLY
+I2G_TASK_LOCAL_REAL_RUN_STATUS = PASS_AMD_PRIVILEGE_I2G_REAL_QUALIFICATION
+PLANNED_CONTROL_COUNTER_DISCOVERY_RUNS = 1
+PLANNED_TREATMENT_COUNTER_DISCOVERY_RUNS = 1
+PLANNED_VALID_PAIR_COUNTER_DISCOVERY_RUNS = 2
+MAX_CONTROL_COUNTER_DISCOVERY_RUNS = 1
+MAX_TREATMENT_COUNTER_DISCOVERY_RUNS = 1
+MAX_TOTAL_I2G_COUNTER_DISCOVERY_RUNS = 2
+POWER_SAMPLING_RUNS = 0
+CONTROL_RETRY_ALLOWED = false
+TREATMENT_RETRY_ALLOWED = false
+CONTROL_DRIFT_STOP_BEFORE_TREATMENT = true
+TOKEN_TEARDOWN_BEFORE_TREATMENT_POLICY_MUTATION = true
+NEW_REAL_RUN_REQUIRED = false
+NEXT_GATE = HUMAN_FINAL_REVIEW_BEFORE_MARKING_PR24_READY
+```
+
+The implementation adds no production account selection. The default I2G surface
+is synthetic/offline-only and fail-closed, while
+the shared qualification executable still contains historical non-I2G
+entrypoints; this does not make the whole EXE offline-only and does not
+authorize those entrypoints. Attempt #3 completed the one authorized paired
+qualification and obtained the narrowly scoped result
+`PROFILE_SINGLE_INSUFFICIENT_IN_PAIRED_I2G_CONTEXT`; no further real run is
+required or authorized. The task-local real runner remains one-shot and
+exact-token gated; it is not a reusable Windows backend or production integration.

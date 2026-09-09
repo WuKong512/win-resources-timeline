@@ -31,6 +31,11 @@ $I2fEntrypointScopeTest = Join-Path $ToolRoot 'test-i2f-entrypoint-scope.ps1'
 $I2eFinalFixture = Join-Path $ToolRoot 'i2e-token-materialization-final.example.json'
 $WindowsSource = Join-Path $ToolRoot 'src\windows.rs'
 $ExecutionPlan = Join-Path $ToolRoot '..\..\docs\upgrade\execution-plan.md'
+$I2gRuntimeContract = Join-Path $ToolRoot 'i2g-runtime-contract.ps1'
+$I2gSetup = Join-Path $ToolRoot 'run-admin-amd-i2g-qualification.ps1'
+$I2gCleanup = Join-Path $ToolRoot 'cleanup-admin-amd-i2g-qualification.ps1'
+$I2gHarnessTest = Join-Path $ToolRoot 'test-i2g-harness.ps1'
+$I2gHarnessDocument = Join-Path $ToolRoot '..\..\docs\upgrade\amd-i2g-harness.md'
 $ArchitectureDoc = Join-Path $ToolRoot '..\..\docs\architecture\cpu-sensor-amd-privilege-deployment.md'
 $QualificationReadme = Join-Path $ToolRoot 'README.md'
 $ResidualDifferential = Join-Path $ToolRoot '..\..\docs\upgrade\amd-system-vs-i2f-residual-differential.md'
@@ -66,7 +71,11 @@ foreach ($wrapper in @(
         $I2fContract,
         $I2fSetup,
         $I2fCleanup,
-        $I2fEntrypointScopeTest
+        $I2fEntrypointScopeTest,
+        $I2gRuntimeContract,
+        $I2gSetup,
+        $I2gCleanup,
+        $I2gHarnessTest
     )) {
     $parseErrors = $null
     $tokens = $null
@@ -1563,6 +1572,16 @@ if ($LASTEXITCODE -ne 0) {
 $legacyRetirementOutput | ForEach-Object { Write-Host $_ }
 Write-Host 'LEGACY_REAL_GATE_RETIREMENT_REGRESSION=PASS'
 
+& cargo build --offline --release --manifest-path $Manifest
+if ($LASTEXITCODE -ne 0) { throw 'I2G offline release build failed.' }
+$i2gHarnessOutput = @(& powershell.exe -NoProfile -ExecutionPolicy Bypass -File $I2gHarnessTest `
+        -ToolRoot $ToolRoot 2>&1 | ForEach-Object { [string]$_ })
+if ($LASTEXITCODE -ne 0) {
+    throw "I2G offline harness tests failed: $($i2gHarnessOutput -join [Environment]::NewLine)"
+}
+$i2gHarnessOutput | ForEach-Object { Write-Host $_ }
+Write-Host 'I2G_OFFLINE_HARNESS_REGRESSION=PASS'
+
 $counterDiscoveryFunction = [regex]::Match(
     $windowsSourceText,
     '(?s)fn\s+execute_counter_discovery_at_with_prefix\(.*?\r?\n}\r?\n\r?\nfn\s+start_session'
@@ -1575,7 +1594,7 @@ if ([string]::IsNullOrWhiteSpace($counterDiscoveryFunction) -or
 }
 Write-Host 'COUNTER_DISCOVERY_EXECUTION_EVIDENCE_CONTRACT=PASS'
 
-foreach ($documentationPath in @($ExecutionPlan, $QualificationReadme, $ResidualDifferential, $I2gSelectionDocument)) {
+foreach ($documentationPath in @($ExecutionPlan, $QualificationReadme, $ResidualDifferential, $I2gSelectionDocument, $I2gHarnessDocument)) {
     if (-not (Test-Path -LiteralPath $documentationPath -PathType Leaf)) {
         throw "I2F real-closure documentation is missing: $documentationPath"
     }
@@ -1584,7 +1603,8 @@ $architectureSource = Get-Content -LiteralPath $ArchitectureDoc -Raw
 $currentDocumentation = $architectureSource + [Environment]::NewLine +
     (Get-Content -LiteralPath $ExecutionPlan -Raw) + [Environment]::NewLine +
     (Get-Content -LiteralPath $QualificationReadme -Raw) + [Environment]::NewLine +
-    (Get-Content -LiteralPath $I2gSelectionDocument -Raw)
+    (Get-Content -LiteralPath $I2gSelectionDocument -Raw) + [Environment]::NewLine +
+    (Get-Content -LiteralPath $I2gHarnessDocument -Raw)
 foreach ($requiredI2eCurrentStateText in @(
         'I2E = CLOSED / RERUN_FORBIDDEN',
         'I2F = REAL_COMPLETED / PASS_WITH_NEGATIVE_COUNTER_ACCESS_RESULT / RERUN_FORBIDDEN',
@@ -1604,7 +1624,29 @@ foreach ($requiredI2eCurrentStateText in @(
         'I2G_SELECTION_CHANGED = false',
         'BLOCKER = I2G_PAIRED_PHASE_CONFIGURATION_INVARIANT_CONTRADICTS_TREATMENT_MUTATION',
         'BLOCKER_STATUS = CLOSED_OFFLINE',
-        'I2G_HARNESS = NOT_IMPLEMENTED',
+        'I2G_HARNESS = IMPLEMENTED_OFFLINE',
+        'I2G_HARNESS_IMPLEMENTED = true',
+        'I2G_GATE_CONSUMED = true',
+        'I2G_REAL_GATE_CONSUMED = true',
+        'I2G_REAL_EXECUTION_ALLOWED = false',
+        'I2G_REAL_CLEANUP_ALLOWED = false',
+        'I2G_HUMAN_REAL_RUN_AUTHORIZATION = CONSUMED',
+        'I2G_REAL_RUNTIME = ATTEMPT3_COMPLETE',
+        'I2G_REAL_QUALIFICATION = PASS_AMD_PRIVILEGE_I2G_REAL_QUALIFICATION',
+        'I2G_REAL_SCIENTIFIC_RESULT = PROFILE_SINGLE_INSUFFICIENT_IN_PAIRED_I2G_CONTEXT',
+        'I2G_CAUSAL_INTERPRETATION_VALID = true',
+        'I2G_CONTROL_RESULT = POWER_UNAVAILABLE',
+        'I2G_TREATMENT_RESULT = POWER_UNAVAILABLE',
+        'I2G_CONTROL_RUNS = 1',
+        'I2G_TREATMENT_RUNS = 1',
+        'I2G_TOTAL_DISCOVERY_RUNS = 2',
+        'I2G_RETRY_OCCURRED = false',
+        'I2G_POWER_SAMPLING_RUNS = 0',
+        'I2G_ROLLBACK = PASS',
+        'I2G_FINAL_MACHINE_STATE = CLEAN',
+        'I2G_RECOVERY_REQUIRED = false',
+        'I2G_ATTEMPT3_AUTHORIZATION = CONSUMED',
+        'I2G_OFFLINE_VALIDATION = PASS',
         'I2G_HARNESS_IMPLEMENTATION_AUTHORIZED = false',
         'I2G_REAL_RUNTIME_AUTHORIZED = false',
         'I2G_BASELINE_RECONSTRUCTION_RIGHT = SeSystemProfilePrivilege',
@@ -1622,8 +1664,8 @@ foreach ($requiredI2eCurrentStateText in @(
         'MAX_TOTAL_I2G_COUNTER_DISCOVERY_RUNS = 2',
         'ACTUAL_RUN_COUNT_EVIDENCE_SCHEMA = DEFINED',
         'POWER_SAMPLING_RUNS = 0',
-        'NEXT_GATE = I2G_HARNESS_DESIGN_AND_OFFLINE_IMPLEMENTATION_REVIEW',
-        'NEXT_TASK = I2G_HARNESS_DESIGN_AND_OFFLINE_IMPLEMENTATION_REVIEW'
+        'NEW_REAL_RUN_REQUIRED = false',
+        'NEXT_GATE = HUMAN_FINAL_REVIEW_BEFORE_MARKING_PR24_READY'
     )) {
     if ($currentDocumentation.IndexOf($requiredI2eCurrentStateText, [StringComparison]::Ordinal) -lt 0) {
         throw "I2E current-state reconciliation is missing: $requiredI2eCurrentStateText"

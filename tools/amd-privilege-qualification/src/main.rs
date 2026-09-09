@@ -4,6 +4,70 @@ fn main() {
         std::thread::sleep(std::time::Duration::from_secs(30));
         return;
     }
+    if args.first().is_some_and(|arg| arg == "--i2g-synthetic") {
+        let scenario_name =
+            option_string(&args, "--scenario").unwrap_or_else(|| "happy".to_owned());
+        let scenario =
+            match amd_privilege_qualification::i2g::I2gSyntheticScenario::parse(&scenario_name) {
+                Some(value) => value,
+                None => {
+                    eprintln!("unknown I2G synthetic scenario: {scenario_name}");
+                    std::process::exit(2);
+                }
+            };
+        let evidence_root = option_string(&args, "--evidence-root").map(std::path::PathBuf::from);
+        if scenario == amd_privilege_qualification::i2g::I2gSyntheticScenario::CrashWindowMatrix {
+            match amd_privilege_qualification::i2g::run_crash_window_matrix(
+                evidence_root.as_deref(),
+            ) {
+                Ok(summary) => {
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(&summary)
+                            .expect("I2G crash matrix serializes")
+                    );
+                    if summary.offline_validation != "PASS" {
+                        std::process::exit(1);
+                    }
+                }
+                Err(error) => {
+                    eprintln!("synthetic I2G crash recovery matrix failed: {error}");
+                    std::process::exit(1);
+                }
+            }
+            return;
+        }
+        match amd_privilege_qualification::i2g::run_synthetic(scenario, evidence_root.as_deref()) {
+            Ok(summary) => {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&summary).expect("I2G summary serializes")
+                );
+                if summary.offline_validation != "PASS" {
+                    std::process::exit(1);
+                }
+            }
+            Err(error) => {
+                eprintln!("synthetic I2G qualification failed: {error}");
+                std::process::exit(1);
+            }
+        }
+        return;
+    }
+    if args
+        .first()
+        .is_some_and(|arg| arg == "--i2g-synthetic-cleanup")
+    {
+        let summary = amd_privilege_qualification::i2g::run_synthetic_cleanup();
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&summary).expect("I2G cleanup summary serializes")
+        );
+        if summary.result != "PASS" {
+            std::process::exit(1);
+        }
+        return;
+    }
     if args.first().is_some_and(|arg| arg == "--synthetic") {
         let evidence_root = args
             .windows(2)
@@ -63,6 +127,12 @@ fn main() {
                     std::process::exit(1);
                 }
             }
+            Some("--i2g-real-service") if args.len() == 1 => {
+                if let Err(error) = amd_privilege_qualification::windows::run_i2g_real_service() {
+                    eprintln!("I2G real qualification service failed: {error}");
+                    std::process::exit(1);
+                }
+            }
             Some("--client") => {
                 let operation = args.get(1).map(String::as_str).unwrap_or("get-status");
                 if !matches!(operation, "get-status" | "counter-discovery" | "start") {
@@ -102,9 +172,15 @@ fn option_value(args: &[String], name: &str) -> Option<u32> {
         .and_then(|pair| pair[1].parse::<u32>().ok())
 }
 
+fn option_string(args: &[String], name: &str) -> Option<String> {
+    args.windows(2)
+        .find(|pair| pair[0] == name)
+        .map(|pair| pair[1].clone())
+}
+
 fn usage_and_exit() -> ! {
     eprintln!(
-        "usage: amd-privilege-qualification --synthetic [--evidence-root PATH] | --broker | --system-counter-service | --service-profile-counter-service | --service-profile-enable-counter-service | --client get-status|counter-discovery|start"
+        "usage: amd-privilege-qualification --synthetic [--evidence-root PATH] | --i2g-synthetic --scenario SCENARIO [--evidence-root PATH] | --i2g-synthetic-cleanup | --broker | --system-counter-service | --service-profile-counter-service | --service-profile-enable-counter-service | --i2g-real-service | --client get-status|counter-discovery|start"
     );
     std::process::exit(2)
 }

@@ -2209,3 +2209,148 @@ harness or runtime exists, and no treatment may follow CONTROL drift. The
 paired phase transition permits only the single `SeProfileSingleProcessPrivilege`
 assignment to the same Service SID after CONTROL token/process teardown; all
 actual run counts are recorded separately from the planned and maximum caps.
+
+## AMD CURRENT STATE RECONCILIATION — I2G IMPLEMENTED OFFLINE
+
+The previous design-only I2G block above is retained for history. The current
+implementation and handoff are defined in
+[`amd-i2g-harness.md`](amd-i2g-harness.md):
+
+```text
+I2G_HARNESS = IMPLEMENTED_OFFLINE
+I2G_HARNESS_IMPLEMENTED = true
+I2G_VARIABLE = SeProfileSingleProcessPrivilege
+I2G_SELECTION_CONFIDENCE = MEDIUM
+I2G_EXPERIMENT_SHAPE = PAIRED_CONTROL_TREATMENT
+HISTORICAL_I2F_ROLE = PREDECESSOR_EVIDENCE_ONLY
+HISTORICAL_I2F_IS_ACTIVE_CAUSAL_CONTROL = false
+I2G_GATE_CONSUMED = true
+I2G_REAL_GATE_CONSUMED = true
+I2G_REAL_EXECUTION_ALLOWED = false
+I2G_REAL_CLEANUP_ALLOWED = false
+I2G_HUMAN_REAL_RUN_AUTHORIZATION = CONSUMED
+I2G_REAL_RUNTIME = ATTEMPT3_COMPLETE
+I2G_REAL_QUALIFICATION = PASS_AMD_PRIVILEGE_I2G_REAL_QUALIFICATION
+I2G_REAL_SCIENTIFIC_RESULT = PROFILE_SINGLE_INSUFFICIENT_IN_PAIRED_I2G_CONTEXT
+I2G_CAUSAL_INTERPRETATION_VALID = true
+I2G_CONTROL_RESULT = POWER_UNAVAILABLE
+I2G_TREATMENT_RESULT = POWER_UNAVAILABLE
+I2G_CONTROL_TOKEN_GATE = PASS
+I2G_TREATMENT_TOKEN_GATE = PASS
+I2G_PAIRED_CONFIG_DELTA = PASS
+I2G_PAIRED_TOKEN_DELTA = PASS
+I2G_CONTROL_RUNS = 1
+I2G_TREATMENT_RUNS = 1
+I2G_TOTAL_DISCOVERY_RUNS = 2
+I2G_RETRY_OCCURRED = false
+I2G_POWER_SAMPLING_RUNS = 0
+I2G_ROLLBACK = PASS
+I2G_FINAL_MACHINE_STATE = CLEAN
+I2G_RECOVERY_REQUIRED = false
+I2G_ATTEMPT3_AUTHORIZATION = CONSUMED
+I2G_OFFLINE_VALIDATION = PASS
+I2G_HARNESS_ARTIFACT_ARCHITECTURE = x64
+I2G_HARNESS_ARTIFACT_PATH = tools/amd-privilege-qualification/target/release/amd-privilege-qualification.exe
+I2G_HARNESS_ARTIFACT_SHA256 = 2613129D179EA2A0496AD680E68E77A79FFFBB569D0802A11AC03346E162DD80
+I2G_EXECUTION_SURFACE = SYNTHETIC_OFFLINE_FAIL_CLOSED
+I2G_SHARED_EXECUTABLE_OFFLINE_ONLY = false
+I2G_TASK_LOCAL_REAL_RUNNER = ONE_SHOT_EXACT_AUTHORIZATION_ONLY
+I2G_TASK_LOCAL_REAL_RUN_STATUS = PASS_AMD_PRIVILEGE_I2G_REAL_QUALIFICATION
+PLANNED_CONTROL_COUNTER_DISCOVERY_RUNS = 1
+PLANNED_TREATMENT_COUNTER_DISCOVERY_RUNS = 1
+PLANNED_VALID_PAIR_COUNTER_DISCOVERY_RUNS = 2
+MAX_TOTAL_I2G_COUNTER_DISCOVERY_RUNS = 2
+POWER_SAMPLING_RUNS = 0
+CONTROL_RETRY_ALLOWED = false
+TREATMENT_RETRY_ALLOWED = false
+NO_CODE_CHANGE_BETWEEN_PHASES = true
+NO_NON_TREATMENT_CONFIGURATION_CHANGE_BETWEEN_PHASES = true
+CONTROL_DRIFT_STOP_BEFORE_TREATMENT = true
+TOKEN_TEARDOWN_BEFORE_TREATMENT_POLICY_MUTATION = true
+NEW_REAL_RUN_REQUIRED = false
+NEXT_GATE = HUMAN_FINAL_REVIEW_BEFORE_MARKING_PR24_READY
+```
+
+### AMD-I2G REAL ATTEMPT #1 — IMMUTABLE RECONCILIATION
+
+Run `9ae1e7898f6b4a438f1acc41b76c2715` is historical evidence only. It
+established a valid CONTROL result of `POWER_UNAVAILABLE` after one discovery
+run, then encountered an `OrderedDictionary` clone runtime error before
+TREATMENT discovery. TREATMENT was allowed by the scientific gate but never
+started; rollback passed and the machine finished clean. The authoritative
+classification is `HARNESS_RUNTIME_ERROR`, `SCIENTIFIC_RESULT=NOT_OBTAINED`,
+and `CAUSAL_INTERPRETATION_VALID=false`. The raw evidence is immutable and a
+new real-run authorization is required after repair review.
+
+```text
+ATTEMPT1_CONTROL_RUNS = 1
+ATTEMPT1_TREATMENT_RUNS = 0
+ATTEMPT1_CONTROL_RESULT = POWER_UNAVAILABLE
+ATTEMPT1_TREATMENT_DISCOVERY = NOT_RUN
+ATTEMPT1_TREATMENT_ALLOWED_BY_SCIENTIFIC_GATE = true
+ATTEMPT1_FAILURE_CLASS = HARNESS_RUNTIME_ERROR
+ATTEMPT1_ROLLBACK = PASS
+ATTEMPT1_FINAL_MACHINE_STATE = CLEAN
+ATTEMPT1_AUTHORIZATION = CONSUMED
+ATTEMPT1_EVIDENCE = IMMUTABLE
+ATTEMPT1_NEW_REAL_RUN_AUTHORIZATION_REQUIRED = true
+```
+
+The repair closure keeps the historical attempt immutable. The real execution
+chain is now explicitly isolated as manual launcher parent -> wrapper child ->
+runner child, and the manual launcher parent owns the final authorization and
+contract restoration. Treatment service-phase completion is an explicit state
+(`EXPLICIT_STATE`) written only after the complete treatment service lifecycle
+returns successfully; discovery completion alone is not sufficient.
+
+The default I2G execution surface is synthetic/offline-only and fail-closed. The shared
+`amd-privilege-qualification.exe` still contains historical non-I2G entrypoints
+(`--broker`, `--system-counter-service`, `--service-profile-counter-service`,
+`--service-profile-enable-counter-service`, and `--client`), so the executable
+itself is not offline-only. The I2G wrapper validates the exact x64 release
+artifact path and authoritative SHA-256 before synthetic execution. The separate
+real runner is one-shot, exact-token gated, fixed to this qualification-only
+paired experiment, and does not expose a reusable production surface. Historical
+entrypoints remain unauthorized.
+
+### AMD-I2G REAL ATTEMPT #3 — AUTHORITATIVE RESULT
+
+Attempt `d6d6c33003934dc5ad2b0b79307e5b2c` is the first complete valid paired
+qualification. Its raw evidence is immutable. In the frozen paired I2G context,
+CONTROL and TREATMENT both returned `POWER_UNAVAILABLE`; the only policy delta
+was `SeProfileSingleProcessPrivilege`, and the causal interpretation is valid
+only for that context.
+
+```text
+ATTEMPT3_RUN_ID = d6d6c33003934dc5ad2b0b79307e5b2c
+ATTEMPT3_REAL_PRIVILEGED_RUN = YES
+ATTEMPT3_REAL_CLEANUP_RUN = YES
+ATTEMPT3_CONTROL_RUNS = 1
+ATTEMPT3_TREATMENT_RUNS = 1
+ATTEMPT3_TOTAL_DISCOVERY_RUNS = 2
+ATTEMPT3_POWER_SAMPLING_RUNS = 0
+ATTEMPT3_RETRY_OCCURRED = false
+ATTEMPT3_CONTROL_RESULT = POWER_UNAVAILABLE
+ATTEMPT3_TREATMENT_RESULT = POWER_UNAVAILABLE
+ATTEMPT3_CONTROL_TOKEN_GATE = PASS
+ATTEMPT3_TREATMENT_TOKEN_GATE = PASS
+ATTEMPT3_PAIRED_CONFIG_DELTA = PASS
+ATTEMPT3_PAIRED_TOKEN_DELTA = PASS
+ATTEMPT3_TREATMENT_SERVICE_PHASE_STARTED = true
+ATTEMPT3_TREATMENT_SERVICE_PHASE_COMPLETED = true
+ATTEMPT3_TREATMENT_DISCOVERY_STARTED = true
+ATTEMPT3_TREATMENT_DISCOVERY_COMPLETED = true
+ATTEMPT3_FAILURE_CLASS = NONE
+ATTEMPT3_SCIENTIFIC_RESULT = PROFILE_SINGLE_INSUFFICIENT_IN_PAIRED_I2G_CONTEXT
+ATTEMPT3_CAUSAL_INTERPRETATION_VALID = true
+ATTEMPT3_ROLLBACK = PASS
+ATTEMPT3_FINAL_MACHINE_STATE = CLEAN
+ATTEMPT3_RECOVERY_REQUIRED = false
+ATTEMPT3_AUTHORIZATION = CONSUMED
+ATTEMPT4_AUTHORIZATION = NOT_GRANTED
+NEW_REAL_RUN_REQUIRED = false
+```
+
+The result does not generalize beyond the paired I2G context. Attempt #1 and
+Attempt #2 remain historical harness failures with `SCIENTIFIC_RESULT=NOT_OBTAINED`;
+no Attempt #4 is required or allowed.
