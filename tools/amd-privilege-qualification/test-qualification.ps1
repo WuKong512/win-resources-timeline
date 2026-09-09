@@ -1678,7 +1678,15 @@ foreach ($requiredI2eCurrentStateText in @(
         'ENUMERATION_AND_SAMPLING_EQUIVALENCE = UNKNOWN',
         'SELECTED_NEXT_TASK = NONE',
         'NEXT_GATE = HUMAN_REVIEW_OPERATION_PATH_EVIDENCE_GAP',
-        'OPERATION_PATH_AUDIT = amd-cli-list-path-validity.md'
+        'OPERATION_PATH_AUDIT = amd-cli-list-path-validity.md',
+        'RESULT = PASS_WITH_EXTERNAL_BLOCKERS',
+        'TASK_RESULT = COMPLETE / INSUFFICIENT',
+        'PR_CREATION = BLOCKED_GITHUB_SIGN_IN_REQUIRED',
+        'QUALIFICATION_TEST = BLOCKED',
+        'QUALIFICATION_TEST_BLOCKER = PRE_EXISTING_PINNED_RELEASE_ARTIFACT_SHA256_MISMATCH',
+        'QUALIFICATION_BLOCKER_TASK_CAUSED = NO',
+        'QUALIFICATION_BLOCKER_SCOPE = PRE_EXISTING / OUT_OF_SCOPE / NOT_REPAIRED',
+        'PRE_EXISTING_SHA_MISMATCH_REPAIRED = NO'
     )) {
     if ($currentDocumentation.IndexOf($requiredI2eCurrentStateText, [StringComparison]::Ordinal) -lt 0) {
         throw "I2E current-state reconciliation is missing: $requiredI2eCurrentStateText"

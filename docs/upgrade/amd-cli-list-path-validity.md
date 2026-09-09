@@ -12,6 +12,14 @@ TASK_ID = AMD-CLI-LIST-PATH-VALIDITY-Q1
 REPOSITORY = WuKong512/win-resources-timeline
 BASELINE_MAIN = 94c0c98e057c25010294ff32dca99c430f81ce1d
 AUDIT_MODE = OFFLINE_READ_ONLY
+RESULT = PASS_WITH_EXTERNAL_BLOCKERS
+TASK_RESULT = COMPLETE / INSUFFICIENT
+PR_CREATION = BLOCKED_GITHUB_SIGN_IN_REQUIRED
+QUALIFICATION_TEST = BLOCKED
+QUALIFICATION_TEST_BLOCKER = PRE_EXISTING_PINNED_RELEASE_ARTIFACT_SHA256_MISMATCH
+QUALIFICATION_BLOCKER_TASK_CAUSED = NO
+QUALIFICATION_BLOCKER_SCOPE = PRE_EXISTING / OUT_OF_SCOPE / NOT_REPAIRED
+PRE_EXISTING_SHA_MISMATCH_REPAIRED = NO
 I2G_CURRENT_STATE = COMPLETE / ATTEMPT3_AUTHORITATIVE
 I2G_REAL_GATE_CONSUMED = true
 I2G_REAL_EXECUTION_ALLOWED = false
@@ -147,9 +155,13 @@ fixed non-sampling operation `timechart --list`:
   results at `POWER_UNAVAILABLE`. The frozen causal conclusion remains only
   `PROFILE_SINGLE_INSUFFICIENT_IN_PAIRED_I2G_CONTEXT`.
 
-Every I2 discovery run exercised stages 1–4 and 9 for its specific service
-context. The records explicitly report zero power-sampling runs, so stages
-5–8 were not exercised by I2B, I2C, I2F, or I2G. None establishes stage 10.
+Every I2 discovery run exercised the discovery operation through stages 1–3
+and stage 9 for its specific service context. I2C established the positive
+Stage 4 outcome because the power category was advertised; I2B, I2F, and I2G
+produced the Stage 4 negative outcome because `POWER_UNAVAILABLE` means the
+power category was not advertised. The records explicitly report zero
+power-sampling runs, so stages 5–8 were not exercised by I2B, I2C, I2F, or
+I2G. None establishes stage 10.
 I2G Attempt #3 is immutable, authoritative historical evidence; this audit
 does not broaden its account, privilege, operation, or production meaning.
 
@@ -177,10 +189,12 @@ sequence. The API header describes `GetSupportedCounters` as returning
 descriptors and describes `ReadAllEnabledCounters` as returning vendor-owned
 sample memory. The static CLI import graph contains the public power API,
 metadata/enumeration symbols, and lifecycle symbols, while the saved CLI
-debugger observation reached `AMDTPwrProfileInitialize(0)`. This confirms a
-shared public API/CXL module boundary at the CLI level, but it does not trace
-which exact API call is made for `--list`, nor prove that the CLI applies the
-same authorization check to discovery and active sampling.
+debugger observation reached `AMDTPwrProfileInitialize(0)`. This confirms the
+executable/static public API/CXL dependency graph recorded for the vendor CLI;
+it supports, but does not confirm, per-operation runtime sharing or
+authorization semantics. It does not trace which exact API call is made for
+`--list`, nor prove that the CLI applies the same authorization check to
+discovery and active sampling.
 
 The direct-loader records are not sampling evidence. An isolated direct
 `LoadLibraryExW`/dependency path reached the CXL fatal-exit boundary before
@@ -196,15 +210,15 @@ specific API call.
 implementation, but the committed evidence does not prove it. It must not be
 converted into a positive or negative runtime claim.
 
-| Evidence slice | Account/context | Operation | Enumeration path | Sampling path | Runtime/API stages exercised | Result | Production relevance | Valid inference | Invalid inference |
+| Evidence slice | Account/context | Operation | Enumeration path | Sampling path | Runtime/API stage outcomes | Result | Production relevance | Valid inference | Invalid inference |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | Administrator successful sampling | Administrator, interactive x64 PowerShell, High integrity, AMD `bin` CWD | `timechart --event power --interval 1000 --duration 5/10 --format csv` | Not separately traced; source/API sequence supports selection | Yes: bounded configure/start/read/stop/close semantics | 1, 2, 5, 6, 7, 8 | Exit 0; parseable package-power samples | Strong bounded CLI sampling evidence; not least privilege | Admin interactive sampling works for the recorded CLI identity | `--list` failure under another context makes sampling impossible; service/production account works |
 | AMD-SERVICE-CONTEXT-I1 | LocalSystem `S-1-5-18`, genuine service, Session 0, x64 | `timechart --event power --interval 1000 --duration 10 --format csv` | No `--list` run | Yes; nine samples and cadence passed | 1, 2, 5–9 | `PACKAGE_POWER_STATUS = PASS` | Strong service-context sampling feasibility; not minimum privilege | The CLI sampling path works in this LocalSystem/Session 0 context | LocalSystem is least privilege; LocalService `--list` failure blocks all sampling |
-| I2B LocalService `--list` | LocalService `S-1-5-19`, qualification service, Session 0 | `timechart --list` | Yes; fixed counter discovery | No sampling arguments or output session | 1–4, 9 | `POWER_UNAVAILABLE` / no-counters result | Discovery-only account differential | This context did not advertise power through `--list` | Active sampling was attempted or proven impossible |
+| I2B LocalService `--list` | LocalService `S-1-5-19`, qualification service, Session 0 | `timechart --list` | Yes; fixed counter discovery | No sampling arguments or output session | 1–3, 4 negative, 9 | `POWER_UNAVAILABLE` / no-counters result | Discovery-only account differential | This context did not advertise power through `--list` | Active sampling was attempted or proven impossible |
 | I2C SYSTEM `--list` | LocalSystem `S-1-5-18`, dedicated service, Session 0, x64 | `timechart --list` | Yes; power category advertised | No | 1–4, 9 | `POWER_AVAILABLE`; power category present | Discovery positive under SYSTEM; no sample qualification | Discovery is account/context-sensitive and can succeed under SYSTEM | `--list` success proves parseable sampling or least privilege |
-| I2F LocalService `--list` | LocalService, dedicated Service SID, Session 0; `SeSystemProfilePrivilege` enabled | `timechart --list` | Yes | No | 1–4, 9 | `POWER_UNAVAILABLE`; exit 0; no counters | Valid preregistered single-right discovery result | That right alone did not restore discovery in this context | The right is unnecessary/ineffective for every sampling context |
-| I2G Attempt #3 CONTROL | Fresh LocalService + same Service SID, Session 0, x64; SystemProfile control state | `timechart --list` | Yes | No | 1–4, 9; paired control | `POWER_UNAVAILABLE` | Authoritative paired discovery baseline only | Control establishes the frozen I2G baseline | It is a production sampling baseline |
-| I2G Attempt #3 TREATMENT | Same paired context; adds only `SeProfileSingleProcessPrivilege` | `timechart --list` | Yes | No | 1–4, 9; paired treatment | `POWER_UNAVAILABLE` | Causal validity is limited to the frozen discovery pair | The selected privilege was insufficient in paired I2G context | The privilege is irrelevant to active sampling or all accounts |
+| I2F LocalService `--list` | LocalService, dedicated Service SID, Session 0; `SeSystemProfilePrivilege` enabled | `timechart --list` | Yes | No | 1–3, 4 negative, 9 | `POWER_UNAVAILABLE`; exit 0; no counters | Valid preregistered single-right discovery result | That right alone did not restore discovery in this context | The right is unnecessary/ineffective for every sampling context |
+| I2G Attempt #3 CONTROL | Fresh LocalService + same Service SID, Session 0, x64; SystemProfile control state | `timechart --list` | Yes | No | 1–3, 4 negative, 9; paired control | `POWER_UNAVAILABLE` | Authoritative paired discovery baseline only | Control establishes the frozen I2G baseline | It is a production sampling baseline |
+| I2G Attempt #3 TREATMENT | Same paired context; adds only `SeProfileSingleProcessPrivilege` | `timechart --list` | Yes | No | 1–3, 4 negative, 9; paired treatment | `POWER_UNAVAILABLE` | Causal validity is limited to the frozen discovery pair | The selected privilege was insufficient in paired I2G context | The privilege is irrelevant to active sampling or all accounts |
 | Direct API/load qualification | Isolated diagnostic child versus full vendor CLI; separate loader contexts | `LoadLibraryExW`/init-only and static import analysis | No successful enumeration | No sampling | Direct child: process/load/dependency boundary; CLI comparator: public API/CXL graph | Direct load aborts before API init; CLI sampling succeeds | Loader/API-path qualification only | Direct loader and CLI are divergent process/load paths; CLI uses the public API graph | Direct-loader failure proves CLI sampling failure or API/CLI semantic identity |
 
 ## API / CLI semantic mapping
@@ -265,7 +279,7 @@ The criteria were fixed before the route verdict:
 | Criterion | Required for `VALID_PROXY` | Evidence status |
 | --- | --- | --- |
 | Necessary prerequisite | `--list` must exercise a prerequisite that production sampling necessarily requires | `SUPPORTED` only at the public API sequence level; exact CLI necessity `UNKNOWN` |
-| Shared authorization/runtime/device/API dependency | The relevant dependency and authorization semantics must be shared | Shared public API/CXL module graph `CONFIRMED`; shared authorization semantics `UNKNOWN` |
+| Shared authorization/runtime/device/API dependency | The relevant dependency and authorization semantics must be shared | Executable/static public API/CXL dependency graph `CONFIRMED`; per-operation runtime sharing and authorization semantics `UNKNOWN` |
 | No counterexample | No historical same-context sampling success while the corresponding discovery capability is unavailable | No counterexample is recorded, but no same-context pair was run; criterion remains unproven |
 | No material discovery confounder | Discovery must not depend on materially different account-sensitive semantics | Account-sensitive discovery is positively observed; criterion is not satisfied |
 
@@ -346,6 +360,14 @@ SELECTED_NEXT_TASK = NONE
 SELECTED_NEXT_TASK_GOAL = NONE_PENDING_HUMAN_REVIEW_OF_OPERATION_PATH_EVIDENCE_GAP
 NEXT_GATE = HUMAN_REVIEW_OPERATION_PATH_EVIDENCE_GAP
 HUMAN_AUTH_REQUIRED_LATER = YES_FOR_ANY_FUTURE_LIVE_AMD_OPERATION
+RESULT = PASS_WITH_EXTERNAL_BLOCKERS
+TASK_RESULT = COMPLETE / INSUFFICIENT
+PR_CREATION = BLOCKED_GITHUB_SIGN_IN_REQUIRED
+QUALIFICATION_TEST = BLOCKED
+QUALIFICATION_TEST_BLOCKER = PRE_EXISTING_PINNED_RELEASE_ARTIFACT_SHA256_MISMATCH
+QUALIFICATION_BLOCKER_TASK_CAUSED = NO
+QUALIFICATION_BLOCKER_SCOPE = PRE_EXISTING / OUT_OF_SCOPE / NOT_REPAIRED
+PRE_EXISTING_SHA_MISMATCH_REPAIRED = NO
 ```
 
 I2G Attempt #3 remains immutable and authoritative. This audit changes no

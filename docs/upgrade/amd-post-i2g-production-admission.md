@@ -320,15 +320,20 @@ The performed validation is:
 GIT_DIFF_CHECK = PASS
 POWERSHELL_ASSERTION_PARSE = PASS
 CURRENT_STATE_MARKERS = PASS
-EXISTING_QUALIFICATION_TEST = BLOCKED_BEFORE_DOCUMENTATION_ASSERTIONS
-EXISTING_QUALIFICATION_TEST_BLOCKER = PINNED_RELEASE_ARTIFACT_SHA_MISMATCH
+QUALIFICATION_TEST = BLOCKED
+QUALIFICATION_TEST_BLOCKER = PRE_EXISTING_PINNED_RELEASE_ARTIFACT_SHA256_MISMATCH
+QUALIFICATION_BLOCKER_TASK_CAUSED = NO
+QUALIFICATION_BLOCKER_SCOPE = PRE_EXISTING / OUT_OF_SCOPE / NOT_REPAIRED
+PRE_EXISTING_SHA_MISMATCH_REPAIRED = NO
 REBUILT_ARTIFACT_SHA256 = 37D4C3EC25F5F1607372BC78C0F35CF36511EBDF37E0F67D9F350475C36A1988
 PINNED_ARTIFACT_SHA256 = 2613129D179EA2A0496AD680E68E77A79FFFBB569D0802A11AC03346E162DD80
 RUST_RUNTIME_CHANGED = NO
 ```
 
-The failed check is an artifact identity/environment mismatch in the existing
-qualification contract. It was not weakened or repaired in this decision task.
+The qualification check remains blocked by an artifact identity/environment
+mismatch in the existing contract. The mismatch is pre-existing, out of scope,
+and not repaired by the Q1 audit; the audit itself is complete with route
+verdict `INSUFFICIENT`.
 
 ## CURRENT STATE — AMD-CLI-LIST-PATH-VALIDITY-Q1
 
@@ -336,6 +341,10 @@ The selected operation-path audit is complete. Its route verdict is
 `INSUFFICIENT`: the historical `--list` results remain discovery evidence, but
 the repository does not prove that a negative discovery result is a necessary
 failure of the active sampling path.
+
+The classification below separates Q1 task completion from the external PR
+and qualification-test blockers. The earlier `RESULT` in the Decision summary
+remains the post-I2G decision result.
 
 ```text
 AMD_CLI_LIST_PATH_VALIDITY_Q1 = COMPLETE / INSUFFICIENT
@@ -355,4 +364,12 @@ SELECTED_NEXT_TASK = NONE
 NEXT_GATE = HUMAN_REVIEW_OPERATION_PATH_EVIDENCE_GAP
 OPERATION_PATH_AUDIT = amd-cli-list-path-validity.md
 REAL_EXECUTION_AUTHORIZED_BY_THIS_TASK = NO
+RESULT = PASS_WITH_EXTERNAL_BLOCKERS
+TASK_RESULT = COMPLETE / INSUFFICIENT
+PR_CREATION = BLOCKED_GITHUB_SIGN_IN_REQUIRED
+QUALIFICATION_TEST = BLOCKED
+QUALIFICATION_TEST_BLOCKER = PRE_EXISTING_PINNED_RELEASE_ARTIFACT_SHA256_MISMATCH
+QUALIFICATION_BLOCKER_TASK_CAUSED = NO
+QUALIFICATION_BLOCKER_SCOPE = PRE_EXISTING / OUT_OF_SCOPE / NOT_REPAIRED
+PRE_EXISTING_SHA_MISMATCH_REPAIRED = NO
 ```
