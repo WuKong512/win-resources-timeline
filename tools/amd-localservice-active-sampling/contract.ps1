@@ -48,9 +48,9 @@ function Get-AmdLocalServiceSamplingContract {
         authorization_environment_value = 'GRANTED_FOR_NEW_REVIEWED_HEAD_ONLY'
         gate_file_name = 'Q1-LIVE-GATE.json'
         harness_identity_mode = 'SOURCE_SHA256_PINNED'
-        contract_canonical_sha256 = 'DD924B6F39433B728E001AF63CE6C9ADD1650AB997D588154C5FCD6A6EE36C21'
+        contract_canonical_sha256 = 'A143F69E901B1C727A59E01DEB46D94DDA8418F8C0FB53B128BA10A0A8D0C45C'
         harness_source_sha256 = [ordered]@{
-            contract = 'DD924B6F39433B728E001AF63CE6C9ADD1650AB997D588154C5FCD6A6EE36C21'
+            contract = 'A143F69E901B1C727A59E01DEB46D94DDA8418F8C0FB53B128BA10A0A8D0C45C'
             runner = 'B90E1447F0980598485157ADD573C197979E41008A89916994D84204BE02F78A'
             service_host = 'E4F1F8AE2F25C91E7B2EF43C1A47C5251BF7BFCE8AF203445CDF41A086456C3E'
             sc_argument_contract = 'A238266DF382BFE2870E11ED40A14468EF7BCB58807D0F235D17C5A3C3F5E5FA'
@@ -641,17 +641,31 @@ function Get-Q1GateState {
     )
 
     $gatePath = Join-Path ([string]$Contract.output_base) ([string]$Contract.gate_file_name)
-    if (-not (Test-Path -LiteralPath $gatePath)) {
+    $gateItem = $null
+    try {
+        $gateItem = Get-Item -LiteralPath $gatePath -Force -ErrorAction Stop
+    }
+    catch {
+        if ($_.Exception -is [System.Management.Automation.ItemNotFoundException]) {
+            return [pscustomobject]@{
+                path = $gatePath
+                exists = $false
+                state = 'AVAILABLE'
+                valid = $true
+                record = $null
+                error = $null
+            }
+        }
         return [pscustomobject]@{
             path = $gatePath
-            exists = $false
-            state = 'AVAILABLE'
-            valid = $true
+            exists = $true
+            state = 'INVALID_OR_UNREADABLE'
+            valid = $false
             record = $null
-            error = $null
+            error = $_.Exception.Message
         }
     }
-    if (-not (Test-Path -LiteralPath $gatePath -PathType Leaf)) {
+    if ($gateItem.PSIsContainer) {
         return [pscustomobject]@{
             path = $gatePath
             exists = $true
