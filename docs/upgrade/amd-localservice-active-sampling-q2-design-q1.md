@@ -4,6 +4,12 @@ This is a design, reconciliation, and admission record only. It does not
 implement a Q2 harness, create a Q2 gate, authorize Q2 Live, execute an AMD
 binary or API, create a Windows service, or change Windows state.
 
+This file is the PR #30 design baseline. The post-merge contract corrections are
+recorded in
+[`amd-localservice-active-sampling-q2-design-review-closure.md`](amd-localservice-active-sampling-q2-design-review-closure.md).
+That closure supersedes the PR #30 design head for any future implementation or
+Live authorization; the PR #30 head is not a standalone reviewed identity.
+
 The decision in this document is whether one new, independently governed
 experiment is warranted after the immutable Q1 closure. It is not a Q1 retry,
 rerun, continuation, gate replacement, or evidence-completion step.
@@ -12,13 +18,14 @@ rerun, continuation, gate replacement, or evidence-completion step.
 
 | Field | Decision |
 | --- | --- |
-| RESULT | PASS_AMD_LOCALSERVICE_ACTIVE_SAMPLING_Q2_DESIGN_Q1 |
+| RESULT | PASS_AMD_LOCALSERVICE_ACTIVE_SAMPLING_Q2_DESIGN_REVIEW_CLOSURE |
 | TASK_ID | AMD-LOCALSERVICE-ACTIVE-SAMPLING-Q2-DESIGN-Q1 |
 | Q2_JUSTIFIED | YES |
 | Q2_DESIGN_READY | YES |
+| Q2_HARNESS_IMPLEMENTATION_READY | YES |
 | Q2_LIVE_AUTHORIZED | NO |
 | REAL_EXECUTION_ALLOWED | false |
-| NEXT_GATE | HUMAN_REVIEW_Q2_DESIGN |
+| NEXT_GATE | HUMAN_REVIEW_Q2_DESIGN_CLOSURE |
 
 Q2 is justified because the only Q1 attempt stopped before the scientific
 intervention, the stop was a reviewed harness false negative rather than AMD
@@ -207,16 +214,17 @@ Service SID cannot be proved, the run is BLOCKED before AMD launch.
 ## Q2 effective-token contract
 
 The future service worker must capture the complete effective token before
-launch and compare it to the reviewed Q2 CONTROL contract:
+launch and compare it to the reviewed Q2 CONTROL contract. The contract is
+strict about semantic security invariants and privilege state, but it must not
+pretend that a Windows service token has a frozen historical numeric group set:
 
-    USER_SID = S-1-5-19
+    TOKEN_USER_SID = S-1-5-19
     SESSION_ID = 0
     INTERACTIVE = false
     ARCHITECTURE = x64
     INTEGRITY = SYSTEM
-    DEDICATED_Q2_SERVICE_SID = PRESENT
-    ADMINISTRATORS = ABSENT
-    FORBIDDEN_GROUP_SID = S-1-5-32-544
+    EXACT_Q2_SERVICE_SID = PRESENT
+    ADMINISTRATORS_SID = S-1-5-32-544 = ABSENT
 
 Required enabled privileges:
 
@@ -231,12 +239,32 @@ Forbidden privileges:
     SeDebugPrivilege
     SeTcbPrivilege
 
-The full privilege and group tables must be captured, not inferred from the
-account name. No additional enabled privilege, group, Q1 Service SID, or
-account-wide LocalService capability may be silently introduced. Any
-unexpected enabled privilege or group outside the reviewed CONTROL snapshot
-is a fail-closed token-contract block and requires a separately reviewed
-design, not automatic privilege discovery or expansion.
+The full privilege and raw group tables must be captured, not inferred from the
+account name. Privileges remain exact: every required privilege must be present
+and enabled, every forbidden privilege must be absent, and an additional
+enabled privilege is a fail-closed token-contract block. Group validation is
+semantic rather than historical set equality:
+
+    EXACT_HISTORICAL_GROUP_SET_EQUALITY = FORBIDDEN
+    DYNAMIC_WINDOWS_GROUPS = ALLOWED_IF_SEMANTICALLY_VALID
+    UNKNOWN_GROUP_POLICY = NOT_ALLOW_ALL; VALIDATE_OR_BLOCK
+    GROUP_ATTRIBUTES = REQUIRED_WHEN_AVAILABLE_AND_RECORDED
+
+The exact Q2 Service SID must be obtained from the current exact SCM service,
+canonicalized, belong to the `S-1-5-80-...` Service SID family, and match both
+controller and independent SCM readback. A Q1 Service SID, a stale SID, or a
+SID that cannot be independently anchored to the current Q2 service blocks.
+The validator must not reuse the historical Q1 numeric Service SID.
+
+Legitimate Windows-generated dynamic groups may be present when they are not a
+forbidden group, do not change the Q2 privilege/security hypothesis, and their
+type and attributes establish the expected Windows token semantics. The full
+original group table and attributes remain evidence even when a dynamic group
+is accepted. In particular, a Logon SID in the `S-1-5-5-X-Y` family must be
+validated as a Logon SID with the expected logon-id semantics; `X` and `Y` are
+runtime values and must not be hard-coded to historical CONTROL numbers. A
+shape check or regex alone is not an allow-any rule, and an unrecognized group
+cannot be silently accepted.
 
 ## Q2 LSA materialization contract
 
@@ -350,9 +378,11 @@ Machine-readable summary of the frozen Q2 contract:
       produce parseable, credible package-power samples.
     Q2_PRIMARY_COMPARATOR = Historical I2F/I2G LocalService CONTROL baseline
     Q2_POSITIVE_CONTROL = Historical LocalSystem active-sampling PASS
-    Q2_TOKEN_CONTRACT = Exact LocalService Session-0 x64 CONTROL token:
-      dedicated Q2 Service SID present, Administrators absent, required
-      privileges enabled, forbidden privileges/groups absent
+    Q2_TOKEN_CONTRACT = Semantic LocalService Session-0 x64 CONTROL invariants:
+      S-1-5-19, Session 0, non-interactive, x64, SYSTEM integrity, exact
+      canonical current Q2 Service SID present, Administrators absent, required
+      privileges enabled, forbidden privileges absent, dynamic Windows groups
+      validated by type/attributes; exact historical group-set equality forbidden
     Q2_DRIVER_CONTRACT = AMDPowerProfiler 10.6.3.0/5.3.481.0;
       AMDCpuProfiler 4.4.1.0/5.3.481.0; AMD-signed; compatibility UNKNOWN
     Q2_COMMAND =
@@ -370,23 +400,37 @@ Machine-readable summary of the frozen Q2 contract:
       SHA-256 manifest and authorization-bound manifest hash
     Q2_NEW_AUTHORIZATION_REQUIRED = YES
     Q1_AUTHORIZATION_REUSE = FORBIDDEN
-    Q2_PASS_CRITERIA = Valid context and launch; CSV parse PASS; at least
-      two finite, non-negative, non-constant package-power samples
-    Q2_FAIL_CRITERIA = Exact context and valid AMD invocation established,
-      then trustworthy vendor runtime/output evidence fails the preregistered
-      package-power criteria
+    Q2_PASS_CRITERIA = Valid context; CONFIRMED_ONE invocation; clean bounded
+      process completion; exit code 0; complete stdout/stderr and durable
+      process/PID evidence; exact-run vendor output; CSV parse PASS; identified
+      package-power field/unit; finite non-negative values; valid timestamp or
+      sample order; preregistered compatible temporal coverage and 1000-ms
+      cadence; credible package-power signal
+    Q2_PACKAGE_POWER_VARIATION = Recorded observation only; YES or NO is not a
+      scientific PASS predicate
+    Q2_ALL_ZERO_CREDIBILITY = Separate preregistered parser/vendor-semantics
+      condition; finite/non-negative values alone do not establish credibility
+    Q2_TEMPORAL_CADENCE_TOLERANCE = Bounded tolerance derived from the
+      historically validated 10-second/1000-ms command shape, registered and
+      offline-tested before implementation; never adjusted after Live output
+    Q2_FAIL_CRITERIA = Exact context and CONFIRMED_ONE invocation established,
+      trustworthy process/runtime/vendor evidence demonstrates failure of the
+      preregistered package-power question
     Q2_BLOCKED_CRITERIA = Preflight, identity, service/SID, LSA,
-      token, launch-accounting, harness, persistence, parser, ACL, manifest,
-      or cleanup/evidence-chain validity failure before a trustworthy
-      scientific observation
+      token, launch-accounting, process-ownership/capture, harness,
+      persistence, parser, ACL, manifest, or evidence-chain validity failure
+      before a trustworthy scientific observation
     Q2_CLEANUP_CONTRACT =
       Stop and own processes; prove writer quiescence; recover only owned
       Q2 LSA change; remove exact Q2 SID write; seal/hash evidence; delete
       exact service only when safe; preserve visible residue on ambiguity
     Q2_EVIDENCE_CONTRACT =
-      Preflight, source/git/platform/binary/driver/service/SID/token/LSA/gate/
-      launch/stdout/stderr/process/raw-output/CSV/parser/package-power/
-      quiescence/cleanup/ACL/manifest/hash/residue/summary evidence
+      Sealed raw experiment evidence covers preflight, source/git/platform,
+      binary/driver/service/SID/token/LSA/gate/launch/stdout/stderr/process,
+      vendor output/CSV/parser/package-power, writer quiescence, ACL state,
+      raw manifest and hash verification. Post-seal closure/summary evidence
+      covers service deletion, final residue, cleanup closure, classification,
+      and limitations; RAW_MANIFEST_COVERAGE != POST_SEAL_CLOSURE_SUMMARY
 
 ## Independent one-shot governance
 
@@ -477,72 +521,118 @@ control into LocalService account-wide write.
 
 ## Evidence contract
 
-The future Q2 implementation must produce the following evidence before a
-result can be reviewed. The names are a minimum contract; a source-reviewed
-implementation may use equivalent names only if the manifest maps them
-one-to-one without dropping a required fact.
+The future Q2 implementation must produce two explicitly different evidence
+layers before a result can be reviewed. The names are a minimum contract; a
+source-reviewed implementation may use equivalent names only if the raw
+manifest maps them one-to-one without dropping a required fact.
+
+### Sealed raw experiment evidence
+
+The following are captured while the experiment is active, followed by writer
+quiescence, ACL sealing, raw-manifest generation, and independent hash
+verification:
 
 | Evidence | Required content |
 | --- | --- |
 | preflight | All read-only gates, result, failures, and proof that no mutation/AMD launch occurred before pass |
-| source identity | Reviewed Git head, per-file SHA-256 records, manifest hash, and authorization binding |
+| source identity | Exact reviewed Git head, material-file path list, per-file SHA-256 records, manifest hash, and authorization binding |
 | git baseline | Requested/current main, merge base, branch/source head, clean-tree result |
 | platform snapshot | OS/build, CPU identity, hypervisor/VBS/HVCI and relevant AMD platform state; no unreviewed change |
 | AMD binary identity | Exact path, SHA-256, file/product versions, x64 PE identity, Authenticode status and signer |
 | AMD driver identity | Both driver names, paths, hashes, file/product versions, signer, service/load state, compatibility classification |
 | service definition | Exact Q2 service name, account, image, arguments, start mode, own-process type, SID type |
-| service SID evidence | SCM-generated exact Q2 Service SID, source/readback, no Q1 SID reuse |
+| service SID evidence | SCM-generated exact Q2 Service SID, controller/SCM independent readback, canonical identity, no Q1 SID reuse |
 | LSA before | Direct Q2 SID rights and all SeSystemProfilePrivilege principals, both readable, right absent from Q2 SID |
 | LSA mutation intent | Exact task/service/SID/right/target, ownership plan, and right_absent_before |
 | LSA mutation started | Durable record immediately before the exact add call |
 | LSA ownership | Whether the change is Q2-owned, with before/after/current identity anchors |
 | LSA after | Exact Q2 SID assignment readback and unchanged unrelated principals |
 | LSA recovery | Attempt/state/result, final readback, ambiguity and residue if blocked |
-| effective token | User SID, session, interactivity, x64, integrity, full groups, Service SID, full privileges |
+| effective token | User SID, session, interactivity, x64, integrity, full raw groups and attributes, Service SID, full privileges |
 | Q2 gate record | Exact Q2-LIVE-GATE.json record and hash, including consumption phase |
 | CLI launch intent | Frozen executable, arguments, working directory, output path, gate state, and start result UNKNOWN |
-| CLI launch started | Durable post-Process.Start evidence, PID/ownership, and exact command; mutually exclusive with valid start-failed successor |
-| CLI launch start-failed | Valid successor with exact command/path and process_started=false when Process.Start did not succeed |
-| stdout | Raw vendor standard output |
-| stderr | Raw vendor standard error |
-| process result | PID, descendants/ownership, signed exit code, timeout, cancellation, capture completeness |
+| CLI launch started | Durable post-Process.Start evidence, PID/ownership, exact command, and valid start result; mutually exclusive with valid start-failed successor |
+| CLI launch start-failed | Valid exact successor with command/path and process_started=false when Process.Start did not succeed |
+| controller lifecycle | Durable, source-reviewed state-machine transitions proving whether the launch stage was entered |
+| stdout | Complete raw vendor standard output capture |
+| stderr | Complete raw vendor standard error capture |
+| process result | PID, descendants/ownership, signed exit code, completion, timeout, cancellation, capture completeness, and durable result |
 | AMD raw output | All vendor-produced files under the exact output directory, including session metadata if present |
 | CSV | The exact vendor timechart CSV, not a regenerated or synthesized file |
-| parser result | Parser version/source identity, schema/column interpretation, row and timestamp checks |
-| package-power evidence | Package-power column, sample count, finite/non-negative/non-constant checks, values and units |
-| writer quiescence | Service/worker/AMD descendants stopped and no writer can still change evidence |
-| cleanup evidence | Service stop, process absence, LSA recovery, temporary-resource cleanup and any failure |
+| parser result | Parser version/source identity, schema/column interpretation, row/timestamp/order checks, temporal coverage, and cadence checks |
+| package-power evidence | Package-power column, unit, recorded sample count, finite/non-negative checks, variation observation, all-zero observation, credibility classification, values, and units |
+| writer quiescence | Service/worker/AMD descendants stopped and no writer can still change sealed evidence |
 | ACL seal evidence | Before/after ACL records, exact Q2 SID write removal, no account-wide LocalService write |
-| evidence manifest | Relative paths, sizes, SHA-256 values, and excluded summary rules |
+| raw evidence manifest | Relative paths, sizes, SHA-256 values, and explicit summary exclusion rules |
 | SHA256 manifest verification | Independent post-seal hash verification and result |
-| final residue | Exact Q2 service/process/LSA/ACL/run-root residue and unrelated-state non-interference |
-| summary | Final classification, scientific result, operational cleanup result, invocation accounting, and limitations |
 
-Raw live evidence must be made immutable after sealing. Evidence capture,
-manifest generation, and cleanup must not overwrite or delete the protected
-Q1 evidence root or any unrelated qualification root.
+Raw live experiment evidence must be immutable after sealing. Evidence capture,
+manifest generation, and cleanup must not overwrite or delete the protected Q1
+evidence root or any unrelated qualification root.
+
+### Post-seal closure and summary evidence
+
+After raw writer quiescence and raw sealing, the controller may record the
+service registration deletion result, final residue scan, cleanup closure,
+final scientific/operational classification, and limitations. These are
+post-seal closure facts, not retroactive raw experiment evidence. If they live
+under `summary/*`, that path is explicitly excluded from the raw manifest:
+
+    RAW_MANIFEST_COVERAGE != POST_SEAL_CLOSURE_SUMMARY
+
+The post-seal summary must reference the immutable raw-manifest hash and must
+not claim that every final closure file is covered by that earlier manifest.
+Post-seal closure evidence must include:
+
+| Evidence | Required content |
+| --- | --- |
+| cleanup closure | Service stop/deletion result, process absence, LSA recovery result, temporary-resource cleanup, and failures |
+| final residue | Exact Q2 service/process/LSA/ACL/run-root residue and unrelated-state non-interference |
+| summary | Final classification, scientific result, operational result, invocation accounting, raw-manifest reference, and limitations |
 
 ## Invocation accounting
 
 Q2 gate accounting is separate from AMD invocation accounting:
 
-    Q2_GATE_CONSUMED = YES
+For a future run whose exact Q2 gate record is durably `CONSUMED`, the
+controller must classify the invocation from durable launch evidence and the
+source-reviewed controller state machine. Gate consumption alone is never an
+AMD invocation.
+
+| Invocation state | Required evidence | AMD_CLI_REAL_INVOCATIONS | POWER_SAMPLING_RUNS | INVOCATION_CERTAINTY |
+| --- | --- | --- | --- | --- |
+| `NOT_ATTEMPTED` | `gate_consumed = YES`; durable launch intent is absent; trusted, durable, source-reviewed controller lifecycle evidence proves the launch stage was never entered; durable launch-started evidence is absent | `0` | `0` | `CONFIRMED_ZERO` |
+| `START_FAILED` | Valid exact launch intent exists; valid exact mutually-exclusive launch-start-failed successor exists; no valid launch-started successor exists | `0` | `0` | `CONFIRMED_ZERO` |
+| `AMBIGUOUS_0_OR_1` | Launch intent exists, but a successor is missing, corrupt, contradictory, or identity-mismatched; numeric zero is forbidden | `UNKNOWN_0_OR_1` | `UNKNOWN_0_OR_1` | `AMBIGUOUS_0_OR_1` |
+| `CONFIRMED_ONE` | `Process.Start` succeeded or trusted durable launch-started evidence exists, even if later runtime, capture, parsing, cleanup, or summary fails | `1` | `1` | `CONFIRMED_ONE` |
+
+`NOT_ATTEMPTED` is valid even though the consumed gate was placed at
+`POST_PREFLIGHT_PRE_STAGING`: service setup, Service SID, ACL, LSA, or token
+validation may block before the launch stage, with no launch intent ever
+written. The controller lifecycle proof must come from a trusted durable,
+source-reviewed state machine/evidence record; absence of a file by itself is
+not proof of zero.
+
+`START_FAILED` requires the exact successor because a durable launch intent
+means the launch decision was reached. If both launch successors appear, or
+either successor contradicts the exact command identity, preserve the evidence
+conflict and classify `BLOCKED/HARNESS_FAILURE`; never normalize it to zero or
+retry.
+
+The current design task itself has no Q2 gate and no invocation:
+
+    Q2_GATE_CREATED = NO
+    Q2_GATE_CONSUMED = NO
     AMD_CLI_REAL_INVOCATIONS = 0
-    INVOCATION_CERTAINTY = CONFIRMED_ZERO
+    POWER_SAMPLING_RUNS = 0
+
+For every future consumed-gate outcome:
+
     SECOND_RUN_FORBIDDEN = YES
+    Q2_RERUN_ALLOWED = NO
 
-The three certainty states are:
-
-| State | Meaning |
-| --- | --- |
-| CONFIRMED_ZERO | Gate was consumed, no durable launch-started evidence exists, and a valid exact launch-start-failed successor proves Process.Start did not succeed |
-| AMBIGUOUS_0_OR_1 | Durable launch intent exists but successor evidence is missing, corrupt, contradictory, or not exact enough to prove whether Process.Start succeeded; numeric zero is forbidden |
-| CONFIRMED_ONE | Process.Start succeeded or durable launch-started evidence exists, even if later capture, parsing, cleanup, or summary fails |
-
-If both launch successors appear, the evidence conflict is preserved and the
-classification is BLOCKED/HARNESS_FAILURE; it must not be normalized into a
-zero or a retry. A consumed Q2 gate never implies that AMD was invoked, and
-zero invocation evidence never reopens the gate.
+A consumed Q2 gate never implies that AMD was invoked, and zero invocation
+evidence never reopens the gate. `AMD_INVOCATION_ZERO != GATE_AVAILABLE`.
 
 ## Scientific pass criteria
 
@@ -556,16 +646,53 @@ only when all of the following are true:
     SERVICE_CONTEXT = PASS
     TOKEN_CONTRACT = PASS
     FROZEN_COMMAND = PASS
+    INVOCATION_CERTAINTY = CONFIRMED_ONE
     PROCESS_STARTED = YES
+    PROCESS_COMPLETED = YES
+    PROCESS_TIMEOUT = NO
+    PROCESS_CANCELLED = NO
+    PROCESS_EXIT_CODE = 0
+    SUCCESS_EXIT_CODE_CONTRACT = 0; no alternate code is registered
+    PROCESS_COMPLETION_REQUIRED_FOR_PASS = YES
+    STDOUT_CAPTURE_COMPLETE = YES
+    STDERR_CAPTURE_COMPLETE = YES
+    PROCESS_RESULT_DURABLE = YES
+    PROCESS_OWNERSHIP_PID_VALID = YES
+    NO_LAUNCH_ACCOUNTING_AMBIGUITY = YES
+    VENDOR_OUTPUT_BELONGS_TO_EXACT_RUN = YES
     CSV_FOUND = YES
     CSV_PARSE_STATUS = PASS
-    PACKAGE_POWER_SAMPLE_COUNT >= 2
+    PACKAGE_POWER_COLUMN_IDENTIFIED = YES
+    PACKAGE_POWER_UNIT_VALID = YES
     PACKAGE_POWER_VALUES_FINITE = YES
     PACKAGE_POWER_VALUES_NON_NEGATIVE = YES
-    PACKAGE_POWER_VALUES_NON_CONSTANT = YES
+    TIMESTAMP_OR_SAMPLE_ORDER_VALID = YES
+    TEMPORAL_COVERAGE_COMPATIBLE_WITH_FROZEN_COMMAND = YES
+    SAMPLE_CADENCE_COMPATIBLE_WITH_1000MS_REQUEST = YES
+    PACKAGE_POWER_SIGNAL_CREDIBILITY = PASS
+
+`PACKAGE_POWER_SAMPLE_COUNT` and `PACKAGE_POWER_VARIATION_OBSERVED` are
+recorded observations, not invented hard gates:
+
+    PACKAGE_POWER_SAMPLE_COUNT = RECORDED_OBSERVATION
+    PACKAGE_POWER_VARIATION_OBSERVED = YES | NO
+    PACKAGE_POWER_VALUES_ALL_ZERO = YES | NO
+    NON_CONSTANT_REQUIRED_FOR_PASS = NO
+
+The parser must use the historically validated output shape for the frozen
+10-second/1000-ms CSV command and a bounded temporal/cadence tolerance that is
+registered and covered by offline fixtures before implementation. It must not
+require exactly 10 rows, and the tolerance cannot be selected or widened after
+Live output is seen. Finite/non-negative numeric data is distinct from a
+credible package-power signal: an all-zero series is recorded separately and
+is classified only by the preregistered vendor/output credibility semantics.
+All values being equal, by itself, is not a scientific failure.
 
 The process result, raw output, parser, package-power evidence, writer
-quiescence, ACL seal, manifest, and cleanup records must still be retained.
+quiescence, ACL seal, raw manifest/hash verification, and post-seal closure
+records must still be retained. A clean process completion is mandatory for
+scientific PASS; partial CSV output cannot promote a timeout, cancellation, or
+non-zero exit into PASS.
 A cleanup failure remains an independent operational failure even if the
 scientific result is otherwise established; it cannot be hidden by a PASS.
 
@@ -590,13 +717,22 @@ scientific context never became valid because of any of:
     harness, persistence, parser, manifest, ACL, or evidence-chain failure
 
 Use scientific FAIL only when the exact LocalService Session-0 CONTROL
-context is established, AMD invocation is validly reached, and trustworthy
-vendor runtime/output evidence demonstrates failure of the bounded
-package-power question. Examples include a valid completed invocation whose
-authoritative output reports no package-power capability, or a valid
-package-power result that fails the preregistered scientific criteria. Missing
-output caused by a harness defect, corrupt evidence, or ambiguous launch is
-not scientific FAIL.
+context is established, AMD invocation is validly reached, process/runtime/
+vendor evidence is trustworthy, and that evidence demonstrates failure of the
+preregistered bounded package-power question. Examples include a clean
+vendor completion that explicitly reports unsupported/unavailable capability,
+authoritative output with no package-power capability under the preregistered
+semantics, or trustworthy output that fails a preregistered scientific
+credibility condition such as the separately frozen all-zero rule.
+
+A timeout after a confirmed launch remains `CONFIRMED_ONE` for invocation
+accounting, but it cannot be scientific PASS. If trustworthy vendor/runtime
+evidence establishes that the bounded question failed, it may be scientific
+FAIL; if timeout ownership, capture, process result, or evidence persistence
+is a harness defect or cannot establish a trustworthy vendor outcome, it is
+`BLOCKED/HARNESS_FAILURE` with `SCIENTIFIC_RESULT = NOT_OBTAINED`. Partial CSV
+output never upgrades a timeout to PASS. Missing output caused by a harness
+defect, corrupt evidence, or ambiguous launch is not scientific FAIL.
 
 Cleanup failure is always separately visible as an operational failure. The
 run must not be upgraded to PASS, retried, or repaired and rerun because
@@ -724,13 +860,21 @@ root or gate was created.
 
     Q2_JUSTIFIED = YES
     Q2_DESIGN_READY = YES
+    Q2_HARNESS_IMPLEMENTATION_READY = YES
     Q2_LIVE_AUTHORIZED = NO
     REAL_EXECUTION_ALLOWED = false
-    NEXT_GATE = HUMAN_REVIEW_Q2_DESIGN
+    Q2_GATE_CREATED = NO
+    Q2_GATE_CONSUMED = NO
+    PR30_DESIGN_HEAD = e3d5c5a7c9198ea4ce42c1fe46c9444bdc359b57
+    PR30_DESIGN_HEAD_STANDALONE_AUTHORIZATION = FORBIDDEN
+    NEXT_GATE = HUMAN_REVIEW_Q2_DESIGN_CLOSURE
     DESIGN_DOC = docs/upgrade/amd-localservice-active-sampling-q2-design-q1.md
-    EXECUTION_PLAN_UPDATED = YES; additive current-state marker only
+    CLOSURE_DOC = docs/upgrade/amd-localservice-active-sampling-q2-design-review-closure.md
+    EXECUTION_PLAN_UPDATED = YES; additive/superseding current-state marker only
     PRODUCTION_ADMISSION = DEFER
 
-This document is ready for human review. The next permitted project action
-after review is a separately scoped Q2 harness implementation decision. No
-implementation, live gate, authorization, or Q2 service is created here.
+This contract is ready to enter a separately scoped Q2 harness implementation
+review. `Q2_HARNESS_IMPLEMENTATION_READY = YES` means only that the corrected
+design can enter implementation; it never means `Q2_LIVE_AUTHORIZED = YES`.
+No implementation, live gate, authorization token/environment marker, AMD
+invocation, or Q2 service is created here.

@@ -2768,3 +2768,61 @@ The Q2 design is an independent, one-shot operation-path experiment. Its
 future gate, output base, service name/Service SID, source identity, and
 authorization must be new. The Q2 controller must not inspect or alter the
 Q1 gate, and no Q2 gate is created by this design.
+
+## Current-state additive marker: AMD LocalService active-sampling Q2 design-review closure
+
+This marker supersedes the Q2 design's current implementation handoff after
+the post-merge human review of PR #30. It is additive: the PR #30 history and
+the immutable Q1/I2G markers above remain unchanged. It records a corrected
+design contract only; it does not create or consume a gate, authorize Live, or
+permit real execution.
+
+~~~text
+AMD_LOCALSERVICE_ACTIVE_SAMPLING_Q2_DESIGN_REVIEW_CLOSURE = PASS
+PR30_DESIGN_REVIEWED = YES
+PR30_DESIGN_HEAD = e3d5c5a7c9198ea4ce42c1fe46c9444bdc359b57
+PR30_DESIGN_HEAD_STANDALONE_AUTHORIZATION = FORBIDDEN
+REVIEW_FINDING_INVOCATION_ACCOUNTING = FIXED
+REVIEW_FINDING_DYNAMIC_TOKEN_GROUPS = FIXED
+REVIEW_FINDING_PROCESS_COMPLETION_PASS_GATE = FIXED
+REVIEW_FINDING_SAMPLE_VARIATION_GATE = FIXED
+Q2_DESIGN_READY = YES
+Q2_HARNESS_IMPLEMENTATION_READY = YES
+Q2_IS_NEW_EXPERIMENT = YES
+Q2_GATE_INDEPENDENT = YES
+Q2_MAX_RUNS = 1
+Q2_RETRIES = 0
+Q2_RERUN_ALLOWED = NO
+Q2_LIVE_AUTHORIZED = NO
+REAL_EXECUTION_ALLOWED = false
+Q2_GATE_CREATED = NO
+Q2_GATE_CONSUMED = NO
+AMD_CLI_REAL_INVOCATIONS = 0
+AMD_API_REAL_INVOCATIONS = 0
+POWER_SAMPLING_RUNS = 0
+Q1_GATE_IMMUTABLE = YES
+Q1_LIVE_RETIRED = YES
+Q1_RERUN_ALLOWED = NO
+Q1_AUTHORIZATION_REUSE = FORBIDDEN
+I2G_ATTEMPT4 = NO
+I2H_JUSTIFIED_BEFORE_Q2 = NO
+AMD_PRODUCTION_ADMISSION = DEFER
+PRODUCTION_ACCOUNT = UNRESOLVED
+Q1_GATE_CHANGED = NO
+HISTORICAL_RAW_EVIDENCE_CHANGED = NO
+I2G_REAL_GATE_CHANGED = NO
+CURRENT_TASK_SERVICE_MUTATIONS = 0
+CURRENT_TASK_LSA_MUTATIONS = 0
+CURRENT_TASK_TOKEN_MUTATIONS = 0
+CURRENT_TASK_ACL_MUTATIONS = 0
+CURRENT_TASK_DEVICE_MUTATIONS = 0
+CURRENT_TASK_DRIVER_MUTATIONS = 0
+CURRENT_TASK_PLATFORM_SECURITY_MUTATIONS = 0
+SELECTED_NEXT_TASK = AMD-LOCALSERVICE-ACTIVE-SAMPLING-Q2-HARNESS-I1
+NEXT_GATE = HUMAN_REVIEW_Q2_HARNESS_IMPLEMENTATION
+CURRENT_STATE_DOCUMENT =
+  docs/upgrade/amd-localservice-active-sampling-q2-design-review-closure.md
+~~~
+
+`Q2_HARNESS_IMPLEMENTATION_READY = YES` means only that the corrected design
+may enter implementation review. It never means `Q2_LIVE_AUTHORIZED = YES`.
