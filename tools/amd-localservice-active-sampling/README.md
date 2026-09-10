@@ -7,18 +7,33 @@ collector, provider, installer, broker, or Rust runtime component.
 Current state:
 
 ~~~text
-HARNESS_IMPLEMENTATION = PREFLIGHT_FIX_I1_COMPLETE
-Q1_LIVE_RUN = PENDING_HUMAN_REVIEW
+HARNESS_IMPLEMENTATION = Q1_POSTMORTEM_FIX_I1_COMPLETE
+Q1_LIVE_RUN = CLOSED_BLOCKED_BY_HARNESS_VALIDATION_BUG
 Q1_LIVE_RUN_AUTHORIZED = NO
-PREVIOUS_REVIEWED_HEAD = 3ff66c258ffb2f6aafe64790abbd7287b70ddc4e
-PREVIOUS_AUTHORIZATION_REUSABLE = NO
-Q1_GATE_CONSUMED = NO
+HISTORICAL_Q1_RUN = q1-20260910T033830222Z-678c32a876384801a337d08f706bf994
+Q1_GATE_CONSUMED = YES
 LIVE_RUNS_COMPLETED = 0
-Q1_RUN_BUDGET_REMAINING = 1
-FIRST_LIVE_RUN_STILL_AVAILABLE = YES
-AMD_CLI_REAL_INVOCATIONS_DURING_IMPLEMENTATION = 0
-POWER_SAMPLING_RUNS_DURING_IMPLEMENTATION = 0
+Q1_RUN_BUDGET_REMAINING = 0
+Q1_RERUN_ALLOWED = NO
+AMD_CLI_REAL_INVOCATIONS_DURING_POSTMORTEM = 0
+POWER_SAMPLING_RUNS_DURING_POSTMORTEM = 0
 ~~~
+
+The single historical Q1 attempt is permanently closed. It reached the live
+preflight and created the temporary service, but was blocked before LSA
+materialization by a false-negative validation result. The sealed read evidence
+showed `status = READ`, an absent Q1 Service SID right, and no attempted LSA
+mutation. The historical classification is therefore
+`BLOCKED_BY_HARNESS_VALIDATION_BUG`, not `PASS`, `FAIL`, or
+`POWER_UNAVAILABLE`. The Q1 gate remains consumed and the run cannot be rerun.
+
+The postmortem fix makes nested LSA evidence access safe for
+`IDictionary`/`[ordered]` values as well as property-backed and JSON-deserialized
+objects. It also takes Q1 gate consumption from authoritative gate evidence,
+independently of AMD launch evidence. A consumed gate with zero AMD invocations
+is valid historical accounting; zero invocation evidence does not reopen the
+gate. See `docs/upgrade/amd-localservice-active-sampling-q1-postmortem-fix-i1.md`
+for the frozen historical classification and replay boundary.
 
 ## Files and responsibilities
 

@@ -1537,11 +1537,12 @@ function Get-RuntimeFailureCategory {
     param(
         [AllowNull()]$ProcessResult,
         [AllowNull()]$PowerEvidence,
-        [string]$RunRoot
+        [string]$RunRoot,
+        [AllowNull()][object]$Q1GateEvidence
     )
 
     if (-not [string]::IsNullOrWhiteSpace($RunRoot)) {
-        $accounting = Get-InvocationAccounting -ProcessResult $ProcessResult -RunRoot $RunRoot
+        $accounting = Get-InvocationAccounting -ProcessResult $ProcessResult -RunRoot $RunRoot -Q1GateEvidence $Q1GateEvidence
         if ([string]$accounting.invocation_certainty -ceq 'AMBIGUOUS') { return 'INVOCATION_AMBIGUOUS' }
     }
     if ($null -eq $ProcessResult) { return 'HARNESS_FAILURE' }
@@ -1591,12 +1592,13 @@ function Get-ResultClassification {
     param(
         [Parameter(Mandatory = $true)]$ServiceResult,
         [Parameter(Mandatory = $true)]$PowerEvidence,
-        [string]$RunRoot
+        [string]$RunRoot,
+        [AllowNull()][object]$Q1GateEvidence
     )
 
     $invocationAccounting = Get-ContractPropertyValue -Object $ServiceResult -Name 'invocation_accounting'
     if ($null -eq $invocationAccounting) {
-        $invocationAccounting = Get-InvocationAccounting -ProcessResult $ServiceResult.process_result -RunRoot $RunRoot
+        $invocationAccounting = Get-InvocationAccounting -ProcessResult $ServiceResult.process_result -RunRoot $RunRoot -Q1GateEvidence $Q1GateEvidence
     }
     if ([string]$invocationAccounting.invocation_certainty -ceq 'AMBIGUOUS') {
         return 'INVOCATION_AMBIGUOUS'
@@ -1614,12 +1616,31 @@ function Get-ResultClassification {
     if ($ServiceResult.process_result.harness_failed) { return 'HARNESS_FAILED' }
     if (-not $ServiceResult.process_result.process_started) { return 'LAUNCH_FAILURE' }
     if ($ServiceResult.process_result.target_exit_signed -ne 0) {
-        return Get-RuntimeFailureCategory -ProcessResult $ServiceResult.process_result -PowerEvidence $PowerEvidence -RunRoot $RunRoot
+        return Get-RuntimeFailureCategory -ProcessResult $ServiceResult.process_result -PowerEvidence $PowerEvidence -RunRoot $RunRoot -Q1GateEvidence $Q1GateEvidence
     }
     if ($PowerEvidence.status -eq 'PASS') { return 'PASS_BOUNDED_PACKAGE_POWER' }
     if ($PowerEvidence.parser_status -eq 'COUNTER_UNAVAILABLE') { return 'POWER_UNAVAILABLE' }
     if ($PowerEvidence.parser_status -eq 'PARSE_FAILED') { return 'PARSE_FAILED' }
     'OUTPUT_ARTIFACT_MISSING'
+}
+
+function Get-Q1LiveGateAccountingEvidence {
+    param(
+        [Parameter(Mandatory = $true)]$Contract,
+        [AllowNull()]$AcquiredGate
+    )
+
+    # The gate file is authoritative for one-shot accounting.  Keep the
+    # in-memory acquisition record as a fallback for the narrow interval in
+    # which the file may be temporarily unreadable after CreateNew succeeds.
+    $observed = Get-Q1GateState -Contract $Contract
+    if ($null -ne $observed -and [string]$observed.state -eq 'ALREADY_CONSUMED') {
+        return $observed
+    }
+    if ($null -ne $AcquiredGate) {
+        return $AcquiredGate
+    }
+    $observed
 }
 
 function Invoke-OfflineDryRun {
@@ -1949,6 +1970,7 @@ function Invoke-LiveRun {
         }
     }
     $powerEvidence = Test-PackagePowerEvidence -Parsed $parsedCsv
+    $gateAccountingEvidence = Get-Q1LiveGateAccountingEvidence -Contract $Contract -AcquiredGate $gate
     $classification = 'BLOCKED'
     if (($null -ne $cleanup -and -not $cleanup.cleanup_verified) -or
         ($null -ne $lsaCleanup -and -not $lsaCleanup.cleanup_verified) -or
@@ -1957,7 +1979,7 @@ function Invoke-LiveRun {
         $classification = 'HARNESS_CLEANUP_FAILED'
     }
     elseif ($null -ne $serviceResult) {
-        $classification = Get-ResultClassification -ServiceResult $serviceResult -PowerEvidence $powerEvidence -RunRoot $runRoot
+        $classification = Get-ResultClassification -ServiceResult $serviceResult -PowerEvidence $powerEvidence -RunRoot $runRoot -Q1GateEvidence $gateAccountingEvidence
     }
     $residue = Get-ResidualEvidence -Contract $Contract -RunRoot $runRoot
     $finalInventory = @()
@@ -1968,7 +1990,7 @@ function Invoke-LiveRun {
     if ($null -ne $serviceResult) {
         $runtimeProcessResult = $serviceResult.process_result
     }
-    $invocationAccounting = Get-InvocationAccounting -ProcessResult $runtimeProcessResult -RunRoot $runRoot
+    $invocationAccounting = Get-InvocationAccounting -ProcessResult $runtimeProcessResult -RunRoot $runRoot -Q1GateEvidence $gateAccountingEvidence
     $lsaAccounting = Get-Q1LsaMutationAccounting -RunRoot $runRoot
     $summary = [ordered]@{
         schema = 'amd-localservice-active-sampling-q1/summary/v1'
@@ -1981,7 +2003,7 @@ function Invoke-LiveRun {
         service_definition = $serviceDefinition
         service_started = $serviceStarted
         service_result = $serviceResult
-        runtime_failure_category = Get-RuntimeFailureCategory -ProcessResult $runtimeProcessResult -PowerEvidence $powerEvidence -RunRoot $runRoot
+        runtime_failure_category = Get-RuntimeFailureCategory -ProcessResult $runtimeProcessResult -PowerEvidence $powerEvidence -RunRoot $runRoot -Q1GateEvidence $gateAccountingEvidence
         csv_validation = $parsedCsv
         power_evidence = $powerEvidence
         pre_service_cleanup = $preServiceCleanup
@@ -2001,6 +2023,7 @@ function Invoke-LiveRun {
         residue = $residue
         wrapper_error = $wrapperError
         gate = $gate
+        gate_accounting_evidence = $gateAccountingEvidence
         exact_command = Get-CanonicalCommandRecord -Contract $Contract -OutputDirectory (Join-Path $runRoot 'raw\timechart-output')
         max_runs = $Contract.max_runs
         retries = $Contract.retries

@@ -2626,3 +2626,48 @@ POWER_SAMPLING_RUNS = 0
 The previous authorization was bound to the pre-fix source identity and is not
 reusable. The first Q1 live run remains available, but only a new human review
 and new explicit authorization may advance it.
+
+## Current-state additive marker: AMD LocalService Q1 postmortem fix I1
+
+This marker supersedes the earlier preflight-readiness marker for the Q1
+current-state handoff. It records a postmortem harness repair after the single
+historical Q1 attempt. It does not reopen or authorize another run.
+
+~~~text
+AMD_LOCALSERVICE_ACTIVE_SAMPLING_Q1_POSTMORTEM_FIX_I1 = PASS
+PRIMARY_BUG = FIXED
+LSA_IDICTIONARY_VALIDATION = FIXED
+LSA_REAL_SHAPE_REGRESSION = PASS
+SEALED_Q1_LSA_BEFORE_REPLAY = PASS
+SECONDARY_BUG = FIXED
+Q1_GATE_ACCOUNTING = AUTHORITATIVE
+HISTORICAL_Q1_RESULT = BLOCKED_BY_HARNESS_VALIDATION_BUG
+HISTORICAL_Q1_GATE_STATE = CONSUMED
+Q1_GATE_CONSUMED = YES
+Q1_RUN_BUDGET_REMAINING = 0
+Q1_RERUN_ALLOWED = NO
+SCIENTIFIC_RESULT = NOT_OBTAINED
+PROXY_VERDICT = INSUFFICIENT
+ENUMERATION_AND_SAMPLING_EQUIVALENCE = UNKNOWN
+AMD_PRODUCTION_ADMISSION = DEFER
+PRODUCTION_ACCOUNT = UNRESOLVED
+I2H_JUSTIFIED = NO
+REAL_EXECUTION_ALLOWED = false
+AMD_CLI_REAL_INVOCATIONS = 0
+POWER_SAMPLING_RUNS = 0
+CURRENT_TASK_SERVICE_MUTATIONS = 0
+CURRENT_TASK_LSA_MUTATIONS = 0
+CURRENT_TASK_ACL_MUTATIONS = 0
+OLD_AUTHORIZATION_REUSABLE = NO
+NEW_LIVE_AUTHORIZATION_CREATED = NO
+SELECTED_NEXT_TASK = HUMAN_REVIEW_PR29_Q1_POSTMORTEM_FIX
+NEXT_GATE = HUMAN_REVIEW_PR29_Q1_POSTMORTEM_FIX
+CURRENT_STATE_DOCUMENT =
+  docs/upgrade/amd-localservice-active-sampling-q1-postmortem-fix-i1.md
+~~~
+
+The historical gate and run evidence were not modified. The postmortem fix
+corrects dictionary-shaped LSA validation and separates authoritative gate
+accounting from AMD invocation accounting; it makes no scientific claim about
+LocalService sampling. No AMD, service, LSA, ACL, token, driver, device, or
+platform-security operation was performed while creating this marker.

@@ -48,11 +48,11 @@ function Get-AmdLocalServiceSamplingContract {
         authorization_environment_value = 'GRANTED_FOR_NEW_REVIEWED_HEAD_ONLY'
         gate_file_name = 'Q1-LIVE-GATE.json'
         harness_identity_mode = 'SOURCE_SHA256_PINNED'
-        contract_canonical_sha256 = 'A143F69E901B1C727A59E01DEB46D94DDA8418F8C0FB53B128BA10A0A8D0C45C'
+        contract_canonical_sha256 = 'BBCC0D03E6816F020B893D11884AC84F609964B86C8F46BD7BD47D3873AC226E'
         harness_source_sha256 = [ordered]@{
-            contract = 'A143F69E901B1C727A59E01DEB46D94DDA8418F8C0FB53B128BA10A0A8D0C45C'
-            runner = 'B90E1447F0980598485157ADD573C197979E41008A89916994D84204BE02F78A'
-            service_host = 'E4F1F8AE2F25C91E7B2EF43C1A47C5251BF7BFCE8AF203445CDF41A086456C3E'
+            contract = 'BBCC0D03E6816F020B893D11884AC84F609964B86C8F46BD7BD47D3873AC226E'
+            runner = 'D89C98BBC65FBC0B8F49A12A64E9936DCF3697053D0FB84B3525D89F3A4769B1'
+            service_host = '397AF1205D94B26F6A3B7DC4F158541B138AF69B507AD48E9B485ADE4CA9B3BA'
             sc_argument_contract = 'A238266DF382BFE2870E11ED40A14468EF7BCB58807D0F235D17C5A3C3F5E5FA'
             i2e_runtime_library = 'BC22E7599A64D61BC3B93351328B546656D1393EFABC87106630A86F43A71F08'
             i2e_service_profile_contract = '75CFE997C4F89E2162ECA28AA96655F1210E10574E2A33B3B1A25E26748F9468'
@@ -93,6 +93,12 @@ function Get-ContractPropertyValue {
     if ($null -eq $Object) {
         return $Default
     }
+    if ($Object -is [System.Collections.IDictionary]) {
+        if ($Object.Contains($Name)) {
+            return $Object[$Name]
+        }
+        return $Default
+    }
     $property = @($Object.PSObject.Properties | Where-Object Name -eq $Name | Select-Object -First 1)
     if ($property.Count -eq 1) {
         return $property[0].Value
@@ -108,12 +114,6 @@ function Get-Q1DictionaryValue {
     )
 
     if ($null -eq $Object) {
-        return $Default
-    }
-    if ($Object -is [System.Collections.IDictionary]) {
-        if ($Object.Contains($Name)) {
-            return $Object[$Name]
-        }
         return $Default
     }
     Get-ContractPropertyValue -Object $Object -Name $Name -Default $Default
@@ -442,7 +442,8 @@ function Test-Q1LaunchStartFailedEvidence {
 function Get-InvocationAccounting {
     param(
         [AllowNull()]$ProcessResult,
-        [string]$RunRoot
+        [string]$RunRoot,
+        [AllowNull()][object]$Q1GateEvidence
     )
 
     $launchIntentPath = $null
@@ -479,7 +480,14 @@ function Get-InvocationAccounting {
     $processStarted = [bool](Get-ContractPropertyValue -Object $ProcessResult -Name 'process_started' -Default $false)
     $invocationAttempted = [bool](Get-ContractPropertyValue -Object $ProcessResult -Name 'invocation_attempted' -Default $false)
     $samplingRuns = [int](Get-ContractPropertyValue -Object $ProcessResult -Name 'power_sampling_runs' -Default 0)
-    $gateConsumed = [bool](Get-ContractPropertyValue -Object $launchIntent -Name 'gate_consumed' -Default $false)
+    $q1GateState = $null
+    if ($Q1GateEvidence -is [string]) {
+        $q1GateState = [string]$Q1GateEvidence
+    }
+    elseif ($null -ne $Q1GateEvidence) {
+        $q1GateState = [string](Get-Q1DictionaryValue -Object $Q1GateEvidence -Name 'state')
+    }
+    $q1GateConsumed = $q1GateState -in @('CONSUMED', 'ALREADY_CONSUMED')
     $state = [string](Get-ContractPropertyValue -Object $ProcessResult -Name 'state' -Default $null)
     $evidenceConflict = $durableLaunchStarted -and $durableLaunchFailed
     if ($durableLaunchStarted -or $processStarted -or $invocationAttempted -or ($samplingRuns -gt 0)) {
@@ -523,8 +531,11 @@ function Get-InvocationAccounting {
         launch_intent_validation = $launchIntentValidation
         launch_failed_validation = $launchFailedValidation
         evidence_conflict = $evidenceConflict
-        gate_consumed = $gateConsumed -or $durableLaunchIntent
-        second_run_forbidden = ($gateConsumed -or $durableLaunchIntent)
+        q1_gate_state = if ([string]::IsNullOrWhiteSpace($q1GateState)) { 'NOT_PROVIDED' } else { $q1GateState }
+        q1_gate_state_source = if ($null -eq $Q1GateEvidence) { 'NOT_PROVIDED' } else { 'AUTHORITATIVE_GATE_EVIDENCE' }
+        q1_gate_evidence_supplied = ($null -ne $Q1GateEvidence)
+        gate_consumed = $q1GateConsumed
+        second_run_forbidden = $q1GateConsumed
         process_started = $started
         invocation_attempted = $count
         amd_cli_real_invocations = $count
@@ -735,17 +746,27 @@ function Test-Q1LsaBeforeMaterialization {
     )
 
     $failures = New-Object System.Collections.Generic.List[string]
-    $direct = Get-ContractPropertyValue -Object $Snapshot -Name 'direct'
-    $assignment = Get-ContractPropertyValue -Object $Snapshot -Name 'assignment'
-    if ([string](Get-ContractPropertyValue -Object $direct -Name 'status') -cne 'READ') {
+    $expectedServiceSid = Get-Q1CanonicalServiceSid -ServiceSid $ServiceSid
+    $snapshotServiceSid = Get-Q1CanonicalServiceSid -ServiceSid ([string](Get-Q1DictionaryValue -Object $Snapshot -Name 'service_sid'))
+    if ($null -eq $expectedServiceSid -or $null -eq $snapshotServiceSid -or $snapshotServiceSid -cne $expectedServiceSid) {
+        [void]$failures.Add('LSA before snapshot Service SID is missing or mismatched')
+    }
+    $direct = Get-Q1DictionaryValue -Object $Snapshot -Name 'direct'
+    $assignment = Get-Q1DictionaryValue -Object $Snapshot -Name 'assignment'
+    if ([string](Get-Q1DictionaryValue -Object $direct -Name 'status') -cne 'READ') {
         [void]$failures.Add('direct Service SID right snapshot is unavailable')
     }
-    if ([string](Get-ContractPropertyValue -Object $assignment -Name 'status') -cne 'READ') {
+    if ([string](Get-Q1DictionaryValue -Object $assignment -Name 'status') -cne 'READ') {
         [void]$failures.Add('user-right assignment snapshot is unavailable')
     }
-    $directRights = @((Get-ContractPropertyValue -Object $direct -Name 'direct_rights' -Default @()) |
+    $directSid = Get-Q1CanonicalServiceSid -ServiceSid ([string](Get-Q1DictionaryValue -Object $direct -Name 'account_sid'))
+    if (-not [string]::IsNullOrWhiteSpace([string](Get-Q1DictionaryValue -Object $direct -Name 'account_sid')) -and
+        ($null -eq $expectedServiceSid -or $null -eq $directSid -or $directSid -cne $expectedServiceSid)) {
+        [void]$failures.Add('direct Service SID right snapshot target mismatch')
+    }
+    $directRights = @((Get-Q1DictionaryValue -Object $direct -Name 'direct_rights' -Default @()) |
         ForEach-Object { [string]$_ })
-    $assigned = @((Get-ContractPropertyValue -Object $assignment -Name 'assigned_principals' -Default @()) |
+    $assigned = @((Get-Q1DictionaryValue -Object $assignment -Name 'assigned_principals' -Default @()) |
         ForEach-Object { [string]$_ })
     if ($directRights -contains $Right) {
         [void]$failures.Add('SeSystemProfilePrivilege already exists on the exact Service SID')
@@ -775,17 +796,27 @@ function Test-Q1LsaAfterMaterialization {
     )
 
     $failures = New-Object System.Collections.Generic.List[string]
-    $direct = Get-ContractPropertyValue -Object $Snapshot -Name 'direct'
-    $assignment = Get-ContractPropertyValue -Object $Snapshot -Name 'assignment'
-    if ([string](Get-ContractPropertyValue -Object $direct -Name 'status') -cne 'READ') {
+    $expectedServiceSid = Get-Q1CanonicalServiceSid -ServiceSid $ServiceSid
+    $snapshotServiceSid = Get-Q1CanonicalServiceSid -ServiceSid ([string](Get-Q1DictionaryValue -Object $Snapshot -Name 'service_sid'))
+    if ($null -eq $expectedServiceSid -or $null -eq $snapshotServiceSid -or $snapshotServiceSid -cne $expectedServiceSid) {
+        [void]$failures.Add('LSA after snapshot Service SID is missing or mismatched')
+    }
+    $direct = Get-Q1DictionaryValue -Object $Snapshot -Name 'direct'
+    $assignment = Get-Q1DictionaryValue -Object $Snapshot -Name 'assignment'
+    if ([string](Get-Q1DictionaryValue -Object $direct -Name 'status') -cne 'READ') {
         [void]$failures.Add('direct Service SID right readback is unavailable')
     }
-    if ([string](Get-ContractPropertyValue -Object $assignment -Name 'status') -cne 'READ') {
+    if ([string](Get-Q1DictionaryValue -Object $assignment -Name 'status') -cne 'READ') {
         [void]$failures.Add('user-right assignment readback is unavailable')
     }
-    $directRights = @((Get-ContractPropertyValue -Object $direct -Name 'direct_rights' -Default @()) |
+    $directSid = Get-Q1CanonicalServiceSid -ServiceSid ([string](Get-Q1DictionaryValue -Object $direct -Name 'account_sid'))
+    if (-not [string]::IsNullOrWhiteSpace([string](Get-Q1DictionaryValue -Object $direct -Name 'account_sid')) -and
+        ($null -eq $expectedServiceSid -or $null -eq $directSid -or $directSid -cne $expectedServiceSid)) {
+        [void]$failures.Add('direct Service SID right readback target mismatch')
+    }
+    $directRights = @((Get-Q1DictionaryValue -Object $direct -Name 'direct_rights' -Default @()) |
         ForEach-Object { [string]$_ })
-    $assigned = @((Get-ContractPropertyValue -Object $assignment -Name 'assigned_principals' -Default @()) |
+    $assigned = @((Get-Q1DictionaryValue -Object $assignment -Name 'assigned_principals' -Default @()) |
         ForEach-Object { [string]$_ })
     if ($directRights.Count -ne 1 -or $directRights[0] -cne $Right) {
         [void]$failures.Add('exact Service SID direct rights readback is not only SeSystemProfilePrivilege')
@@ -835,17 +866,27 @@ function Test-Q1LsaCleanupEvidence {
     )
 
     $failures = New-Object System.Collections.Generic.List[string]
-    $direct = Get-ContractPropertyValue -Object $Snapshot -Name 'direct'
-    $assignment = Get-ContractPropertyValue -Object $Snapshot -Name 'assignment'
-    if ([string](Get-ContractPropertyValue -Object $direct -Name 'status') -cne 'READ') {
+    $expectedServiceSid = Get-Q1CanonicalServiceSid -ServiceSid $ServiceSid
+    $snapshotServiceSid = Get-Q1CanonicalServiceSid -ServiceSid ([string](Get-Q1DictionaryValue -Object $Snapshot -Name 'service_sid'))
+    if ($null -eq $expectedServiceSid -or $null -eq $snapshotServiceSid -or $snapshotServiceSid -cne $expectedServiceSid) {
+        [void]$failures.Add('LSA cleanup snapshot Service SID is missing or mismatched')
+    }
+    $direct = Get-Q1DictionaryValue -Object $Snapshot -Name 'direct'
+    $assignment = Get-Q1DictionaryValue -Object $Snapshot -Name 'assignment'
+    if ([string](Get-Q1DictionaryValue -Object $direct -Name 'status') -cne 'READ') {
         [void]$failures.Add('direct Service SID cleanup readback is unavailable')
     }
-    if ([string](Get-ContractPropertyValue -Object $assignment -Name 'status') -cne 'READ') {
+    if ([string](Get-Q1DictionaryValue -Object $assignment -Name 'status') -cne 'READ') {
         [void]$failures.Add('user-right cleanup readback is unavailable')
     }
-    $directRights = @((Get-ContractPropertyValue -Object $direct -Name 'direct_rights' -Default @()) |
+    $directSid = Get-Q1CanonicalServiceSid -ServiceSid ([string](Get-Q1DictionaryValue -Object $direct -Name 'account_sid'))
+    if (-not [string]::IsNullOrWhiteSpace([string](Get-Q1DictionaryValue -Object $direct -Name 'account_sid')) -and
+        ($null -eq $expectedServiceSid -or $null -eq $directSid -or $directSid -cne $expectedServiceSid)) {
+        [void]$failures.Add('direct Service SID cleanup target mismatch')
+    }
+    $directRights = @((Get-Q1DictionaryValue -Object $direct -Name 'direct_rights' -Default @()) |
         ForEach-Object { [string]$_ })
-    $assigned = @((Get-ContractPropertyValue -Object $assignment -Name 'assigned_principals' -Default @()) |
+    $assigned = @((Get-Q1DictionaryValue -Object $assignment -Name 'assigned_principals' -Default @()) |
         ForEach-Object { [string]$_ })
     if ($directRights -contains $Right) {
         [void]$failures.Add('required right remains on the exact Service SID after cleanup')
@@ -922,8 +963,8 @@ function Get-Q1LsaRecoveryPlan {
 
     $failures = New-Object System.Collections.Generic.List[string]
     $expectedCanonicalSid = Get-Q1CanonicalServiceSid -ServiceSid $ExpectedServiceSid
-    $mutationAttempted = [bool](Get-ContractPropertyValue -Object $MutationStarted -Name 'mutation_attempted' -Default $false) -or
-        [string](Get-ContractPropertyValue -Object $MutationStarted -Name 'state' -Default $null) -eq 'MUTATION_ATTEMPTED'
+    $mutationAttempted = [bool](Get-Q1DictionaryValue -Object $MutationStarted -Name 'mutation_attempted' -Default $false) -or
+        [string](Get-Q1DictionaryValue -Object $MutationStarted -Name 'state' -Default $null) -eq 'MUTATION_ATTEMPTED'
     if (-not $mutationAttempted) {
         return [pscustomobject]@{
             valid = $true
@@ -942,40 +983,40 @@ function Get-Q1LsaRecoveryPlan {
     }
     if ($null -eq $Intent) { [void]$failures.Add('durable LSA mutation intent is missing') }
     if ($null -eq $Before) { [void]$failures.Add('durable LSA pre-mutation snapshot is missing') }
-    if ([string](Get-ContractPropertyValue -Object $Intent -Name 'task_id') -cne 'AMD-LOCALSERVICE-ACTIVE-SAMPLING-Q1') {
+    if ([string](Get-Q1DictionaryValue -Object $Intent -Name 'task_id') -cne 'AMD-LOCALSERVICE-ACTIVE-SAMPLING-Q1') {
         [void]$failures.Add('LSA mutation intent task id is not the Q1 task')
     }
-    if ([string](Get-ContractPropertyValue -Object $Intent -Name 'service_name') -cne $ExpectedServiceName) {
+    if ([string](Get-Q1DictionaryValue -Object $Intent -Name 'service_name') -cne $ExpectedServiceName) {
         [void]$failures.Add('LSA mutation intent service name mismatch')
     }
-    $intentSid = Get-Q1CanonicalServiceSid -ServiceSid ([string](Get-ContractPropertyValue -Object $Intent -Name 'service_sid'))
+    $intentSid = Get-Q1CanonicalServiceSid -ServiceSid ([string](Get-Q1DictionaryValue -Object $Intent -Name 'service_sid'))
     if ($null -eq $expectedCanonicalSid -or $intentSid -cne $expectedCanonicalSid) {
         [void]$failures.Add('LSA mutation intent Service SID mismatch')
     }
-    if ([string](Get-ContractPropertyValue -Object $Intent -Name 'right') -cne $ExpectedRight) {
+    if ([string](Get-Q1DictionaryValue -Object $Intent -Name 'right') -cne $ExpectedRight) {
         [void]$failures.Add('LSA mutation intent right mismatch')
     }
-    if ([string](Get-ContractPropertyValue -Object $Intent -Name 'target') -cne 'EXACT_Q1_SERVICE_SID_ONLY') {
+    if ([string](Get-Q1DictionaryValue -Object $Intent -Name 'target') -cne 'EXACT_Q1_SERVICE_SID_ONLY') {
         [void]$failures.Add('LSA mutation intent target is not the exact Q1 Service SID')
     }
-    if ([string](Get-ContractPropertyValue -Object $Intent -Name 'mutation_intent') -cne 'ADD_EXACT_RIGHT') {
+    if ([string](Get-Q1DictionaryValue -Object $Intent -Name 'mutation_intent') -cne 'ADD_EXACT_RIGHT') {
         [void]$failures.Add('LSA mutation intent is not ADD_EXACT_RIGHT')
     }
-    if ([string](Get-ContractPropertyValue -Object $Intent -Name 'ownership_before') -cne 'ABSENT' -or
-        -not [bool](Get-ContractPropertyValue -Object $Intent -Name 'right_absent_before' -Default $false)) {
+    if ([string](Get-Q1DictionaryValue -Object $Intent -Name 'ownership_before') -cne 'ABSENT' -or
+        -not [bool](Get-Q1DictionaryValue -Object $Intent -Name 'right_absent_before' -Default $false)) {
         [void]$failures.Add('durable pre-mutation evidence does not prove exact right absence')
     }
-    if ([string](Get-ContractPropertyValue -Object $Intent -Name 'cleanup_if_ambiguous') -cne 'REQUIRED') {
+    if ([string](Get-Q1DictionaryValue -Object $Intent -Name 'cleanup_if_ambiguous') -cne 'REQUIRED') {
         [void]$failures.Add('ambiguous LSA cleanup was not marked required')
     }
-    $startedSid = Get-Q1CanonicalServiceSid -ServiceSid ([string](Get-ContractPropertyValue -Object $MutationStarted -Name 'service_sid'))
-    $beforeSid = Get-Q1CanonicalServiceSid -ServiceSid ([string](Get-ContractPropertyValue -Object $Before -Name 'service_sid'))
-    $currentSid = Get-Q1CanonicalServiceSid -ServiceSid ([string](Get-ContractPropertyValue -Object $Current -Name 'service_sid'))
+    $startedSid = Get-Q1CanonicalServiceSid -ServiceSid ([string](Get-Q1DictionaryValue -Object $MutationStarted -Name 'service_sid'))
+    $beforeSid = Get-Q1CanonicalServiceSid -ServiceSid ([string](Get-Q1DictionaryValue -Object $Before -Name 'service_sid'))
+    $currentSid = Get-Q1CanonicalServiceSid -ServiceSid ([string](Get-Q1DictionaryValue -Object $Current -Name 'service_sid'))
     $serviceSidReadbackCanonical = Get-Q1CanonicalServiceSid -ServiceSid $ServiceSidReadback
     if ($null -eq $expectedCanonicalSid -or $startedSid -cne $expectedCanonicalSid -or
-        [string](Get-ContractPropertyValue -Object $MutationStarted -Name 'service_name') -cne $ExpectedServiceName -or
-        [string](Get-ContractPropertyValue -Object $MutationStarted -Name 'target') -cne 'EXACT_Q1_SERVICE_SID_ONLY' -or
-        [string](Get-ContractPropertyValue -Object $MutationStarted -Name 'right') -cne $ExpectedRight) {
+        [string](Get-Q1DictionaryValue -Object $MutationStarted -Name 'service_name') -cne $ExpectedServiceName -or
+        [string](Get-Q1DictionaryValue -Object $MutationStarted -Name 'target') -cne 'EXACT_Q1_SERVICE_SID_ONLY' -or
+        [string](Get-Q1DictionaryValue -Object $MutationStarted -Name 'right') -cne $ExpectedRight) {
         [void]$failures.Add('LSA mutation-started evidence target mismatch')
     }
     if ($null -eq $expectedCanonicalSid -or $beforeSid -cne $expectedCanonicalSid) {
@@ -995,16 +1036,16 @@ function Get-Q1LsaRecoveryPlan {
             foreach ($failure in @($beforeGate.failures)) { [void]$failures.Add([string]$failure) }
         }
     }
-    $currentDirect = Get-ContractPropertyValue -Object $Current -Name 'direct'
-    $currentAssignment = Get-ContractPropertyValue -Object $Current -Name 'assignment'
-    $currentDirectStatus = [string](Get-ContractPropertyValue -Object $currentDirect -Name 'status')
-    $currentAssignmentStatus = [string](Get-ContractPropertyValue -Object $currentAssignment -Name 'status')
+    $currentDirect = Get-Q1DictionaryValue -Object $Current -Name 'direct'
+    $currentAssignment = Get-Q1DictionaryValue -Object $Current -Name 'assignment'
+    $currentDirectStatus = [string](Get-Q1DictionaryValue -Object $currentDirect -Name 'status')
+    $currentAssignmentStatus = [string](Get-Q1DictionaryValue -Object $currentAssignment -Name 'status')
     if ($currentDirectStatus -cne 'READ' -or $currentAssignmentStatus -cne 'READ') {
         [void]$failures.Add('current LSA readback is unavailable')
     }
-    $currentDirectRights = @((Get-ContractPropertyValue -Object $currentDirect -Name 'direct_rights' -Default @()) |
+    $currentDirectRights = @((Get-Q1DictionaryValue -Object $currentDirect -Name 'direct_rights' -Default @()) |
         ForEach-Object { [string]$_ })
-    $currentAssigned = @((Get-ContractPropertyValue -Object $currentAssignment -Name 'assigned_principals' -Default @()) |
+    $currentAssigned = @((Get-Q1DictionaryValue -Object $currentAssignment -Name 'assigned_principals' -Default @()) |
         ForEach-Object { [string]$_ })
     $unexpected = @($currentDirectRights | Where-Object { $_ -cne $ExpectedRight })
     if ($unexpected.Count -ne 0) {

@@ -686,7 +686,7 @@ function Invoke-ServiceWorker {
     Write-JsonAtomic -Path $statePath -Value ([ordered]@{ state = 'SAMPLING_ATTEMPTED_ONCE'; at_utc = [DateTime]::UtcNow.ToString('o') })
     $processResult = Invoke-BoundedAmdCli -Manifest $Manifest -RunRoot $runRoot
     Write-JsonAtomic -Path (Join-Path $rawRoot 'process-result.json') -Value $processResult
-    $invocationAccounting = Get-InvocationAccounting -ProcessResult $processResult -RunRoot $runRoot
+    $invocationAccounting = Get-InvocationAccounting -ProcessResult $processResult -RunRoot $runRoot -Q1GateEvidence (Get-Q1DictionaryValue -Object $Manifest -Name 'gate')
     $inventory = @(Get-OutputInventory -Root $runRoot)
     $result = [ordered]@{
         schema = 'amd-localservice-active-sampling-q1/service-result/v1'

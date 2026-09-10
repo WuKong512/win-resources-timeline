@@ -255,17 +255,68 @@ $driftContract.harness_source_sha256.runner = ('0' * 64)
 $driftIdentity = Test-HarnessSourceIdentity -Root $ToolRoot -Contract $driftContract
 Assert-True -Condition (-not $driftIdentity.valid) -Message 'harness source/checkpoint drift must block'
 
-$lsaSid = $expectedServiceSid
-$differentServiceSidFixture = 'S-1-5-80-9999999999-8888888888-7777777777-6666666666-5555'
-$lsaBefore = [pscustomobject]@{
+$lsaSid = 'S-1-5-80-3346365147-1215615911-2069952304-2985730531-3677249097'
+$differentServiceSidFixture = 'S-1-5-80-3000000001-3000000002-3000000003-3000000004-3000000005'
+$lsaBefore = [ordered]@{
+    schema = 'amd-localservice-active-sampling-q1/lsa-snapshot/v1'
+    label = 'BEFORE_Q1_MATERIALIZATION'
     service_sid = $lsaSid
-    direct = [pscustomobject]@{ status = 'READ'; direct_rights = @() }
+    right = $contract.allowed_lsa_right
+    direct = [ordered]@{
+        label = 'BEFORE_Q1_MATERIALIZATION'
+        account_sid = $lsaSid
+        direct_rights = @()
+        account_object_state = 'ABSENT'
+        status = 'READ'
+        source = 'LsaEnumerateAccountRights (read-only)'
+    }
+    assignment = [ordered]@{
+        right = $contract.allowed_lsa_right
+        assigned_principals = @(
+            'S-1-5-32-544'
+            'S-1-5-80-3139157870-2983391045-3678747466-658725712-1809340420'
+        )
+        status = 'READ'
+        source = 'LsaEnumerateAccountsWithUserRight (read-only)'
+    }
+}
+$lsaBeforeGate = Test-Q1LsaBeforeMaterialization -Snapshot $lsaBefore -ServiceSid $lsaSid -Right $contract.allowed_lsa_right
+Assert-True -Condition $lsaBeforeGate.valid -Message 'real I2E-shaped ordered LSA before snapshot validates'
+Assert-True -Condition $lsaBeforeGate.right_absent_before -Message 'real I2E-shaped ordered LSA before snapshot proves right absence'
+Assert-Equal -Actual (Get-Q1DictionaryValue -Object $lsaBefore.direct -Name 'status') -Expected 'READ' -Message 'ordered direct LSA status is read'
+Assert-Equal -Actual (Get-Q1DictionaryValue -Object $lsaBefore.assignment -Name 'status') -Expected 'READ' -Message 'ordered assignment LSA status is read'
+$lsaBeforeJson = $lsaBefore | ConvertTo-Json -Depth 20 | ConvertFrom-Json
+$lsaBeforeJsonGate = Test-Q1LsaBeforeMaterialization -Snapshot $lsaBeforeJson -ServiceSid $lsaSid -Right $contract.allowed_lsa_right
+Assert-True -Condition $lsaBeforeJsonGate.valid -Message 'JSON-deserialized LSA before snapshot validates'
+Assert-True -Condition $lsaBeforeJsonGate.right_absent_before -Message 'JSON-deserialized LSA before snapshot proves right absence'
+$lsaBeforeProperty = [pscustomobject]@{
+    service_sid = $lsaSid
+    direct = [pscustomobject]@{ account_sid = $lsaSid; status = 'READ'; direct_rights = @() }
     assignment = [pscustomobject]@{ status = 'READ'; assigned_principals = @() }
 }
-$lsaAfter = [pscustomobject]@{
+$lsaBeforePropertyGate = Test-Q1LsaBeforeMaterialization -Snapshot $lsaBeforeProperty -ServiceSid $lsaSid -Right $contract.allowed_lsa_right
+Assert-True -Condition $lsaBeforePropertyGate.valid -Message 'PSCustomObject LSA before snapshot validates'
+$lsaBeforeHashtable = @{
     service_sid = $lsaSid
-    direct = [pscustomobject]@{ status = 'READ'; direct_rights = @('SeSystemProfilePrivilege') }
-    assignment = [pscustomobject]@{ status = 'READ'; assigned_principals = @($lsaSid) }
+    direct = @{
+        account_sid = $lsaSid
+        status = 'READ'
+        direct_rights = @()
+    }
+    assignment = @{
+        status = 'READ'
+        assigned_principals = @()
+    }
+}
+$lsaBeforeHashtableGate = Test-Q1LsaBeforeMaterialization -Snapshot $lsaBeforeHashtable -ServiceSid $lsaSid -Right $contract.allowed_lsa_right
+Assert-True -Condition $lsaBeforeHashtableGate.valid -Message 'Hashtable LSA before snapshot validates'
+$lsaAfter = [ordered]@{
+    schema = 'amd-localservice-active-sampling-q1/lsa-snapshot/v1'
+    label = 'AFTER_Q1_MATERIALIZATION'
+    service_sid = $lsaSid
+    right = $contract.allowed_lsa_right
+    direct = [ordered]@{ account_sid = $lsaSid; status = 'READ'; direct_rights = @($contract.allowed_lsa_right) }
+    assignment = [ordered]@{ right = $contract.allowed_lsa_right; status = 'READ'; assigned_principals = @($lsaSid) }
 }
 $lsaDecision = Get-Q1LsaMaterializationDecision -Before $lsaBefore -After $lsaAfter -ServiceSid $lsaSid -Right $contract.allowed_lsa_right -MutationAttempted $true
 Assert-True -Condition $lsaDecision.valid -Message 'new Q1 Service SID CONTROL right materialization fixture'
@@ -273,13 +324,40 @@ Assert-True -Condition $lsaDecision.added_by_run -Message 'Q1 LSA ownership is t
 Assert-True -Condition $lsaDecision.cleanup_allowed -Message 'Q1-owned LSA right is removable'
 $lsaCleanup = Test-Q1LsaCleanupEvidence -Snapshot $lsaBefore -ServiceSid $lsaSid -Right $contract.allowed_lsa_right
 Assert-True -Condition $lsaCleanup.valid -Message 'Q1 LSA cleanup readback fixture'
-$lsaPreexisting = [pscustomobject]@{
-    direct = [pscustomobject]@{ status = 'READ'; direct_rights = @('SeSystemProfilePrivilege') }
-    assignment = [pscustomobject]@{ status = 'READ'; assigned_principals = @($lsaSid) }
+$lsaPreexisting = [ordered]@{
+    service_sid = $lsaSid
+    direct = [ordered]@{ account_sid = $lsaSid; status = 'READ'; direct_rights = @($contract.allowed_lsa_right) }
+    assignment = [ordered]@{ status = 'READ'; assigned_principals = @($lsaSid) }
 }
 $lsaPreexistingDecision = Get-Q1LsaMaterializationDecision -Before $lsaPreexisting -After $lsaAfter -ServiceSid $lsaSid -Right $contract.allowed_lsa_right -MutationAttempted $true
 Assert-True -Condition (-not $lsaPreexistingDecision.valid) -Message 'pre-existing Q1 LSA right must fail closed'
 Assert-True -Condition (-not $lsaPreexistingDecision.cleanup_allowed) -Message 'pre-existing LSA right is not owned by Q1'
+$lsaPreexistingAssignment = [ordered]@{
+    service_sid = $lsaSid
+    direct = [ordered]@{ account_sid = $lsaSid; status = 'READ'; direct_rights = @() }
+    assignment = [ordered]@{ status = 'READ'; assigned_principals = @($lsaSid) }
+}
+$lsaPreexistingAssignmentGate = Test-Q1LsaBeforeMaterialization -Snapshot $lsaPreexistingAssignment -ServiceSid $lsaSid -Right $contract.allowed_lsa_right
+Assert-True -Condition (-not $lsaPreexistingAssignmentGate.valid) -Message 'pre-existing assigned Q1 LSA right must fail closed'
+$lsaDirectUnavailable = $lsaBeforeJson | ConvertTo-Json -Depth 20 | ConvertFrom-Json
+$lsaDirectUnavailable.direct.status = 'UNAVAILABLE'
+$lsaDirectUnavailableGate = Test-Q1LsaBeforeMaterialization -Snapshot $lsaDirectUnavailable -ServiceSid $lsaSid -Right $contract.allowed_lsa_right
+Assert-True -Condition (-not $lsaDirectUnavailableGate.valid) -Message 'unavailable direct LSA snapshot fails closed'
+$lsaAssignmentUnavailable = $lsaBeforeJson | ConvertTo-Json -Depth 20 | ConvertFrom-Json
+$lsaAssignmentUnavailable.assignment.status = 'UNAVAILABLE'
+$lsaAssignmentUnavailableGate = Test-Q1LsaBeforeMaterialization -Snapshot $lsaAssignmentUnavailable -ServiceSid $lsaSid -Right $contract.allowed_lsa_right
+Assert-True -Condition (-not $lsaAssignmentUnavailableGate.valid) -Message 'unavailable assignment LSA snapshot fails closed'
+$lsaWrongSnapshotSid = $lsaBeforeJson | ConvertTo-Json -Depth 20 | ConvertFrom-Json
+$lsaWrongSnapshotSid.service_sid = $differentServiceSidFixture
+$lsaWrongSnapshotSid.direct.account_sid = $differentServiceSidFixture
+$lsaWrongSnapshotSidGate = Test-Q1LsaBeforeMaterialization -Snapshot $lsaWrongSnapshotSid -ServiceSid $lsaSid -Right $contract.allowed_lsa_right
+Assert-True -Condition (-not $lsaWrongSnapshotSidGate.valid) -Message 'wrong LSA snapshot Service SID fails closed'
+$lsaMalformed = [ordered]@{ service_sid = $lsaSid; direct = [ordered]@{}; assignment = [ordered]@{} }
+$lsaMalformedGate = Test-Q1LsaBeforeMaterialization -Snapshot $lsaMalformed -ServiceSid $lsaSid -Right $contract.allowed_lsa_right
+Assert-True -Condition (-not $lsaMalformedGate.valid) -Message 'malformed LSA evidence fails closed'
+$sealedQ1ReplayGate = Test-Q1LsaBeforeMaterialization -Snapshot $lsaBeforeJson -ServiceSid $lsaSid -Right $contract.allowed_lsa_right
+Assert-True -Condition $sealedQ1ReplayGate.valid -Message 'authoritative sealed Q1 LSA before-state replay validates'
+Assert-True -Condition $sealedQ1ReplayGate.right_absent_before -Message 'authoritative sealed Q1 LSA before-state replay proves right absence'
 
 $lsaIntentFixture = [pscustomobject]@{
     task_id = $contract.task_id
@@ -303,9 +381,10 @@ $lsaStartedFixture = [pscustomobject]@{
 $lsaRecoveryPlan = Get-Q1LsaRecoveryPlan -Intent $lsaIntentFixture -MutationStarted $lsaStartedFixture -Before $lsaBefore -Current $lsaAfter -ExpectedServiceName $contract.service_name -ExpectedServiceSid $lsaSid -ExpectedRight $contract.allowed_lsa_right -ServiceSidReadback $lsaSid
 Assert-True -Condition $lsaRecoveryPlan.valid -Message 'LSA post-add exception has a valid durable recovery plan'
 Assert-Equal -Actual $lsaRecoveryPlan.action -Expected 'REMOVE_EXACT_RIGHT' -Message 'LSA post-add exception requires exact removal'
-$lsaRecoveryAfterRemoval = [pscustomobject]@{
-    direct = [pscustomobject]@{ status = 'READ'; direct_rights = @() }
-    assignment = [pscustomobject]@{ status = 'READ'; assigned_principals = @() }
+$lsaRecoveryAfterRemoval = [ordered]@{
+    service_sid = $lsaSid
+    direct = [ordered]@{ account_sid = $lsaSid; status = 'READ'; direct_rights = @() }
+    assignment = [ordered]@{ status = 'READ'; assigned_principals = @() }
 }
 $lsaRecoveryCleanup = Test-Q1LsaCleanupEvidence -Snapshot $lsaRecoveryAfterRemoval -ServiceSid $lsaSid -Right $contract.allowed_lsa_right
 Assert-True -Condition $lsaRecoveryCleanup.valid -Message 'LSA post-add exception cleanup verifies exact right absence'
@@ -324,18 +403,20 @@ $lsaTamperedReadbackPlan = Get-Q1LsaRecoveryPlan -Intent $lsaIntentFixture -Muta
 Assert-True -Condition (-not $lsaTamperedReadbackPlan.valid) -Message 'mismatched independent service showsid readback is blocked'
 $lsaInvalidAnchorPlan = Get-Q1LsaRecoveryPlan -Intent $lsaIntentFixture -MutationStarted $lsaStartedFixture -Before $lsaBefore -Current $lsaAfter -ExpectedServiceName $contract.service_name -ExpectedServiceSid 'S-1-5-19' -ExpectedRight $contract.allowed_lsa_right
 Assert-True -Condition (-not $lsaInvalidAnchorPlan.valid) -Message 'non-Service-SID controller anchor is blocked'
-$lsaUnavailable = [pscustomobject]@{
-    direct = [pscustomobject]@{ status = 'UNAVAILABLE'; direct_rights = @() }
-    assignment = [pscustomobject]@{ status = 'UNAVAILABLE'; assigned_principals = @() }
+$lsaUnavailable = [ordered]@{
+    service_sid = $lsaSid
+    direct = [ordered]@{ account_sid = $lsaSid; status = 'UNAVAILABLE'; direct_rights = @() }
+    assignment = [ordered]@{ status = 'UNAVAILABLE'; assigned_principals = @() }
 }
 $lsaUnavailablePlan = Get-Q1LsaRecoveryPlan -Intent $lsaIntentFixture -MutationStarted $lsaStartedFixture -Before $lsaBefore -Current $lsaUnavailable -ExpectedServiceName $contract.service_name -ExpectedServiceSid $lsaSid -ExpectedRight $contract.allowed_lsa_right
 Assert-True -Condition (-not $lsaUnavailablePlan.valid) -Message 'unavailable LSA cleanup readback fails closed'
 Assert-Equal -Actual $lsaUnavailablePlan.residual_state -Expected 'UNKNOWN' -Message 'unavailable LSA readback remains unknown'
 $lsaPreexistingRecovery = Get-Q1LsaRecoveryPlan -Intent $lsaIntentFixture -MutationStarted $lsaStartedFixture -Before $lsaPreexisting -Current $lsaAfter -ExpectedServiceName $contract.service_name -ExpectedServiceSid $lsaSid -ExpectedRight $contract.allowed_lsa_right
 Assert-True -Condition (-not $lsaPreexistingRecovery.valid) -Message 'pre-existing LSA right blocks before ownership'
-$lsaUnexpectedCurrent = [pscustomobject]@{
-    direct = [pscustomobject]@{ status = 'READ'; direct_rights = @('SeSystemProfilePrivilege', 'SeDebugPrivilege') }
-    assignment = [pscustomobject]@{ status = 'READ'; assigned_principals = @($lsaSid) }
+$lsaUnexpectedCurrent = [ordered]@{
+    service_sid = $lsaSid
+    direct = [ordered]@{ account_sid = $lsaSid; status = 'READ'; direct_rights = @('SeSystemProfilePrivilege', 'SeDebugPrivilege') }
+    assignment = [ordered]@{ status = 'READ'; assigned_principals = @($lsaSid) }
 }
 $lsaUnexpectedPlan = Get-Q1LsaRecoveryPlan -Intent $lsaIntentFixture -MutationStarted $lsaStartedFixture -Before $lsaBefore -Current $lsaUnexpectedCurrent -ExpectedServiceName $contract.service_name -ExpectedServiceSid $lsaSid -ExpectedRight $contract.allowed_lsa_right
 Assert-True -Condition (-not $lsaUnexpectedPlan.valid) -Message 'unexpected unrelated LSA right blocks recovery'
@@ -433,6 +514,14 @@ finally {
     }
 }
 
+$consumedGateEvidence = [ordered]@{
+    schema = 'amd-localservice-active-sampling-q1/gate/v1'
+    task_id = $contract.task_id
+    state = 'CONSUMED'
+    max_runs = 1
+    retries = 0
+    consumed_before_service_registration = $true
+}
 $zeroAccounting = Get-InvocationAccounting -ProcessResult ([pscustomobject]@{
     state = 'NOT_ATTEMPTED'
     process_started = $false
@@ -441,12 +530,22 @@ $zeroAccounting = Get-InvocationAccounting -ProcessResult ([pscustomobject]@{
 })
 Assert-Equal -Actual $zeroAccounting.invocation_certainty -Expected 'CONFIRMED_ZERO' -Message 'no launch intent is confirmed zero'
 Assert-Equal -Actual $zeroAccounting.amd_cli_real_invocations -Expected 0 -Message 'no launch intent has zero AMD invocations'
+$historicalConsumedZeroAccounting = Get-InvocationAccounting -ProcessResult ([pscustomobject]@{
+    state = 'NOT_ATTEMPTED'
+    process_started = $false
+    invocation_attempted = 0
+    power_sampling_runs = 0
+}) -Q1GateEvidence $consumedGateEvidence
+Assert-Equal -Actual $historicalConsumedZeroAccounting.invocation_certainty -Expected 'CONFIRMED_ZERO' -Message 'consumed gate with no AMD launch is confirmed zero'
+Assert-Equal -Actual $historicalConsumedZeroAccounting.amd_cli_real_invocations -Expected 0 -Message 'consumed gate with no AMD launch reports zero invocations'
+Assert-True -Condition $historicalConsumedZeroAccounting.gate_consumed -Message 'authoritative consumed gate is reported independently of launch evidence'
+Assert-True -Condition $historicalConsumedZeroAccounting.second_run_forbidden -Message 'authoritative consumed gate forbids a second run'
 $startedAccounting = Get-InvocationAccounting -ProcessResult ([pscustomobject]@{
     state = 'PROCESS_FAILED_AFTER_START'
     process_started = $true
     invocation_attempted = 1
     power_sampling_runs = 1
-})
+}) -Q1GateEvidence $consumedGateEvidence
 Assert-Equal -Actual $startedAccounting.amd_cli_real_invocations -Expected 1 -Message 'post-start harness error remains one AMD invocation'
 Assert-Equal -Actual $startedAccounting.power_sampling_runs -Expected 1 -Message 'post-start harness error remains one sampling run'
 $launchEvidenceRoot = New-TestRoot
@@ -482,12 +581,19 @@ try {
         error = 'offline fixture'
     }
     [IO.File]::WriteAllText((Join-Path $launchEvidenceRaw 'cli-launch-intent.json'), ($launchIntentFixture | ConvertTo-Json -Depth 20))
-    $ambiguousAccounting = Get-InvocationAccounting -ProcessResult ([pscustomobject]@{
+    $launchOnlyAccounting = Get-InvocationAccounting -ProcessResult ([pscustomobject]@{
         state = 'NOT_ATTEMPTED'
         process_started = $false
         invocation_attempted = 0
         power_sampling_runs = 0
     }) -RunRoot $launchEvidenceRoot
+    Assert-True -Condition (-not $launchOnlyAccounting.gate_consumed) -Message 'launch intent does not self-authorize consumed gate accounting'
+    $ambiguousAccounting = Get-InvocationAccounting -ProcessResult ([pscustomobject]@{
+        state = 'NOT_ATTEMPTED'
+        process_started = $false
+        invocation_attempted = 0
+        power_sampling_runs = 0
+    }) -RunRoot $launchEvidenceRoot -Q1GateEvidence $consumedGateEvidence
     Assert-Equal -Actual $ambiguousAccounting.invocation_certainty -Expected 'AMBIGUOUS' -Message 'launch intent without successor is ambiguous'
     Assert-Equal -Actual $ambiguousAccounting.amd_cli_real_invocations -Expected 'UNKNOWN_0_OR_1' -Message 'ambiguous launch is not numeric zero'
     Assert-True -Condition $ambiguousAccounting.gate_consumed -Message 'ambiguous launch keeps the one-shot gate consumed'
@@ -498,7 +604,7 @@ try {
         process_started = $false
         invocation_attempted = 0
         power_sampling_runs = 0
-    }) -RunRoot $launchEvidenceRoot
+    }) -RunRoot $launchEvidenceRoot -Q1GateEvidence $consumedGateEvidence
     Assert-Equal -Actual $failedAccounting.invocation_certainty -Expected 'CONFIRMED_ZERO' -Message 'durable start-failed successor is confirmed zero'
     Assert-True -Condition $failedAccounting.launch_failed_valid -Message 'valid start-failed successor is schema and command validated'
     $corruptStartFailed = Join-Path $launchEvidenceRaw 'cli-launch-start-failed.json'
@@ -508,7 +614,7 @@ try {
         process_started = $false
         invocation_attempted = 0
         power_sampling_runs = 0
-    }) -RunRoot $launchEvidenceRoot
+    }) -RunRoot $launchEvidenceRoot -Q1GateEvidence $consumedGateEvidence
     Assert-Equal -Actual $corruptAccounting.invocation_certainty -Expected 'AMBIGUOUS' -Message 'corrupt start-failed successor is ambiguous'
     [IO.File]::WriteAllText($corruptStartFailed, ($launchFailedFixture | ConvertTo-Json -Depth 20))
     $wrongExecutable = $launchFailedFixture | ConvertTo-Json -Depth 20 | ConvertFrom-Json
@@ -519,7 +625,7 @@ try {
         process_started = $false
         invocation_attempted = 0
         power_sampling_runs = 0
-    }) -RunRoot $launchEvidenceRoot
+    }) -RunRoot $launchEvidenceRoot -Q1GateEvidence $consumedGateEvidence
     Assert-Equal -Actual $wrongExecutableAccounting.invocation_certainty -Expected 'AMBIGUOUS' -Message 'mismatched start-failed executable is ambiguous'
     $wrongArguments = $launchFailedFixture | ConvertTo-Json -Depth 20 | ConvertFrom-Json
     $wrongArguments.arguments = @('timechart', '--event', 'frequency')
@@ -529,7 +635,7 @@ try {
         process_started = $false
         invocation_attempted = 0
         power_sampling_runs = 0
-    }) -RunRoot $launchEvidenceRoot
+    }) -RunRoot $launchEvidenceRoot -Q1GateEvidence $consumedGateEvidence
     Assert-Equal -Actual $wrongArgumentsAccounting.invocation_certainty -Expected 'AMBIGUOUS' -Message 'mismatched start-failed arguments are ambiguous'
     [IO.File]::WriteAllText($corruptStartFailed, ($launchFailedFixture | ConvertTo-Json -Depth 20))
     [IO.File]::WriteAllText((Join-Path $launchEvidenceRaw 'cli-launch-started.json'), '{"process_started":true}')
@@ -538,7 +644,7 @@ try {
         process_started = $false
         invocation_attempted = 0
         power_sampling_runs = 0
-    }) -RunRoot $launchEvidenceRoot
+    }) -RunRoot $launchEvidenceRoot -Q1GateEvidence $consumedGateEvidence
     Assert-Equal -Actual $contradictoryAccounting.invocation_certainty -Expected 'CONFIRMED_ONE' -Message 'started successor dominates contradictory failure successor'
     Assert-True -Condition $contradictoryAccounting.evidence_conflict -Message 'contradictory launch successors are flagged'
     Remove-Item -LiteralPath (Join-Path $launchEvidenceRaw 'cli-launch-start-failed.json') -Force
@@ -549,7 +655,7 @@ try {
         process_started = $false
         invocation_attempted = 0
         power_sampling_runs = 0
-    }) -RunRoot $launchEvidenceRoot
+    }) -RunRoot $launchEvidenceRoot -Q1GateEvidence $consumedGateEvidence
     Assert-Equal -Actual $durableAccounting.amd_cli_real_invocations -Expected 1 -Message 'durable launch evidence cannot be downgraded'
     Assert-Equal -Actual $durableAccounting.invocation_certainty -Expected 'CONFIRMED_ONE' -Message 'durable launch evidence is confirmed one'
 }
@@ -658,7 +764,7 @@ Assert-Equal -Actual $dry.current_task_lsa_mutations -Expected 0 -Message 'offli
 Assert-Equal -Actual $dry.harness_live_contract_allows_control_baseline_lsa_mutation -Expected 'YES' -Message 'live LSA capability is distinct from offline count'
 Assert-Equal -Actual $dry.allowed_lsa_right -Expected 'SeSystemProfilePrivilege' -Message 'dry-run allowed LSA right'
 Assert-Equal -Actual $dry.allowed_lsa_target -Expected 'EXACT_Q1_SERVICE_SID_ONLY' -Message 'dry-run allowed LSA target'
-Assert-True -Condition (-not (Test-Path -LiteralPath $contract.output_base)) -Message 'dry-run did not create ProgramData output base'
+Assert-True -Condition (-not (Test-Path -LiteralPath $dry.plan.run_root)) -Message 'dry-run did not create a ProgramData qualification run root'
 $preflightGateBefore = Get-Q1GateState -Contract $contract
 $preflightOutput = & $powershell -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $RunnerPath -Mode Preflight 2>&1 | Out-String
 $preflightExitCode = $LASTEXITCODE
