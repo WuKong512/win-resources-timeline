@@ -1,6 +1,6 @@
 [CmdletBinding()]
 param(
-    [ValidateSet('DryRun', 'Live')]
+    [ValidateSet('DryRun', 'Preflight', 'Live')]
     [string]$Mode = 'DryRun',
     [switch]$AuthorizeLiveRun,
     [string]$AuthorizationToken,
@@ -114,48 +114,6 @@ function Get-HostBinaryIdentity {
         $identity.error = $_.Exception.Message
     }
     [pscustomobject]$identity
-}
-
-function Get-HostDriverEvidence {
-    param([Parameter(Mandatory = $true)]$Contract)
-
-    $records = New-Object System.Collections.Generic.List[object]
-    foreach ($property in $Contract.driver_versions.PSObject.Properties) {
-        $expected = $property.Value
-        $record = [ordered]@{
-            name = $property.Name
-            path = $expected.path
-            exists = $false
-            file_version = $null
-            product_version = $null
-            sha256 = $null
-            signature_status = $null
-            signer = $null
-            state = $null
-            error = $null
-        }
-        try {
-            $record.exists = Test-Path -LiteralPath $expected.path -PathType Leaf
-            if ($record.exists) {
-                $version = [Diagnostics.FileVersionInfo]::GetVersionInfo($expected.path)
-                $record.file_version = $version.FileVersion
-                $record.product_version = $version.ProductVersion
-                $record.sha256 = (Get-FileHash -LiteralPath $expected.path -Algorithm SHA256).Hash.ToUpperInvariant()
-                $signature = Get-AuthenticodeSignature -FilePath $expected.path
-                $record.signature_status = [string]$signature.Status
-                if ($null -ne $signature.SignerCertificate) {
-                    $record.signer = $signature.SignerCertificate.Subject
-                }
-            }
-            $service = Get-Service -Name $property.Name -ErrorAction Stop
-            $record.state = [string]$service.Status
-        }
-        catch {
-            $record.error = $_.Exception.Message
-        }
-        [void]$records.Add([pscustomobject]$record)
-    }
-    @($records)
 }
 
 function Get-PlatformSnapshot {
@@ -341,6 +299,7 @@ function Get-LivePreflight {
 
     $binary = Get-HostBinaryIdentity -Contract $Contract
     $binaryGate = Test-BinaryIdentityEvidence -Identity $binary -Contract $Contract
+    $driverContract = Get-Q1DriverContractValidation -Contract $Contract
     $drivers = Get-HostDriverEvidence -Contract $Contract
     $driverGate = Test-DriverVersionEvidence -Drivers $drivers -Contract $Contract
     $git = Get-GitBaselineEvidence -Contract $Contract
@@ -350,16 +309,21 @@ function Get-LivePreflight {
     $residual = Get-ResidualEvidence -Contract $Contract -RunRoot $RunRoot
     $rootGate = Test-ControlledRunRoot -RunRoot $RunRoot -OutputBase $Contract.output_base
     $platform = Get-PlatformSnapshot
+    $q1Gate = Get-Q1GateState -Contract $Contract
     $failures = New-Object System.Collections.Generic.List[string]
     if (-not $admin.is_administrator) { [void]$failures.Add('administrator preflight failed') }
     if (-not $git.valid) { [void]$failures.Add('git baseline/working-tree preflight failed') }
     if (-not $harness.valid) { [void]$failures.Add('reviewed harness source identity preflight failed') }
     if (-not $account.matches) { [void]$failures.Add('LocalService SID preflight failed') }
     if (-not $binaryGate.valid) { [void]$failures.Add('AMD binary identity preflight failed') }
+    if (-not $driverContract.valid) { [void]$failures.Add('AMD driver contract validation failed') }
     if (-not $driverGate.valid) { [void]$failures.Add('AMD driver identity preflight failed') }
     if (-not $residual.clean) { [void]$failures.Add('existing qualification service/process residue found') }
     if (-not $rootGate.valid) { $failures.AddRange(@($rootGate.failures)) }
     if ($platform.errors.Count -gt 0) { [void]$failures.Add('platform snapshot is incomplete') }
+    if (-not $q1Gate.valid -or [string]$q1Gate.state -ne 'AVAILABLE') {
+        [void]$failures.Add(('Q1 live gate is not available: {0}' -f $q1Gate.state))
+    }
     if (-not (Test-Path -LiteralPath (Join-Path $ToolRoot 'service-host.ps1') -PathType Leaf)) {
         [void]$failures.Add('dedicated service host is missing')
     }
@@ -372,6 +336,7 @@ function Get-LivePreflight {
         account = $account
         binary = $binary
         binary_gate = $binaryGate
+        driver_contract = $driverContract
         drivers = @($drivers)
         driver_gate = $driverGate
         residual = $residual
@@ -379,6 +344,7 @@ function Get-LivePreflight {
         platform = $platform
         token_contract = Get-ExpectedTokenContract -Contract $Contract
         token_validation = 'DEFERRED_TO_SESSION_0_SERVICE_PROCESS'
+        q1_gate = $q1Gate
     }
 }
 
@@ -1720,6 +1686,73 @@ function Invoke-OfflineDryRun {
     }
 }
 
+function Invoke-ReadOnlyPreflight {
+    param([Parameter(Mandatory = $true)]$Contract)
+
+    # The candidate run id/root are deliberately never materialized.  Keeping the
+    # same root validation inside Get-LivePreflight prevents a second preflight
+    # implementation from drifting away from the live checks.
+    $candidateRunId = New-QualificationRunId
+    $candidateRunRoot = Get-QualificationRunRoot -OutputBase $Contract.output_base -RunId $candidateRunId
+    $preflight = $null
+    $preflightError = $null
+    try {
+        $preflight = Get-LivePreflight -Contract $Contract -RunRoot $candidateRunRoot
+    }
+    catch {
+        $preflightError = $_.Exception.Message
+        $preflight = [pscustomobject]@{
+            valid = $false
+            failures = @('read-only preflight threw unexpectedly: ' + $preflightError)
+            q1_gate = Get-Q1GateState -Contract $Contract
+        }
+    }
+    $valid = [bool](Get-ContractPropertyValue -Object $preflight -Name 'valid' -Default $false)
+    $gate = Get-ContractPropertyValue -Object $preflight -Name 'q1_gate'
+    if ($null -eq $gate) { $gate = Get-Q1GateState -Contract $Contract }
+    [pscustomobject]@{
+        schema = 'amd-localservice-active-sampling-q1/preflight/v1'
+        result = if ($valid) { 'PREFLIGHT_PASS' } else { 'PREFLIGHT_BLOCKED' }
+        mode = 'PREFLIGHT'
+        task_id = $Contract.task_id
+        authorization_required = $false
+        authorization_materialized = $false
+        real_execution_allowed = $false
+        candidate_run_id = $candidateRunId
+        candidate_run_root = $candidateRunRoot
+        candidate_run_root_created = $false
+        candidate_run_root_exists = (Test-Path -LiteralPath $candidateRunRoot)
+        preflight = $preflight
+        q1_gate_state = [string]$gate.state
+        q1_gate = $gate
+        gate_consumed = $false
+        service_lifecycle = [ordered]@{
+            created = $false
+            started = $false
+            stopped = $false
+            deleted = $false
+        }
+        amd_cli_real_invocations = 0
+        amd_api_real_invocations = 0
+        power_sampling_runs = 0
+        service_mutations = 0
+        lsa_mutations = 0
+        token_mutations = 0
+        acl_mutations = 0
+        device_mutations = 0
+        driver_mutations = 0
+        platform_security_mutations = 0
+        current_task_service_mutations = 0
+        current_task_lsa_mutations = 0
+        current_task_token_mutations = 0
+        current_task_acl_mutations = 0
+        current_task_device_mutations = 0
+        current_task_driver_mutations = 0
+        current_task_platform_security_mutations = 0
+        note = 'Read-only host preflight; no run root, service, gate, authorization, LSA right, ACL, token, driver, platform, or AMD operation was performed.'
+    }
+}
+
 function Assert-LiveAuthorization {
     param(
         [Parameter(Mandatory = $true)]$Contract,
@@ -2007,6 +2040,21 @@ if ($Mode -eq 'DryRun') {
         Write-Output $ReportPath
     }
     exit 0
+}
+
+if ($Mode -eq 'Preflight') {
+    $preflightResult = Invoke-ReadOnlyPreflight -Contract $contract
+    if ([string]::IsNullOrWhiteSpace($ReportPath)) {
+        Write-Output (ConvertTo-JsonText -Value $preflightResult)
+    }
+    else {
+        Write-JsonAtomic -Path $ReportPath -Value $preflightResult -AllowReplace
+        Write-Output $ReportPath
+    }
+    if ([string]$preflightResult.result -eq 'PREFLIGHT_PASS') {
+        exit 0
+    }
+    exit 1
 }
 
 $liveResult = Invoke-LiveRun -Contract $contract -AuthorizationSwitch $AuthorizeLiveRun -Token $AuthorizationToken

@@ -7,9 +7,15 @@ collector, provider, installer, broker, or Rust runtime component.
 Current state:
 
 ~~~text
-HARNESS_IMPLEMENTATION = REVIEW_FIX_R3_COMPLETE
-Q1_LIVE_RUN = HARNESS_READY_PENDING_FINAL_REVIEW
+HARNESS_IMPLEMENTATION = PREFLIGHT_FIX_I1_COMPLETE
+Q1_LIVE_RUN = PENDING_HUMAN_REVIEW
 Q1_LIVE_RUN_AUTHORIZED = NO
+PREVIOUS_REVIEWED_HEAD = 3ff66c258ffb2f6aafe64790abbd7287b70ddc4e
+PREVIOUS_AUTHORIZATION_REUSABLE = NO
+Q1_GATE_CONSUMED = NO
+LIVE_RUNS_COMPLETED = 0
+Q1_RUN_BUDGET_REMAINING = 1
+FIRST_LIVE_RUN_STILL_AVAILABLE = YES
 AMD_CLI_REAL_INVOCATIONS_DURING_IMPLEMENTATION = 0
 POWER_SAMPLING_RUNS_DURING_IMPLEMENTATION = 0
 ~~~
@@ -20,9 +26,10 @@ POWER_SAMPLING_RUNS_DURING_IMPLEMENTATION = 0
   driver, command, output, one-shot budget, LSA allowance, and reviewed
   source-hash values.
 - run-amd-localservice-active-sampling.ps1 is the administrator-side
-  controller. DryRun is the default. Live requires a new task-specific
-  authorization and performs the preflight, exact service lifecycle, evidence
-  collection, cleanup, and residue check.
+  controller. DryRun is the default. Preflight performs the same host-facing
+  checks as Live without authorization or mutation. Live requires a new
+  task-specific authorization and performs the preflight, exact service
+  lifecycle, evidence collection, cleanup, and residue check.
 - service-host.ps1 is the dedicated Windows ServiceBase host. SCM starts it
   as LocalService in Session 0. It launches one worker, captures the worker's
   effective token, captures the exact SCM-generated Service SID, and only then
@@ -57,9 +64,13 @@ RETRIES = 0
 The read-only driver preflight rechecks AMDPowerProfiler.sys file version
 10.6.3.0, AMDCpuProfiler.sys file version 4.4.1.0, both product metadata
 version 5.3.481.0, AMD Authenticode identity, file SHA256, and running
-service state. The observed user-mode 5.3.521.0 versus driver 5.3.481.0
-split remains COMPATIBILITY = UNKNOWN; the harness does not reinterpret it
-as an automatic mismatch.
+service state. The frozen driver contract is an OrderedDictionary and is
+validated to contain exactly AMDPowerProfiler and AMDCpuProfiler; adapter
+properties such as Count, Keys, Values, SyncRoot, and similar noise are never
+treated as drivers. Missing files, version drift, and host query failures are
+returned as structured fail-closed evidence. The observed user-mode 5.3.521.0
+versus driver 5.3.481.0 split remains COMPATIBILITY = UNKNOWN; the harness
+does not reinterpret it as an automatic mismatch.
 
 The effective token must contain the I2F/I2G CONTROL semantics: System
 integrity, no Administrators membership, a dedicated Service SID,
@@ -101,15 +112,31 @@ The regression suite is:
 pwsh -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File .\tools\amd-localservice-active-sampling\test-harness.ps1
 ~~~
 
+The controller also exposes a true read-only host preflight:
+
+~~~powershell
+pwsh -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File .\tools\amd-localservice-active-sampling\run-amd-localservice-active-sampling.ps1 -Mode Preflight
+~~~
+
+Preflight reuses the live `Get-LivePreflight` checks for administrator
+context, Git baseline and clean tree, reviewed source identity, LocalService
+SID, AMD binary and driver identity, platform snapshot, qualification residue,
+candidate run-root feasibility, service-host presence, and Q1 gate state. It
+uses a hypothetical run id only in memory. It does not require
+`AuthorizeLiveRun`, the authorization token, or the environment marker; it
+does not create the output base/run root, service, gate, LSA right, ACL, token
+state, or AMD process. A blocked result is a safe preflight result, not a
+scientific qualification result.
+
 ## Live path boundary
 
 The live controller is disabled unless all of the following are present:
 
 1. Live mode is explicitly selected.
 2. The new task-specific switch AuthorizeLiveRun is present.
-3. The new token AMD-LOCALSERVICE-ACTIVE-SAMPLING-Q1 is supplied.
+3. The new-head token AMD-LOCALSERVICE-ACTIVE-SAMPLING-Q1-REVIEWED-PREFLIGHT-FIX-I1 is supplied.
 4. The environment marker AMD_LOCALSERVICE_ACTIVE_SAMPLING_AUTHORIZATION has
-  the value GRANTED_FOR_THIS_TASK_ONLY.
+  the value GRANTED_FOR_NEW_REVIEWED_HEAD_ONLY.
 5. All read-only preflight gates pass.
 6. The exact reviewed SHA256 identity of the controller, service host,
    contract, parser, sc.exe helper, and LSA/cleanup helpers passes before any
@@ -119,6 +146,10 @@ The live path consumes Q1-LIVE-GATE.json before service registration. The gate
 is one-shot with MAX_RUNS=1 and RETRIES=0; service failure, timeout, malformed
 output, nonzero exit, and post-launch evidence failure do not permit retry.
 The gate is separate from the consumed I2G gate.
+
+The previous reviewed head `3ff66c258ffb2f6aafe64790abbd7287b70ddc4e` and its
+authorization are obsolete after this preflight repair. A new human review
+and new explicit live authorization are required before any Q1 live attempt.
 
 The moment Process.Start() succeeds, the run is irreversibly counted as one
 AMD CLI invocation and one sampling run. Durable launch-started evidence and

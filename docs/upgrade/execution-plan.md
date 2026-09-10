@@ -2576,3 +2576,53 @@ CURRENT_TASK_LIVE_MUTATIONS = 0
 The dry-run and offline regression suite passed without creating a service,
 starting an AMD process, consuming a live gate, or modifying historical
 evidence.
+
+## Current-state additive marker: AMD LocalService reviewed preflight fix I1
+
+This marker supersedes the immediately preceding harness-readiness marker for
+current-state handoff. It records a source-bound preflight repair only; it does
+not authorize or perform the Q1 live qualification.
+
+~~~text
+AMD_LOCALSERVICE_ACTIVE_SAMPLING_PREFLIGHT_FIX_I1 = PASS
+HARNESS_PREFLIGHT_DRIVER_ENUMERATION = FIXED
+HOST_PREFLIGHT_MODE = IMPLEMENTED
+HOST_PREFLIGHT_MODE_READ_ONLY = YES
+PREVIOUS_REVIEWED_HEAD = 3ff66c258ffb2f6aafe64790abbd7287b70ddc4e
+PREVIOUS_AUTHORIZATION_REUSABLE = NO
+NEW_HUMAN_REVIEW = REQUIRED
+NEW_LIVE_AUTHORIZATION = REQUIRED
+Q1_GATE_CONSUMED = NO
+LIVE_RUNS_COMPLETED = 0
+Q1_RUN_BUDGET_REMAINING = 1
+FIRST_LIVE_RUN_STILL_AVAILABLE = YES
+SECOND_LIVE_RUN_PERMITTED = NO
+RETRIES = 0
+Q1_LIVE_RUN = PENDING_HUMAN_REVIEW
+Q1_LIVE_RUN_AUTHORIZED = NO
+REAL_EXECUTION_ALLOWED = false
+PROXY_VERDICT = INSUFFICIENT
+ENUMERATION_AND_SAMPLING_EQUIVALENCE = UNKNOWN
+PRODUCTION_ACCOUNT = UNRESOLVED
+AMD_PRODUCTION_ADMISSION = DEFER
+SELECTED_NEXT_TASK = HUMAN_REVIEW_PR29_PREFLIGHT_FIX
+NEXT_GATE = HUMAN_REVIEW_PR29_PREFLIGHT_FIX
+CURRENT_STATE_DOCUMENT =
+  tools/amd-localservice-active-sampling/README.md
+CURRENT_HARNESS_PREFLIGHT =
+  tools/amd-localservice-active-sampling/run-amd-localservice-active-sampling.ps1 -Mode Preflight
+CURRENT_TASK_SERVICE_MUTATIONS = 0
+CURRENT_TASK_LSA_MUTATIONS = 0
+CURRENT_TASK_TOKEN_MUTATIONS = 0
+CURRENT_TASK_ACL_MUTATIONS = 0
+CURRENT_TASK_DEVICE_MUTATIONS = 0
+CURRENT_TASK_DRIVER_MUTATIONS = 0
+CURRENT_TASK_PLATFORM_SECURITY_MUTATIONS = 0
+AMD_CLI_REAL_INVOCATIONS = 0
+AMD_API_REAL_INVOCATIONS = 0
+POWER_SAMPLING_RUNS = 0
+~~~
+
+The previous authorization was bound to the pre-fix source identity and is not
+reusable. The first Q1 live run remains available, but only a new human review
+and new explicit authorization may advance it.

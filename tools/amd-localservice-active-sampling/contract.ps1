@@ -43,15 +43,15 @@ function Get-AmdLocalServiceSamplingContract {
         forbidden_group_sids = @('S-1-5-32-544')
         expected_main_pin = 'e74153e74a416a1c8c542498b8b87cc6d146f5cf'
         design_checkpoint = 'd2a2e536181924f0dededd8b15f2964cffbe8101'
-        authorization_token = 'AMD-LOCALSERVICE-ACTIVE-SAMPLING-Q1'
+        authorization_token = 'AMD-LOCALSERVICE-ACTIVE-SAMPLING-Q1-REVIEWED-PREFLIGHT-FIX-I1'
         authorization_environment = 'AMD_LOCALSERVICE_ACTIVE_SAMPLING_AUTHORIZATION'
-        authorization_environment_value = 'GRANTED_FOR_THIS_TASK_ONLY'
+        authorization_environment_value = 'GRANTED_FOR_NEW_REVIEWED_HEAD_ONLY'
         gate_file_name = 'Q1-LIVE-GATE.json'
         harness_identity_mode = 'SOURCE_SHA256_PINNED'
-        contract_canonical_sha256 = '24E404A14D9332638E8022CE31C81D90272AADBB1D444ADA09F26BE6FDE37ACC'
+        contract_canonical_sha256 = 'DD924B6F39433B728E001AF63CE6C9ADD1650AB997D588154C5FCD6A6EE36C21'
         harness_source_sha256 = [ordered]@{
-            contract = '24E404A14D9332638E8022CE31C81D90272AADBB1D444ADA09F26BE6FDE37ACC'
-            runner = '9BF9D48157CBBDC014C78387BA86D595A855CD18373E51275F5DBBF9A3CF199E'
+            contract = 'DD924B6F39433B728E001AF63CE6C9ADD1650AB997D588154C5FCD6A6EE36C21'
+            runner = 'B90E1447F0980598485157ADD573C197979E41008A89916994D84204BE02F78A'
             service_host = 'E4F1F8AE2F25C91E7B2EF43C1A47C5251BF7BFCE8AF203445CDF41A086456C3E'
             sc_argument_contract = 'A238266DF382BFE2870E11ED40A14468EF7BCB58807D0F235D17C5A3C3F5E5FA'
             i2e_runtime_library = 'BC22E7599A64D61BC3B93351328B546656D1393EFABC87106630A86F43A71F08'
@@ -98,6 +98,101 @@ function Get-ContractPropertyValue {
         return $property[0].Value
     }
     $Default
+}
+
+function Get-Q1DictionaryValue {
+    param(
+        [AllowNull()][object]$Object,
+        [Parameter(Mandatory = $true)][string]$Name,
+        [AllowNull()][object]$Default = $null
+    )
+
+    if ($null -eq $Object) {
+        return $Default
+    }
+    if ($Object -is [System.Collections.IDictionary]) {
+        if ($Object.Contains($Name)) {
+            return $Object[$Name]
+        }
+        return $Default
+    }
+    Get-ContractPropertyValue -Object $Object -Name $Name -Default $Default
+}
+
+function Get-Q1DriverContractValidation {
+    param([Parameter(Mandatory = $true)]$Contract)
+
+    $expectedNames = @('AMDPowerProfiler', 'AMDCpuProfiler')
+    $requiredFields = @('file_name', 'path', 'file_version', 'product_version', 'signer_pattern')
+    $failures = New-Object System.Collections.Generic.List[string]
+    $entries = New-Object System.Collections.Generic.List[object]
+    $driverVersions = Get-Q1DictionaryValue -Object $Contract -Name 'driver_versions'
+    $actualNames = @()
+
+    if ($null -eq $driverVersions -or $driverVersions -isnot [System.Collections.IDictionary]) {
+        [void]$failures.Add('driver_versions is not a dictionary contract')
+        foreach ($name in $expectedNames) {
+            [void]$entries.Add([pscustomobject]@{
+                name = $name
+                contract = $null
+                valid = $false
+                failures = @('driver_versions is not a dictionary contract')
+            })
+        }
+    }
+    else {
+        $actualNames = @($driverVersions.Keys | ForEach-Object { [string]$_ })
+        foreach ($actualName in $actualNames) {
+            if (-not (@($expectedNames | Where-Object { [string]$_ -ceq $actualName }).Count -eq 1)) {
+                [void]$failures.Add(('unexpected driver contract key: {0}' -f $actualName))
+            }
+        }
+        foreach ($expectedName in $expectedNames) {
+            if (-not (@($actualNames | Where-Object { [string]$_ -ceq $expectedName }).Count -eq 1)) {
+                [void]$failures.Add(('required driver contract key is missing: {0}' -f $expectedName))
+                [void]$entries.Add([pscustomobject]@{
+                    name = $expectedName
+                    contract = $null
+                    valid = $false
+                    failures = @('required driver contract key is missing')
+                })
+                continue
+            }
+
+            $entry = $driverVersions[$expectedName]
+            $entryFailures = New-Object System.Collections.Generic.List[string]
+            if ($null -eq $entry) {
+                [void]$entryFailures.Add('driver contract entry is null')
+            }
+            foreach ($field in $requiredFields) {
+                $value = Get-Q1DictionaryValue -Object $entry -Name $field
+                if ($null -eq $value -or [string]::IsNullOrWhiteSpace([string]$value)) {
+                    [void]$entryFailures.Add(('required field is missing: {0}' -f $field))
+                }
+            }
+            foreach ($entryFailure in @($entryFailures)) {
+                [void]$failures.Add(('{0}: {1}' -f $expectedName, $entryFailure))
+            }
+            [void]$entries.Add([pscustomobject]@{
+                name = $expectedName
+                contract = $entry
+                valid = ($entryFailures.Count -eq 0)
+                failures = $entryFailures.ToArray()
+            })
+        }
+        if ($actualNames.Count -ne $expectedNames.Count) {
+            [void]$failures.Add(('driver contract key count is {0}; expected exactly {1}' -f $actualNames.Count, $expectedNames.Count))
+        }
+    }
+
+    [pscustomobject]@{
+        valid = ($failures.Count -eq 0)
+        expected_keys = $expectedNames
+        actual_keys = $actualNames
+        required_fields = $requiredFields
+        entries = $entries.ToArray()
+        failures = $failures.ToArray()
+    }
 }
 
 function Get-Q1CanonicalServiceSid {
@@ -537,6 +632,84 @@ function Acquire-OneShotGateFile {
         state = [string]$GateRecord.state
         max_runs = [int]$GateRecord.max_runs
         retries = [int]$GateRecord.retries
+    }
+}
+
+function Get-Q1GateState {
+    param(
+        [Parameter(Mandatory = $true)]$Contract
+    )
+
+    $gatePath = Join-Path ([string]$Contract.output_base) ([string]$Contract.gate_file_name)
+    if (-not (Test-Path -LiteralPath $gatePath)) {
+        return [pscustomobject]@{
+            path = $gatePath
+            exists = $false
+            state = 'AVAILABLE'
+            valid = $true
+            record = $null
+            error = $null
+        }
+    }
+    if (-not (Test-Path -LiteralPath $gatePath -PathType Leaf)) {
+        return [pscustomobject]@{
+            path = $gatePath
+            exists = $true
+            state = 'INVALID_OR_UNREADABLE'
+            valid = $false
+            record = $null
+            error = 'Q1 live gate path exists but is not a file'
+        }
+    }
+    try {
+        $record = Get-Content -LiteralPath $gatePath -Raw -ErrorAction Stop | ConvertFrom-Json
+        $failures = New-Object System.Collections.Generic.List[string]
+        if ([string](Get-Q1DictionaryValue -Object $record -Name 'schema') -cne 'amd-localservice-active-sampling-q1/gate/v1') {
+            [void]$failures.Add('Q1 live gate schema mismatch')
+        }
+        if ([string](Get-Q1DictionaryValue -Object $record -Name 'task_id') -cne [string]$Contract.task_id) {
+            [void]$failures.Add('Q1 live gate task id mismatch')
+        }
+        if ([int](Get-Q1DictionaryValue -Object $record -Name 'max_runs' -Default -1) -ne [int]$Contract.max_runs) {
+            [void]$failures.Add('Q1 live gate max-runs mismatch')
+        }
+        if ([int](Get-Q1DictionaryValue -Object $record -Name 'retries' -Default -1) -ne [int]$Contract.retries) {
+            [void]$failures.Add('Q1 live gate retry contract mismatch')
+        }
+        if ([string](Get-Q1DictionaryValue -Object $record -Name 'state') -cne 'CONSUMED') {
+            [void]$failures.Add('Q1 live gate is not durably consumed')
+        }
+        if (-not [bool](Get-Q1DictionaryValue -Object $record -Name 'consumed_before_service_registration' -Default $false)) {
+            [void]$failures.Add('Q1 live gate was not consumed before service registration')
+        }
+        if ($failures.Count -ne 0) {
+            return [pscustomobject]@{
+                path = $gatePath
+                exists = $true
+                state = 'INVALID_OR_UNREADABLE'
+                valid = $false
+                record = $record
+                error = ($failures -join '; ')
+            }
+        }
+        [pscustomobject]@{
+            path = $gatePath
+            exists = $true
+            state = 'ALREADY_CONSUMED'
+            valid = $true
+            record = $record
+            error = $null
+        }
+    }
+    catch {
+        [pscustomobject]@{
+            path = $gatePath
+            exists = $true
+            state = 'INVALID_OR_UNREADABLE'
+            valid = $false
+            record = $null
+            error = $_.Exception.Message
+        }
     }
 }
 
@@ -1278,6 +1451,130 @@ function Get-OfflineDriverFixture {
     )
 }
 
+function Get-HostDriverEvidence {
+    param(
+        [Parameter(Mandatory = $true)]$Contract,
+        [AllowNull()][scriptblock]$Probe
+    )
+
+    $contractValidation = Get-Q1DriverContractValidation -Contract $Contract
+    $records = New-Object System.Collections.Generic.List[object]
+    foreach ($entry in @($contractValidation.entries)) {
+        $name = [string]$entry.name
+        $expected = $entry.contract
+        $path = [string](Get-Q1DictionaryValue -Object $expected -Name 'path')
+        $record = [ordered]@{
+            name = $name
+            path = if ([string]::IsNullOrWhiteSpace($path)) { $null } else { $path }
+            exists = $false
+            file_version = $null
+            product_version = $null
+            sha256 = $null
+            signature_status = $null
+            signer = $null
+            service_state = $null
+            state = $null
+            error = $null
+            failure_category = $null
+            failure_categories = @()
+            contract_valid = [bool]$entry.valid
+        }
+        $errors = New-Object System.Collections.Generic.List[string]
+        $categories = New-Object System.Collections.Generic.List[string]
+        if (-not $entry.valid) {
+            [void]$categories.Add('CONTRACT_ENUMERATION_FAILURE')
+            foreach ($failure in @($entry.failures)) { [void]$errors.Add([string]$failure) }
+        }
+        elseif ($null -ne $Probe) {
+            try {
+                $observed = & $Probe $name $expected
+                if ($null -eq $observed) {
+                    [void]$categories.Add('HOST_DRIVER_QUERY_FAILURE')
+                    [void]$errors.Add('injected host driver probe returned no record')
+                }
+                else {
+                    $record.exists = [bool](Get-Q1DictionaryValue -Object $observed -Name 'exists' -Default $false)
+                    $observedPath = Get-Q1DictionaryValue -Object $observed -Name 'path'
+                    if ($null -ne $observedPath) { $record.path = [string]$observedPath }
+                    foreach ($field in @('file_version', 'product_version', 'sha256', 'signature_status', 'signer')) {
+                        $value = Get-Q1DictionaryValue -Object $observed -Name $field
+                        if ($null -ne $value) { $record[$field] = [string]$value }
+                    }
+                    $state = Get-Q1DictionaryValue -Object $observed -Name 'service_state'
+                    if ($null -eq $state) { $state = Get-Q1DictionaryValue -Object $observed -Name 'state' }
+                    if ($null -ne $state) {
+                        $record.service_state = [string]$state
+                        $record.state = [string]$state
+                    }
+                    $probeError = Get-Q1DictionaryValue -Object $observed -Name 'error'
+                    if ($null -ne $probeError -and -not [string]::IsNullOrWhiteSpace([string]$probeError)) {
+                        [void]$categories.Add('HOST_DRIVER_QUERY_FAILURE')
+                        [void]$errors.Add([string]$probeError)
+                    }
+                    if (-not $record.exists) {
+                        [void]$categories.Add('HOST_DRIVER_MISSING')
+                        [void]$errors.Add('driver file is missing or unreadable')
+                    }
+                }
+            }
+            catch {
+                [void]$categories.Add('HOST_DRIVER_QUERY_FAILURE')
+                [void]$errors.Add($_.Exception.Message)
+            }
+        }
+        else {
+            try {
+                if ([string]::IsNullOrWhiteSpace([string]$record.path)) {
+                    [void]$categories.Add('HOST_DRIVER_MISSING')
+                    [void]$errors.Add('driver contract path is empty')
+                }
+                elseif (-not (Test-Path -LiteralPath $record.path -PathType Leaf)) {
+                    [void]$categories.Add('HOST_DRIVER_MISSING')
+                    [void]$errors.Add('driver file does not exist')
+                }
+                else {
+                    $record.exists = $true
+                    $version = [Diagnostics.FileVersionInfo]::GetVersionInfo([string]$record.path)
+                    $record.file_version = $version.FileVersion
+                    $record.product_version = $version.ProductVersion
+                    $record.sha256 = (Get-FileHash -LiteralPath $record.path -Algorithm SHA256).Hash.ToUpperInvariant()
+                    $signature = Get-AuthenticodeSignature -FilePath $record.path
+                    $record.signature_status = [string]$signature.Status
+                    if ($null -ne $signature.SignerCertificate) {
+                        $record.signer = $signature.SignerCertificate.Subject
+                    }
+                }
+            }
+            catch {
+                [void]$categories.Add('HOST_DRIVER_QUERY_FAILURE')
+                [void]$errors.Add($_.Exception.Message)
+            }
+            try {
+                $service = Get-Service -Name $name -ErrorAction Stop
+                $record.service_state = [string]$service.Status
+                $record.state = [string]$service.Status
+            }
+            catch {
+                [void]$categories.Add('HOST_DRIVER_QUERY_FAILURE')
+                [void]$errors.Add(('driver service state query failed: {0}' -f $_.Exception.Message))
+            }
+        }
+        $record.error = if ($errors.Count -eq 0) { $null } else { $errors -join '; ' }
+        $record.failure_categories = @($categories | Select-Object -Unique)
+        $record.failure_category = if ($record.failure_categories.Count -eq 0) {
+            $null
+        }
+        elseif ($record.failure_categories.Count -eq 1) {
+            [string]$record.failure_categories[0]
+        }
+        else {
+            'MULTIPLE_FAILURES'
+        }
+        [void]$records.Add([pscustomobject]$record)
+    }
+    $records.ToArray()
+}
+
 function Test-DriverVersionEvidence {
     param(
         [Parameter(Mandatory = $true)]$Drivers,
@@ -1285,32 +1582,49 @@ function Test-DriverVersionEvidence {
     )
 
     $failures = New-Object System.Collections.Generic.List[string]
+    $contractValidation = Get-Q1DriverContractValidation -Contract $Contract
+    if (-not $contractValidation.valid) {
+        foreach ($failure in @($contractValidation.failures)) {
+            [void]$failures.Add(('CONTRACT_ENUMERATION_FAILURE: {0}' -f $failure))
+        }
+    }
     foreach ($name in @('AMDPowerProfiler', 'AMDCpuProfiler')) {
-        $expected = $Contract.driver_versions.$name
+        $expected = Get-Q1DictionaryValue -Object (Get-Q1DictionaryValue -Object $Contract -Name 'driver_versions') -Name $name
         $actual = @($Drivers | Where-Object { [string]$_.name -ieq $name }) | Select-Object -First 1
+        if ($null -eq $expected) {
+            [void]$failures.Add(('{0} driver contract entry is absent' -f $name))
+            continue
+        }
         if ($null -eq $actual) {
             [void]$failures.Add(('{0} driver evidence is absent' -f $name))
             continue
         }
-        if ([string]$actual.file_version -cne $expected.file_version) {
+        if (-not [bool](Get-Q1DictionaryValue -Object $actual -Name 'exists' -Default $true)) {
+            [void]$failures.Add(('{0} driver is missing' -f $name))
+        }
+        if ([string](Get-Q1DictionaryValue -Object $actual -Name 'file_version') -cne [string](Get-Q1DictionaryValue -Object $expected -Name 'file_version')) {
             [void]$failures.Add(('{0} file version mismatch' -f $name))
         }
-        if ([string]$actual.product_version -cne $expected.product_version) {
+        if ([string](Get-Q1DictionaryValue -Object $actual -Name 'product_version') -cne [string](Get-Q1DictionaryValue -Object $expected -Name 'product_version')) {
             [void]$failures.Add(('{0} product version mismatch' -f $name))
         }
-        if ([string]$actual.state -ine 'Running') {
+        $state = Get-Q1DictionaryValue -Object $actual -Name 'service_state'
+        if ($null -eq $state) { $state = Get-Q1DictionaryValue -Object $actual -Name 'state' }
+        if ([string]$state -ine 'Running') {
             [void]$failures.Add(('{0} driver is not Running' -f $name))
         }
-        if ([string]$actual.signature_status -ine 'Valid') {
+        if ([string](Get-Q1DictionaryValue -Object $actual -Name 'signature_status') -ine 'Valid') {
             [void]$failures.Add(('{0} driver Authenticode status is not Valid' -f $name))
         }
-        if ([string]$actual.signer -notmatch $expected.signer_pattern) {
+        if ([string](Get-Q1DictionaryValue -Object $actual -Name 'signer') -notmatch [string](Get-Q1DictionaryValue -Object $expected -Name 'signer_pattern')) {
             [void]$failures.Add(('{0} driver signer is not AMD' -f $name))
         }
     }
     [pscustomobject]@{
         valid = ($failures.Count -eq 0)
         failures = @($failures)
+        contract_valid = [bool]$contractValidation.valid
+        contract_validation = $contractValidation
     }
 }
 

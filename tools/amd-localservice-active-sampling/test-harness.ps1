@@ -81,6 +81,8 @@ Assert-Equal -Actual $contract.amd_cli_interval_ms -Expected 1000 -Message 'CLI 
 Assert-Equal -Actual $contract.amd_cli_duration_seconds -Expected 10 -Message 'CLI duration'
 Assert-Equal -Actual $contract.max_runs -Expected 1 -Message 'one-shot max runs'
 Assert-Equal -Actual $contract.retries -Expected 0 -Message 'retry prohibition'
+Assert-Equal -Actual $contract.authorization_token -Expected 'AMD-LOCALSERVICE-ACTIVE-SAMPLING-Q1-REVIEWED-PREFLIGHT-FIX-I1' -Message 'new reviewed-head authorization token'
+Assert-Equal -Actual $contract.authorization_environment_value -Expected 'GRANTED_FOR_NEW_REVIEWED_HEAD_ONLY' -Message 'new reviewed-head authorization marker'
 Assert-True -Condition $contract.live_service_mutation_supported -Message 'live service mutation capability is explicit'
 Assert-True -Condition $contract.live_output_acl_mutation_supported -Message 'live output ACL capability is explicit'
 Assert-True -Condition $contract.live_control_baseline_lsa_mutation_supported -Message 'live CONTROL baseline LSA capability is explicit'
@@ -175,6 +177,77 @@ $badDrivers = @($drivers | ForEach-Object {
 })
 $badDriverGate = Test-DriverVersionEvidence -Drivers $badDrivers -Contract $contract
 Assert-True -Condition (-not $badDriverGate.valid) -Message 'driver version mismatch must block'
+$driverContract = Get-Q1DriverContractValidation -Contract (Get-AmdLocalServiceSamplingContract)
+Assert-True -Condition $driverContract.valid -Message 'frozen driver contract validates'
+Assert-Equal -Actual $driverContract.entries.Count -Expected 2 -Message 'exactly two frozen driver entries are enumerated'
+Assert-ArrayEqual -Actual $driverContract.actual_keys -Expected @('AMDPowerProfiler', 'AMDCpuProfiler') -Message 'OrderedDictionary driver keys'
+Assert-True -Condition (-not (@($driverContract.actual_keys | Where-Object { $_ -in @('Count', 'Keys', 'Values', 'SyncRoot') }).Count -gt 0)) -Message 'OrderedDictionary adapter properties are excluded'
+Assert-True -Condition ((Get-AmdLocalServiceSamplingContract).driver_versions -is [System.Collections.Specialized.OrderedDictionary]) -Message 'driver contract is an OrderedDictionary'
+$hostDriverProbe = {
+    param($Name, $Expected)
+    [pscustomobject]@{
+        name = $Name
+        path = Get-Q1DictionaryValue -Object $Expected -Name 'path'
+        exists = $true
+        file_version = Get-Q1DictionaryValue -Object $Expected -Name 'file_version'
+        product_version = Get-Q1DictionaryValue -Object $Expected -Name 'product_version'
+        sha256 = ('A' * 64)
+        signature_status = 'Valid'
+        signer = 'CN=Advanced Micro Devices, Inc.'
+        service_state = 'Running'
+    }
+}
+$hostDrivers = @(Get-HostDriverEvidence -Contract $contract -Probe $hostDriverProbe)
+Assert-Equal -Actual $hostDrivers.Count -Expected 2 -Message 'host driver evidence returns both frozen drivers'
+Assert-True -Condition (-not (@($hostDrivers | Where-Object { $_.name -in @('Count', 'Keys', 'Values', 'SyncRoot') }).Count -gt 0)) -Message 'host evidence does not emit adapter properties as drivers'
+Assert-True -Condition (@($hostDrivers | Where-Object { $_.name -eq 'AMDPowerProfiler' -and $_.exists -and $_.service_state -eq 'Running' }).Count -eq 1) -Message 'power driver host evidence is structured'
+Assert-True -Condition (@($hostDrivers | Where-Object { $_.name -eq 'AMDCpuProfiler' -and $_.exists -and $_.service_state -eq 'Running' }).Count -eq 1) -Message 'CPU driver host evidence is structured'
+$missingDriverProbe = {
+    param($Name, $Expected)
+    [pscustomobject]@{
+        name = $Name
+        path = Get-Q1DictionaryValue -Object $Expected -Name 'path'
+        exists = $false
+        service_state = $null
+        error = 'offline missing-driver fixture'
+    }
+}
+$missingDriverEvidence = @(Get-HostDriverEvidence -Contract $contract -Probe $missingDriverProbe)
+Assert-True -Condition (@($missingDriverEvidence | Where-Object { -not $_.exists -and $_.failure_categories -contains 'HOST_DRIVER_MISSING' -and $_.error }).Count -eq 2) -Message 'missing driver returns structured failure records'
+$missingDriverGate = Test-DriverVersionEvidence -Drivers $missingDriverEvidence -Contract $contract
+Assert-True -Condition (-not $missingDriverGate.valid) -Message 'missing driver fails the preflight driver gate cleanly'
+$mismatchDriverProbe = {
+    param($Name, $Expected)
+    $fileVersion = if ($Name -eq 'AMDPowerProfiler') { '0.0.0.0' } else { Get-Q1DictionaryValue -Object $Expected -Name 'file_version' }
+    [pscustomobject]@{
+        name = $Name
+        path = Get-Q1DictionaryValue -Object $Expected -Name 'path'
+        exists = $true
+        file_version = $fileVersion
+        product_version = Get-Q1DictionaryValue -Object $Expected -Name 'product_version'
+        sha256 = ('B' * 64)
+        signature_status = 'Valid'
+        signer = 'CN=Advanced Micro Devices, Inc.'
+        service_state = 'Running'
+    }
+}
+$mismatchDriverEvidence = @(Get-HostDriverEvidence -Contract $contract -Probe $mismatchDriverProbe)
+$mismatchDriverGate = Test-DriverVersionEvidence -Drivers $mismatchDriverEvidence -Contract $contract
+Assert-True -Condition (-not $mismatchDriverGate.valid) -Message 'driver version mismatch fails the preflight driver gate'
+$queryFailureDriverEvidence = @(Get-HostDriverEvidence -Contract $contract -Probe { param($Name, $Expected) throw "offline host query failure: $Name" })
+Assert-True -Condition (@($queryFailureDriverEvidence | Where-Object { $_.failure_category -eq 'HOST_DRIVER_QUERY_FAILURE' -and -not [string]::IsNullOrWhiteSpace([string]$_.error) }).Count -eq 2) -Message 'driver query exception is structured and fail closed'
+$malformedDriverContract = Get-AmdLocalServiceSamplingContract
+$malformedDriverContract.driver_versions.AMDPowerProfiler.path = $null
+$malformedDriverValidation = Get-Q1DriverContractValidation -Contract $malformedDriverContract
+Assert-True -Condition (-not $malformedDriverValidation.valid) -Message 'malformed driver contract is rejected'
+$malformedDriverEvidence = @(Get-HostDriverEvidence -Contract $malformedDriverContract -Probe $hostDriverProbe)
+Assert-True -Condition (@($malformedDriverEvidence | Where-Object { $_.name -eq 'AMDPowerProfiler' -and -not $_.contract_valid -and $_.failure_category -eq 'CONTRACT_ENUMERATION_FAILURE' }).Count -eq 1) -Message 'malformed driver contract returns structured evidence'
+$noisyDriverContract = Get-AmdLocalServiceSamplingContract
+[void]$noisyDriverContract.driver_versions.Add('Count', [ordered]@{ path = 'C:\noise.sys'; file_version = '0'; product_version = '0'; signer_pattern = 'noise'; file_name = 'noise.sys' })
+$noisyDriverValidation = Get-Q1DriverContractValidation -Contract $noisyDriverContract
+Assert-True -Condition (-not $noisyDriverValidation.valid) -Message 'unexpected driver contract key is rejected'
+$noisyDriverEvidence = @(Get-HostDriverEvidence -Contract $noisyDriverContract -Probe $hostDriverProbe)
+Assert-Equal -Actual $noisyDriverEvidence.Count -Expected 2 -Message 'unexpected driver contract key cannot become a host driver record'
 $sourceIdentity = Test-HarnessSourceIdentity -Root $ToolRoot -Contract $contract
 Assert-True -Condition $sourceIdentity.valid -Message 'reviewed harness source identity'
 $driftContract = Get-AmdLocalServiceSamplingContract
@@ -322,10 +395,24 @@ finally {
 
 $gateFixtureRoot = New-TestRoot
 try {
+    $gateFixtureContract = [ordered]@{
+        output_base = $gateFixtureRoot
+        gate_file_name = 'Q1-LIVE-GATE.json'
+        task_id = $contract.task_id
+        max_runs = 1
+        retries = 0
+    }
+    $availableGateState = Get-Q1GateState -Contract $gateFixtureContract
+    Assert-Equal -Actual $availableGateState.state -Expected 'AVAILABLE' -Message 'read-only gate inspection reports available'
+    Assert-True -Condition $availableGateState.valid -Message 'available gate state is valid'
+    Assert-True -Condition (-not (Test-Path -LiteralPath (Join-Path $gateFixtureRoot 'Q1-LIVE-GATE.json'))) -Message 'read-only gate inspection does not create the gate'
     $gatePath = Join-Path $gateFixtureRoot 'Q1-LIVE-GATE.json'
     $gateRecord = New-OneShotGateRecord -TaskId $contract.task_id -RunId 'offline-gate-fixture' -MaxRuns 1 -Retries 0 -RealExecutionAllowed $false
     $firstGate = Acquire-OneShotGateFile -GatePath $gatePath -GateRecord $gateRecord
     Assert-Equal -Actual $firstGate.state -Expected 'CONSUMED' -Message 'first isolated gate is consumed'
+    $consumedGateState = Get-Q1GateState -Contract $gateFixtureContract
+    Assert-Equal -Actual $consumedGateState.state -Expected 'ALREADY_CONSUMED' -Message 'read-only gate inspection reports consumed'
+    Assert-True -Condition $consumedGateState.valid -Message 'consumed gate state is valid'
     $secondGateBlocked = $false
     try {
         Acquire-OneShotGateFile -GatePath $gatePath -GateRecord $gateRecord | Out-Null
@@ -335,6 +422,10 @@ try {
     }
     Assert-True -Condition $secondGateBlocked -Message 'consumed gate rejects second live attempt'
     Assert-True -Condition (Test-Path -LiteralPath $gatePath -PathType Leaf) -Message 'consumed gate remains durable'
+    [IO.File]::WriteAllText($gatePath, '{}')
+    $invalidGateState = Get-Q1GateState -Contract $gateFixtureContract
+    Assert-Equal -Actual $invalidGateState.state -Expected 'INVALID_OR_UNREADABLE' -Message 'malformed gate is reported as invalid'
+    Assert-True -Condition (-not $invalidGateState.valid) -Message 'malformed gate fails closed'
 }
 finally {
     if (Test-Path -LiteralPath $gateFixtureRoot) {
@@ -532,6 +623,10 @@ Assert-Contains -Text $runnerText -Needle 'Grant-Q1ServiceSidOutputAccess' -Mess
 Assert-Contains -Text $runnerText -Needle 'Seal-Q1Evidence' -Message 'raw evidence sealing path exists'
 Assert-Contains -Text $runnerText -Needle 'KeepRegistration' -Message 'service deletion is deferred until recovery/sealing'
 Assert-Contains -Text $runnerText -Needle 'Test-HarnessSourceIdentity' -Message 'reviewed harness source identity is enforced'
+Assert-Contains -Text $runnerText -Needle "ValidateSet('DryRun', 'Preflight', 'Live')" -Message 'read-only host preflight mode is exposed'
+Assert-Contains -Text $runnerText -Needle 'Get-Q1GateState' -Message 'read-only Q1 gate inspection exists'
+Assert-Contains -Text $runnerText -Needle 'Get-Q1DriverContractValidation' -Message 'driver contract validation is shared with live preflight'
+Assert-True -Condition (-not ($runnerText -match '\$Contract\.driver_versions\.PSObject\.Properties')) -Message 'live preflight does not enumerate driver adapter properties'
 Assert-Contains -Text $serviceText -Needle 'ServiceBase' -Message 'dedicated ServiceBase host exists'
 Assert-Contains -Text $serviceText -Needle 'Get-EffectiveTokenEvidence' -Message 'effective token capture exists'
 Assert-Contains -Text $serviceText -Needle 'ExpectedServiceSid' -Message 'exact Service SID token validation exists'
@@ -564,6 +659,26 @@ Assert-Equal -Actual $dry.harness_live_contract_allows_control_baseline_lsa_muta
 Assert-Equal -Actual $dry.allowed_lsa_right -Expected 'SeSystemProfilePrivilege' -Message 'dry-run allowed LSA right'
 Assert-Equal -Actual $dry.allowed_lsa_target -Expected 'EXACT_Q1_SERVICE_SID_ONLY' -Message 'dry-run allowed LSA target'
 Assert-True -Condition (-not (Test-Path -LiteralPath $contract.output_base)) -Message 'dry-run did not create ProgramData output base'
+$preflightGateBefore = Get-Q1GateState -Contract $contract
+$preflightOutput = & $powershell -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $RunnerPath -Mode Preflight 2>&1 | Out-String
+$preflightExitCode = $LASTEXITCODE
+Assert-True -Condition (@(0, 1) -contains $preflightExitCode) -Message 'read-only preflight returns a controlled status code'
+$preflight = $preflightOutput | ConvertFrom-Json
+Assert-True -Condition (@('PREFLIGHT_PASS', 'PREFLIGHT_BLOCKED') -contains [string]$preflight.result) -Message 'read-only preflight returns a structured result'
+Assert-Equal -Actual $preflight.mode -Expected 'PREFLIGHT' -Message 'read-only preflight mode'
+Assert-Equal -Actual $preflight.authorization_required -Expected $false -Message 'preflight does not require live authorization'
+Assert-Equal -Actual $preflight.amd_cli_real_invocations -Expected 0 -Message 'preflight AMD CLI count'
+Assert-Equal -Actual $preflight.power_sampling_runs -Expected 0 -Message 'preflight sampling count'
+Assert-Equal -Actual $preflight.service_mutations -Expected 0 -Message 'preflight service mutation count'
+Assert-Equal -Actual $preflight.lsa_mutations -Expected 0 -Message 'preflight LSA mutation count'
+Assert-Equal -Actual $preflight.acl_mutations -Expected 0 -Message 'preflight ACL mutation count'
+Assert-Equal -Actual $preflight.candidate_run_root_created -Expected $false -Message 'preflight does not create a candidate run root'
+Assert-True -Condition (-not $preflight.candidate_run_root_exists) -Message 'preflight candidate run root remains absent'
+Assert-True -Condition (-not $preflight.service_lifecycle.created) -Message 'preflight does not create a service'
+Assert-Equal -Actual $preflight.q1_gate_state -Expected $preflight.preflight.q1_gate.state -Message 'preflight reports the same read-only gate state'
+$preflightGateAfter = Get-Q1GateState -Contract $contract
+Assert-Equal -Actual $preflightGateAfter.state -Expected $preflightGateBefore.state -Message 'preflight does not consume or alter the Q1 gate'
+Assert-Equal -Actual $preflightGateAfter.exists -Expected $preflightGateBefore.exists -Message 'preflight does not create the Q1 gate'
 
 $previousErrorActionPreference = $ErrorActionPreference
 $ErrorActionPreference = 'Continue'
@@ -586,6 +701,9 @@ Assert-True -Condition ($null -eq $residualProcess) -Message 'offline tests star
     command_contract = 'PASS'
     token_contract = 'PASS'
     binary_driver_contract = 'PASS'
+    ordered_dictionary_driver_enumeration = 'PASS'
+    host_driver_evidence_behavior = 'PASS'
+    read_only_preflight_mode = 'PASS'
     csv_validation = 'PASS'
     lsa_recovery_fault_injection = 'PASS'
     independent_service_sid_anchor = 'PASS'
