@@ -43,15 +43,17 @@ function Get-AmdLocalServiceSamplingContract {
         forbidden_group_sids = @('S-1-5-32-544')
         expected_main_pin = 'e74153e74a416a1c8c542498b8b87cc6d146f5cf'
         design_checkpoint = 'd2a2e536181924f0dededd8b15f2964cffbe8101'
-        authorization_token = 'AMD-LOCALSERVICE-ACTIVE-SAMPLING-Q1-REVIEWED-PREFLIGHT-FIX-I1'
-        authorization_environment = 'AMD_LOCALSERVICE_ACTIVE_SAMPLING_AUTHORIZATION'
-        authorization_environment_value = 'GRANTED_FOR_NEW_REVIEWED_HEAD_ONLY'
+        q1_live_retired = $true
+        q1_live_authorization_available = $false
+        historical_authorization_token = 'AMD-LOCALSERVICE-ACTIVE-SAMPLING-Q1-REVIEWED-PREFLIGHT-FIX-I1'
+        historical_authorization_environment = 'AMD_LOCALSERVICE_ACTIVE_SAMPLING_AUTHORIZATION'
+        historical_authorization_environment_value = 'GRANTED_FOR_NEW_REVIEWED_HEAD_ONLY'
         gate_file_name = 'Q1-LIVE-GATE.json'
         harness_identity_mode = 'SOURCE_SHA256_PINNED'
-        contract_canonical_sha256 = 'BBCC0D03E6816F020B893D11884AC84F609964B86C8F46BD7BD47D3873AC226E'
+        contract_canonical_sha256 = '6A340C940DD56F705EED3C9D84DBD5D4F8BA57D065A2F4752686725689870E40'
         harness_source_sha256 = [ordered]@{
-            contract = 'BBCC0D03E6816F020B893D11884AC84F609964B86C8F46BD7BD47D3873AC226E'
-            runner = 'D89C98BBC65FBC0B8F49A12A64E9936DCF3697053D0FB84B3525D89F3A4769B1'
+            contract = '6A340C940DD56F705EED3C9D84DBD5D4F8BA57D065A2F4752686725689870E40'
+            runner = '5A43380E305F7EC04D7C017D403D116B29B6E13FE9A8AB0586F198572D17AB3B'
             service_host = '397AF1205D94B26F6A3B7DC4F158541B138AF69B507AD48E9B485ADE4CA9B3BA'
             sc_argument_contract = 'A238266DF382BFE2870E11ED40A14468EF7BCB58807D0F235D17C5A3C3F5E5FA'
             i2e_runtime_library = 'BC22E7599A64D61BC3B93351328B546656D1393EFABC87106630A86F43A71F08'
@@ -735,6 +737,80 @@ function Get-Q1GateState {
             record = $null
             error = $_.Exception.Message
         }
+    }
+}
+
+function Test-Q1LiveRetired {
+    param([Parameter(Mandatory = $true)]$Contract)
+
+    [bool](Get-Q1DictionaryValue -Object $Contract -Name 'q1_live_retired' -Default $false)
+}
+
+function Get-Q1LiveRetirementResult {
+    param([Parameter(Mandatory = $true)]$Contract)
+
+    [pscustomobject]@{
+        schema = 'amd-localservice-active-sampling-q1/live-retirement/v1'
+        result = 'BLOCKED_Q1_LIVE_RETIRED'
+        mode = 'LIVE'
+        task_id = [string]$Contract.task_id
+        q1_live_retired = $true
+        q1_live_authorization_available = $false
+        authorization_required = $false
+        authorization_materialized = $false
+        authorization_accepted = $false
+        real_execution_allowed = $false
+        blocked_before_authorization = $true
+        q1_gate_inspected = $false
+        q1_gate_state = 'NOT_INSPECTED_DUE_TO_LIVE_RETIREMENT'
+        gate_consumed = $null
+        gate_consumed_by_this_attempt = $false
+        gate_file_created = $false
+        gate_file_changed = $false
+        run_root_created = $false
+        service_lifecycle = [ordered]@{
+            created = $false
+            started = $false
+            stopped = $false
+            deleted = $false
+        }
+        amd_cli_real_invocations = 0
+        amd_api_real_invocations = 0
+        power_sampling_runs = 0
+        service_mutations = 0
+        lsa_mutations = 0
+        token_mutations = 0
+        acl_mutations = 0
+        device_mutations = 0
+        driver_mutations = 0
+        platform_security_mutations = 0
+        current_task_service_mutations = 0
+        current_task_lsa_mutations = 0
+        current_task_token_mutations = 0
+        current_task_acl_mutations = 0
+        current_task_device_mutations = 0
+        current_task_driver_mutations = 0
+        current_task_platform_security_mutations = 0
+        note = 'Q1 Live is source-level retired; no authorization, gate, output root, service, LSA, ACL, token, driver, platform, or AMD operation was attempted.'
+    }
+}
+
+function Get-Q1PreflightGateAccounting {
+    param([AllowNull()]$Gate)
+
+    $state = [string](Get-Q1DictionaryValue -Object $Gate -Name 'state' -Default 'INVALID_OR_UNREADABLE')
+    if ($state -ceq 'CONSUMED') {
+        $state = 'ALREADY_CONSUMED'
+    }
+    if ($state -cnotin @('AVAILABLE', 'ALREADY_CONSUMED', 'INVALID_OR_UNREADABLE')) {
+        $state = 'INVALID_OR_UNREADABLE'
+    }
+    [pscustomobject]@{
+        q1_gate_state = $state
+        gate_consumed = ($state -ceq 'ALREADY_CONSUMED')
+        gate_consumed_by_this_preflight = $false
+        preflight_gate_file_created = $false
+        preflight_gate_file_changed = $false
     }
 }
 

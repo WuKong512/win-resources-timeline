@@ -134,6 +134,38 @@ consumed gate does not imply that AMD was invoked. The actual Q1 gate was only
 read for the allowed postmortem/preflight checks; it was not rewritten, reset,
 or recreated by this repair.
 
+## R1 live-retirement and Preflight accounting closure
+
+The Q1 Live path is now source-level retired. The contract records:
+
+~~~text
+Q1_LIVE_RETIRED = true
+Q1_LIVE_AUTHORIZATION_AVAILABLE = false
+OLD_AUTHORIZATION_REUSABLE = NO
+NEW_Q1_LIVE_AUTHORIZATION_CREATED = NO
+~~~
+
+`-Mode Live` returns `BLOCKED_Q1_LIVE_RETIRED` before authorization validation,
+gate inspection, run-root creation, service lifecycle, LSA/ACL/token mutation,
+or AMD invocation. The historical authorization token and environment marker
+remain only as explicitly named historical fields; no replacement Q1
+authorization exists. This source-level retirement does not depend on the
+historical gate being readable or consumed.
+
+Read-only Preflight now reports gate facts separately:
+
+~~~text
+q1_gate_state = AVAILABLE | ALREADY_CONSUMED | INVALID_OR_UNREADABLE
+gate_consumed = true only for ALREADY_CONSUMED
+gate_consumed_by_this_preflight = false
+preflight_gate_file_created = false
+preflight_gate_file_changed = false
+~~~
+
+Thus an already-consumed historical gate is reported as consumed without
+claiming that Preflight consumed it. The isolated available, consumed, and
+invalid fixtures all preserve the gate file and remain mutation-free.
+
 ## Validation status
 
 The offline harness suite passed the dictionary/object-shape, historical gate
@@ -157,6 +189,7 @@ platform-security mutation, or production-runtime change occurred.
 
 ~~~text
 AMD_LOCALSERVICE_ACTIVE_SAMPLING_Q1_POSTMORTEM_FIX_I1 = PASS
+AMD_LOCALSERVICE_ACTIVE_SAMPLING_Q1_POSTMORTEM_FIX_R1 = PASS
 PRIMARY_BUG = FIXED
 LSA_IDICTIONARY_VALIDATION = FIXED
 LSA_REAL_SHAPE_REGRESSION = PASS
@@ -176,10 +209,16 @@ POWER_SAMPLING_RUNS = 0
 CURRENT_TASK_SERVICE_MUTATIONS = 0
 CURRENT_TASK_LSA_MUTATIONS = 0
 CURRENT_TASK_ACL_MUTATIONS = 0
+Q1_LIVE_SOURCE_LEVEL_RETIRED = YES
+Q1_LIVE_RETIRED = true
+Q1_LIVE_AUTHORIZATION_AVAILABLE = false
 OLD_AUTHORIZATION_REUSABLE = NO
 NEW_LIVE_AUTHORIZATION_CREATED = NO
-SELECTED_NEXT_TASK = HUMAN_REVIEW_PR29_Q1_POSTMORTEM_FIX
-NEXT_GATE = HUMAN_REVIEW_PR29_Q1_POSTMORTEM_FIX
+NEW_Q1_LIVE_AUTHORIZATION_CREATED = NO
+PREFLIGHT_GATE_ACCOUNTING = UNAMBIGUOUS
+PREFLIGHT_GATE_CONSUMED_BY_THIS_PREFLIGHT = false
+SELECTED_NEXT_TASK = HUMAN_REVIEW_PR29_Q1_POSTMORTEM_FIX_R1
+NEXT_GATE = HUMAN_REVIEW_PR29_Q1_POSTMORTEM_FIX_R1
 ~~~
 
 The next action is human review of PR #29 and this postmortem repair. The Q1

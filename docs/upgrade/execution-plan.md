@@ -2671,3 +2671,45 @@ corrects dictionary-shaped LSA validation and separates authoritative gate
 accounting from AMD invocation accounting; it makes no scientific claim about
 LocalService sampling. No AMD, service, LSA, ACL, token, driver, device, or
 platform-security operation was performed while creating this marker.
+
+## Current-state additive marker: AMD LocalService Q1 postmortem fix R1
+
+This marker records the narrow review-closure repair. It does not reopen the
+consumed Q1 gate or create a replacement authorization.
+
+~~~text
+AMD_LOCALSERVICE_ACTIVE_SAMPLING_Q1_POSTMORTEM_FIX_R1 = PASS
+REVIEW_BLOCKER_1 = FIXED
+Q1_LIVE_SOURCE_LEVEL_RETIRED = YES
+OLD_AUTHORIZATION_REUSABLE = NO
+NEW_Q1_LIVE_AUTHORIZATION_CREATED = NO
+REVIEW_BLOCKER_2 = FIXED
+PREFLIGHT_GATE_ACCOUNTING = UNAMBIGUOUS
+PREFLIGHT_GATE_CONSUMED_BY_THIS_PREFLIGHT = false
+HISTORICAL_Q1_GATE_STATE = CONSUMED
+HISTORICAL_Q1_RERUN_ALLOWED = NO
+HISTORICAL_Q1_RESULT = BLOCKED_BY_HARNESS_VALIDATION_BUG
+SCIENTIFIC_RESULT = NOT_OBTAINED
+PROXY_VERDICT = INSUFFICIENT
+ENUMERATION_AND_SAMPLING_EQUIVALENCE = UNKNOWN
+AMD_PRODUCTION_ADMISSION = DEFER
+PRODUCTION_ACCOUNT = UNRESOLVED
+I2H_JUSTIFIED = NO
+REAL_EXECUTION_ALLOWED = false
+AMD_CLI_REAL_INVOCATIONS = 0
+POWER_SAMPLING_RUNS = 0
+CURRENT_TASK_SERVICE_MUTATIONS = 0
+CURRENT_TASK_LSA_MUTATIONS = 0
+CURRENT_TASK_ACL_MUTATIONS = 0
+HISTORICAL_RAW_EVIDENCE_CHANGED = NO
+Q1_GATE_FILE_CHANGED = NO
+SELECTED_NEXT_TASK = HUMAN_REVIEW_PR29_Q1_POSTMORTEM_FIX_R1
+NEXT_GATE = HUMAN_REVIEW_PR29_Q1_POSTMORTEM_FIX_R1
+CURRENT_STATE_DOCUMENT =
+  docs/upgrade/amd-localservice-active-sampling-q1-postmortem-fix-i1.md
+~~~
+
+The source-level retirement block is checked before any live authorization or
+gate operation. Preflight continues to inspect the authoritative gate
+read-only and reports its consumed state separately from whether that
+Preflight changed or consumed the file.

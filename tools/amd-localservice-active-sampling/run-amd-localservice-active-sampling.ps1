@@ -1731,6 +1731,7 @@ function Invoke-ReadOnlyPreflight {
     $valid = [bool](Get-ContractPropertyValue -Object $preflight -Name 'valid' -Default $false)
     $gate = Get-ContractPropertyValue -Object $preflight -Name 'q1_gate'
     if ($null -eq $gate) { $gate = Get-Q1GateState -Contract $Contract }
+    $gateAccounting = Get-Q1PreflightGateAccounting -Gate $gate
     [pscustomobject]@{
         schema = 'amd-localservice-active-sampling-q1/preflight/v1'
         result = if ($valid) { 'PREFLIGHT_PASS' } else { 'PREFLIGHT_BLOCKED' }
@@ -1744,9 +1745,12 @@ function Invoke-ReadOnlyPreflight {
         candidate_run_root_created = $false
         candidate_run_root_exists = (Test-Path -LiteralPath $candidateRunRoot)
         preflight = $preflight
-        q1_gate_state = [string]$gate.state
+        q1_gate_state = $gateAccounting.q1_gate_state
         q1_gate = $gate
-        gate_consumed = $false
+        gate_consumed = $gateAccounting.gate_consumed
+        gate_consumed_by_this_preflight = $gateAccounting.gate_consumed_by_this_preflight
+        preflight_gate_file_created = $gateAccounting.preflight_gate_file_created
+        preflight_gate_file_changed = $gateAccounting.preflight_gate_file_changed
         service_lifecycle = [ordered]@{
             created = $false
             started = $false
@@ -1781,16 +1785,16 @@ function Assert-LiveAuthorization {
         [string]$Token
     )
 
+    if (Test-Q1LiveRetired -Contract $Contract) {
+        throw 'BLOCKED_Q1_LIVE_RETIRED'
+    }
+    if (-not [bool](Get-Q1DictionaryValue -Object $Contract -Name 'q1_live_authorization_available' -Default $false)) {
+        throw 'Q1 live authorization is unavailable'
+    }
     if (-not $AuthorizationSwitch) {
         throw 'new explicit -AuthorizeLiveRun switch is required'
     }
-    if ($Token -cne $Contract.authorization_token) {
-        throw 'dedicated LocalService active-sampling authorization token is required'
-    }
-    $marker = [Environment]::GetEnvironmentVariable([string]$Contract.authorization_environment)
-    if ($marker -cne $Contract.authorization_environment_value) {
-        throw 'dedicated LocalService active-sampling authorization environment marker is required'
-    }
+    throw 'Q1 live authorization contract is retired'
 }
 
 function Invoke-LiveRun {
@@ -1800,6 +1804,9 @@ function Invoke-LiveRun {
         [string]$Token
     )
 
+    if (Test-Q1LiveRetired -Contract $Contract) {
+        return Get-Q1LiveRetirementResult -Contract $Contract
+    }
     Assert-LiveAuthorization -Contract $Contract -AuthorizationSwitch $AuthorizationSwitch -Token $Token
     $runId = New-QualificationRunId
     $runRoot = Get-QualificationRunRoot -OutputBase $Contract.output_base -RunId $runId
@@ -2077,6 +2084,11 @@ if ($Mode -eq 'Preflight') {
     if ([string]$preflightResult.result -eq 'PREFLIGHT_PASS') {
         exit 0
     }
+    exit 1
+}
+
+if (Test-Q1LiveRetired -Contract $contract) {
+    Write-Output (ConvertTo-JsonText -Value (Get-Q1LiveRetirementResult -Contract $contract))
     exit 1
 }
 

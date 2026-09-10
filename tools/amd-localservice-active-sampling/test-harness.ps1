@@ -81,8 +81,12 @@ Assert-Equal -Actual $contract.amd_cli_interval_ms -Expected 1000 -Message 'CLI 
 Assert-Equal -Actual $contract.amd_cli_duration_seconds -Expected 10 -Message 'CLI duration'
 Assert-Equal -Actual $contract.max_runs -Expected 1 -Message 'one-shot max runs'
 Assert-Equal -Actual $contract.retries -Expected 0 -Message 'retry prohibition'
-Assert-Equal -Actual $contract.authorization_token -Expected 'AMD-LOCALSERVICE-ACTIVE-SAMPLING-Q1-REVIEWED-PREFLIGHT-FIX-I1' -Message 'new reviewed-head authorization token'
-Assert-Equal -Actual $contract.authorization_environment_value -Expected 'GRANTED_FOR_NEW_REVIEWED_HEAD_ONLY' -Message 'new reviewed-head authorization marker'
+Assert-True -Condition $contract.q1_live_retired -Message 'Q1 Live is source-level retired'
+Assert-Equal -Actual $contract.q1_live_authorization_available -Expected $false -Message 'Q1 Live authorization is unavailable'
+Assert-True -Condition (-not $contract.Contains('authorization_token')) -Message 'retired contract has no active authorization token field'
+Assert-True -Condition (-not $contract.Contains('authorization_environment_value')) -Message 'retired contract has no active authorization marker field'
+Assert-Equal -Actual $contract.historical_authorization_token -Expected 'AMD-LOCALSERVICE-ACTIVE-SAMPLING-Q1-REVIEWED-PREFLIGHT-FIX-I1' -Message 'historical authorization token is retained only for audit'
+Assert-Equal -Actual $contract.historical_authorization_environment_value -Expected 'GRANTED_FOR_NEW_REVIEWED_HEAD_ONLY' -Message 'historical authorization marker is retained only for audit'
 Assert-True -Condition $contract.live_service_mutation_supported -Message 'live service mutation capability is explicit'
 Assert-True -Condition $contract.live_output_acl_mutation_supported -Message 'live output ACL capability is explicit'
 Assert-True -Condition $contract.live_control_baseline_lsa_mutation_supported -Message 'live CONTROL baseline LSA capability is explicit'
@@ -486,6 +490,10 @@ try {
     $availableGateState = Get-Q1GateState -Contract $gateFixtureContract
     Assert-Equal -Actual $availableGateState.state -Expected 'AVAILABLE' -Message 'read-only gate inspection reports available'
     Assert-True -Condition $availableGateState.valid -Message 'available gate state is valid'
+    $availableGateAccounting = Get-Q1PreflightGateAccounting -Gate $availableGateState
+    Assert-Equal -Actual $availableGateAccounting.q1_gate_state -Expected 'AVAILABLE' -Message 'available gate accounting state'
+    Assert-Equal -Actual $availableGateAccounting.gate_consumed -Expected $false -Message 'available gate accounting is not consumed'
+    Assert-Equal -Actual $availableGateAccounting.gate_consumed_by_this_preflight -Expected $false -Message 'available gate accounting is not consumed by preflight'
     Assert-True -Condition (-not (Test-Path -LiteralPath (Join-Path $gateFixtureRoot 'Q1-LIVE-GATE.json'))) -Message 'read-only gate inspection does not create the gate'
     $gatePath = Join-Path $gateFixtureRoot 'Q1-LIVE-GATE.json'
     $gateRecord = New-OneShotGateRecord -TaskId $contract.task_id -RunId 'offline-gate-fixture' -MaxRuns 1 -Retries 0 -RealExecutionAllowed $false
@@ -494,6 +502,10 @@ try {
     $consumedGateState = Get-Q1GateState -Contract $gateFixtureContract
     Assert-Equal -Actual $consumedGateState.state -Expected 'ALREADY_CONSUMED' -Message 'read-only gate inspection reports consumed'
     Assert-True -Condition $consumedGateState.valid -Message 'consumed gate state is valid'
+    $consumedGateAccounting = Get-Q1PreflightGateAccounting -Gate $consumedGateState
+    Assert-Equal -Actual $consumedGateAccounting.q1_gate_state -Expected 'ALREADY_CONSUMED' -Message 'consumed gate accounting state'
+    Assert-Equal -Actual $consumedGateAccounting.gate_consumed -Expected $true -Message 'consumed gate accounting is consumed'
+    Assert-Equal -Actual $consumedGateAccounting.gate_consumed_by_this_preflight -Expected $false -Message 'consumed gate accounting was not consumed by preflight'
     $secondGateBlocked = $false
     try {
         Acquire-OneShotGateFile -GatePath $gatePath -GateRecord $gateRecord | Out-Null
@@ -507,10 +519,64 @@ try {
     $invalidGateState = Get-Q1GateState -Contract $gateFixtureContract
     Assert-Equal -Actual $invalidGateState.state -Expected 'INVALID_OR_UNREADABLE' -Message 'malformed gate is reported as invalid'
     Assert-True -Condition (-not $invalidGateState.valid) -Message 'malformed gate fails closed'
+    $invalidGateAccounting = Get-Q1PreflightGateAccounting -Gate $invalidGateState
+    Assert-Equal -Actual $invalidGateAccounting.q1_gate_state -Expected 'INVALID_OR_UNREADABLE' -Message 'invalid gate accounting state'
+    Assert-Equal -Actual $invalidGateAccounting.gate_consumed -Expected $false -Message 'invalid gate accounting is not claimed consumed'
+    Assert-Equal -Actual $invalidGateAccounting.gate_consumed_by_this_preflight -Expected $false -Message 'invalid gate accounting was not consumed by preflight'
 }
 finally {
     if (Test-Path -LiteralPath $gateFixtureRoot) {
         Remove-Item -LiteralPath $gateFixtureRoot -Recurse -Force
+    }
+}
+
+$preflightAvailableAccounting = Get-Q1PreflightGateAccounting -Gate ([ordered]@{ state = 'AVAILABLE' })
+Assert-Equal -Actual $preflightAvailableAccounting.q1_gate_state -Expected 'AVAILABLE' -Message 'preflight available gate state is authoritative'
+Assert-Equal -Actual $preflightAvailableAccounting.gate_consumed -Expected $false -Message 'available gate is not consumed'
+Assert-Equal -Actual $preflightAvailableAccounting.gate_consumed_by_this_preflight -Expected $false -Message 'preflight does not consume an available gate'
+Assert-Equal -Actual $preflightAvailableAccounting.preflight_gate_file_created -Expected $false -Message 'available-gate preflight does not create a gate'
+Assert-Equal -Actual $preflightAvailableAccounting.preflight_gate_file_changed -Expected $false -Message 'available-gate preflight does not change a gate'
+$preflightConsumedAccounting = Get-Q1PreflightGateAccounting -Gate ([ordered]@{ state = 'ALREADY_CONSUMED' })
+Assert-Equal -Actual $preflightConsumedAccounting.q1_gate_state -Expected 'ALREADY_CONSUMED' -Message 'preflight consumed gate state is authoritative'
+Assert-Equal -Actual $preflightConsumedAccounting.gate_consumed -Expected $true -Message 'consumed gate is reported as consumed'
+Assert-Equal -Actual $preflightConsumedAccounting.gate_consumed_by_this_preflight -Expected $false -Message 'preflight did not consume an already-consumed gate'
+Assert-Equal -Actual $preflightConsumedAccounting.preflight_gate_file_created -Expected $false -Message 'consumed-gate preflight does not create a gate'
+Assert-Equal -Actual $preflightConsumedAccounting.preflight_gate_file_changed -Expected $false -Message 'consumed-gate preflight does not change a gate'
+$preflightInvalidAccounting = Get-Q1PreflightGateAccounting -Gate ([ordered]@{ state = 'INVALID_OR_UNREADABLE' })
+Assert-Equal -Actual $preflightInvalidAccounting.q1_gate_state -Expected 'INVALID_OR_UNREADABLE' -Message 'preflight invalid gate state is explicit'
+Assert-Equal -Actual $preflightInvalidAccounting.gate_consumed -Expected $false -Message 'invalid gate is not claimed consumed'
+Assert-Equal -Actual $preflightInvalidAccounting.gate_consumed_by_this_preflight -Expected $false -Message 'invalid-gate preflight did not consume a gate'
+Assert-Equal -Actual $preflightInvalidAccounting.preflight_gate_file_created -Expected $false -Message 'invalid-gate preflight does not create a gate'
+Assert-Equal -Actual $preflightInvalidAccounting.preflight_gate_file_changed -Expected $false -Message 'invalid-gate preflight does not change a gate'
+
+$retiredFixtureRoot = New-TestRoot
+try {
+    $retiredFixtureContract = [ordered]@{}
+    foreach ($entry in $contract.GetEnumerator()) {
+        $retiredFixtureContract[$entry.Key] = $entry.Value
+    }
+    $retiredFixtureContract.output_base = $retiredFixtureRoot
+    $retiredGateBefore = Get-Q1GateState -Contract $retiredFixtureContract
+    Assert-Equal -Actual $retiredGateBefore.state -Expected 'AVAILABLE' -Message 'retirement fixture starts with an available gate'
+    $retiredResult = Get-Q1LiveRetirementResult -Contract $retiredFixtureContract
+    Assert-Equal -Actual $retiredResult.result -Expected 'BLOCKED_Q1_LIVE_RETIRED' -Message 'source-retired live path returns structured block'
+    Assert-True -Condition $retiredResult.q1_live_retired -Message 'retired fixture remains source-retired'
+    Assert-Equal -Actual $retiredResult.real_execution_allowed -Expected $false -Message 'retired live path disallows execution'
+    Assert-Equal -Actual $retiredResult.q1_gate_inspected -Expected $false -Message 'retired live path does not inspect or consume the gate'
+    Assert-Equal -Actual $retiredResult.gate_file_created -Expected $false -Message 'retired live path does not create a gate'
+    Assert-Equal -Actual $retiredResult.gate_file_changed -Expected $false -Message 'retired live path does not change a gate'
+    Assert-Equal -Actual $retiredResult.service_mutations -Expected 0 -Message 'retired live path has no service mutations'
+    Assert-Equal -Actual $retiredResult.lsa_mutations -Expected 0 -Message 'retired live path has no LSA mutations'
+    Assert-Equal -Actual $retiredResult.acl_mutations -Expected 0 -Message 'retired live path has no ACL mutations'
+    Assert-Equal -Actual $retiredResult.amd_cli_real_invocations -Expected 0 -Message 'retired live path has no AMD invocation'
+    Assert-Equal -Actual $retiredResult.power_sampling_runs -Expected 0 -Message 'retired live path has no sampling run'
+    $retiredGateAfter = Get-Q1GateState -Contract $retiredFixtureContract
+    Assert-Equal -Actual $retiredGateAfter.state -Expected $retiredGateBefore.state -Message 'retired live path leaves isolated gate state unchanged'
+    Assert-Equal -Actual $retiredGateAfter.exists -Expected $retiredGateBefore.exists -Message 'retired live path leaves isolated gate presence unchanged'
+}
+finally {
+    if (Test-Path -LiteralPath $retiredFixtureRoot) {
+        Remove-Item -LiteralPath $retiredFixtureRoot -Recurse -Force
     }
 }
 
@@ -782,17 +848,68 @@ Assert-Equal -Actual $preflight.candidate_run_root_created -Expected $false -Mes
 Assert-True -Condition (-not $preflight.candidate_run_root_exists) -Message 'preflight candidate run root remains absent'
 Assert-True -Condition (-not $preflight.service_lifecycle.created) -Message 'preflight does not create a service'
 Assert-Equal -Actual $preflight.q1_gate_state -Expected $preflight.preflight.q1_gate.state -Message 'preflight reports the same read-only gate state'
+Assert-Equal -Actual $preflight.gate_consumed -Expected ($preflight.q1_gate_state -eq 'ALREADY_CONSUMED') -Message 'preflight gate consumption follows authoritative state'
+Assert-Equal -Actual $preflight.gate_consumed_by_this_preflight -Expected $false -Message 'preflight does not consume the gate itself'
+Assert-Equal -Actual $preflight.preflight_gate_file_created -Expected $false -Message 'preflight does not create the gate file'
+Assert-Equal -Actual $preflight.preflight_gate_file_changed -Expected $false -Message 'preflight does not change the gate file'
 $preflightGateAfter = Get-Q1GateState -Contract $contract
 Assert-Equal -Actual $preflightGateAfter.state -Expected $preflightGateBefore.state -Message 'preflight does not consume or alter the Q1 gate'
 Assert-Equal -Actual $preflightGateAfter.exists -Expected $preflightGateBefore.exists -Message 'preflight does not create the Q1 gate'
 
 $previousErrorActionPreference = $ErrorActionPreference
-$ErrorActionPreference = 'Continue'
-$liveOutput = & $powershell -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $RunnerPath -Mode Live 2>&1 | Out-String
-$ErrorActionPreference = $previousErrorActionPreference
-$liveExitCode = $LASTEXITCODE
-Assert-True -Condition ($liveExitCode -ne 0) -Message 'live mode without dedicated authorization must fail closed'
-Assert-Contains -Text $liveOutput -Needle 'AuthorizeLiveRun' -Message 'live authorization failure is explicit'
+$previousHistoricalMarker = [Environment]::GetEnvironmentVariable([string]$contract.historical_authorization_environment, [EnvironmentVariableTarget]::Process)
+try {
+    $retirementCases = @(
+        [pscustomobject]@{ name = 'no authorization'; token = $null; include_switch = $false; marker = $null }
+        [pscustomobject]@{ name = 'historical token'; token = $contract.historical_authorization_token; include_switch = $true; marker = $null }
+        [pscustomobject]@{ name = 'historical environment'; token = $null; include_switch = $false; marker = $contract.historical_authorization_environment_value }
+        [pscustomobject]@{ name = 'historical token and environment'; token = $contract.historical_authorization_token; include_switch = $true; marker = $contract.historical_authorization_environment_value }
+    )
+    foreach ($retirementCase in $retirementCases) {
+        [Environment]::SetEnvironmentVariable(
+            [string]$contract.historical_authorization_environment,
+            $retirementCase.marker,
+            [EnvironmentVariableTarget]::Process)
+        $liveArguments = @(
+            '-NoLogo'
+            '-NoProfile'
+            '-NonInteractive'
+            '-ExecutionPolicy'
+            'Bypass'
+            '-File'
+            $RunnerPath
+            '-Mode'
+            'Live'
+        )
+        if ($retirementCase.include_switch) {
+            $liveArguments += '-AuthorizeLiveRun'
+            $liveArguments += '-AuthorizationToken'
+            $liveArguments += [string]$retirementCase.token
+        }
+        $ErrorActionPreference = 'Continue'
+        $liveOutput = & $powershell @liveArguments 2>&1 | Out-String
+        $liveExitCode = $LASTEXITCODE
+        $ErrorActionPreference = $previousErrorActionPreference
+        Assert-True -Condition ($liveExitCode -ne 0) -Message ("{0} is blocked" -f $retirementCase.name)
+        $liveRetirement = $liveOutput | ConvertFrom-Json
+        Assert-Equal -Actual $liveRetirement.result -Expected 'BLOCKED_Q1_LIVE_RETIRED' -Message ("{0} is blocked by source retirement" -f $retirementCase.name)
+        Assert-Equal -Actual $liveRetirement.real_execution_allowed -Expected $false -Message ("{0} cannot execute" -f $retirementCase.name)
+        Assert-Equal -Actual $liveRetirement.service_mutations -Expected 0 -Message ("{0} has no service mutation" -f $retirementCase.name)
+        Assert-Equal -Actual $liveRetirement.lsa_mutations -Expected 0 -Message ("{0} has no LSA mutation" -f $retirementCase.name)
+        Assert-Equal -Actual $liveRetirement.acl_mutations -Expected 0 -Message ("{0} has no ACL mutation" -f $retirementCase.name)
+        Assert-Equal -Actual $liveRetirement.amd_cli_real_invocations -Expected 0 -Message ("{0} has no AMD invocation" -f $retirementCase.name)
+        Assert-Equal -Actual $liveRetirement.power_sampling_runs -Expected 0 -Message ("{0} has no sampling run" -f $retirementCase.name)
+        Assert-Equal -Actual $liveRetirement.gate_file_created -Expected $false -Message ("{0} does not create a gate" -f $retirementCase.name)
+        Assert-Equal -Actual $liveRetirement.gate_file_changed -Expected $false -Message ("{0} does not change a gate" -f $retirementCase.name)
+    }
+}
+finally {
+    $ErrorActionPreference = $previousErrorActionPreference
+    [Environment]::SetEnvironmentVariable(
+        [string]$contract.historical_authorization_environment,
+        $previousHistoricalMarker,
+        [EnvironmentVariableTarget]::Process)
+}
 $residualService = Get-CimInstance Win32_Service -ErrorAction SilentlyContinue |
     Where-Object { $_.Name -eq $contract.service_name }
 Assert-True -Condition ($null -eq $residualService) -Message 'unauthorized live path created no service'
@@ -819,7 +936,14 @@ Assert-True -Condition ($null -eq $residualProcess) -Message 'offline tests star
     evidence_manifest_sealing = 'PASS'
     launch_failure_successor_validation = 'PASS'
     invocation_ambiguity_accounting = 'PASS'
-    live_default_fail_closed = 'PASS'
+    live_retirement_contract = 'PASS'
+    live_no_authorization_blocked_by_retirement = 'PASS'
+    live_historical_token_blocked_by_retirement = 'PASS'
+    live_historical_environment_blocked_by_retirement = 'PASS'
+    live_historical_token_and_environment_blocked_by_retirement = 'PASS'
+    live_retirement_mutations = 0
+    preflight_gate_accounting = 'PASS'
+    preflight_gate_consumed_by_this_preflight = $false
     amd_cli_real_invocations = 0
     amd_api_real_invocations = 0
     power_sampling_runs = 0

@@ -10,6 +10,8 @@ Current state:
 HARNESS_IMPLEMENTATION = Q1_POSTMORTEM_FIX_I1_COMPLETE
 Q1_LIVE_RUN = CLOSED_BLOCKED_BY_HARNESS_VALIDATION_BUG
 Q1_LIVE_RUN_AUTHORIZED = NO
+Q1_LIVE_SOURCE_LEVEL_RETIRED = YES
+Q1_LIVE_AUTHORIZATION_AVAILABLE = NO
 HISTORICAL_Q1_RUN = q1-20260910T033830222Z-678c32a876384801a337d08f706bf994
 Q1_GATE_CONSUMED = YES
 LIVE_RUNS_COMPLETED = 0
@@ -145,26 +147,23 @@ scientific qualification result.
 
 ## Live path boundary
 
-The live controller is disabled unless all of the following are present:
+Q1 Live is now permanently retired at source level:
 
-1. Live mode is explicitly selected.
-2. The new task-specific switch AuthorizeLiveRun is present.
-3. The new-head token AMD-LOCALSERVICE-ACTIVE-SAMPLING-Q1-REVIEWED-PREFLIGHT-FIX-I1 is supplied.
-4. The environment marker AMD_LOCALSERVICE_ACTIVE_SAMPLING_AUTHORIZATION has
-  the value GRANTED_FOR_NEW_REVIEWED_HEAD_ONLY.
-5. All read-only preflight gates pass.
-6. The exact reviewed SHA256 identity of the controller, service host,
-   contract, parser, sc.exe helper, and LSA/cleanup helpers passes before any
-   live mutation.
+~~~text
+Q1_LIVE_RETIRED = true
+Q1_LIVE_AUTHORIZATION_AVAILABLE = false
+~~~
 
-The live path consumes Q1-LIVE-GATE.json before service registration. The gate
-is one-shot with MAX_RUNS=1 and RETRIES=0; service failure, timeout, malformed
-output, nonzero exit, and post-launch evidence failure do not permit retry.
-The gate is separate from the consumed I2G gate.
+Any `-Mode Live` invocation returns the structured result
+`BLOCKED_Q1_LIVE_RETIRED` before authorization validation, gate inspection,
+run-root creation, service registration, LSA/ACL/token mutation, or AMD
+invocation. This remains true on a machine with an empty or available gate.
 
-The previous reviewed head `3ff66c258ffb2f6aafe64790abbd7287b70ddc4e` and its
-authorization are obsolete after this preflight repair. A new human review
-and new explicit live authorization are required before any Q1 live attempt.
+The previous token and environment marker are retained in the contract only as
+`historical_authorization_*` fields for auditability. They are not accepted as
+authorization, and this repair creates no replacement Q1 token or environment
+marker. The historical Q1 gate remains immutable and separately records the
+already-consumed one-shot outcome.
 
 The moment Process.Start() succeeds, the run is irreversibly counted as one
 AMD CLI invocation and one sampling run. Durable launch-started evidence and
@@ -174,7 +173,9 @@ intent but before either successor record is durable, accounting is
 `UNKNOWN_0_OR_1` with `INVOCATION_CERTAINTY = AMBIGUOUS`; it is never serialized
 as numeric zero and the consumed gate still forbids a second run.
 
-The live path creates only the exact service
+The retired implementation details below describe the historical reviewed
+contract and evidence shape; they are not an executable authorization path.
+The live path would have created only the exact service
 ResourceTimelineAmdLocalServiceActiveSamplingQualification. It uses a
 Windows PowerShell ServiceBase host so SCM provides Session 0 and the
 non-interactive service context. The service SID type is set to unrestricted;
