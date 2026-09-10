@@ -2713,3 +2713,58 @@ The source-level retirement block is checked before any live authorization or
 gate operation. Preflight continues to inspect the authoritative gate
 read-only and reports its consumed state separately from whether that
 Preflight changed or consumed the file.
+
+## Current-state additive marker: AMD LocalService active-sampling Q2 design Q1
+
+This marker records the post-Q1 design/admission decision. It does not create
+a Q2 gate, authorization, harness, service, or live operation, and it does
+not rewrite the immutable Q1 or I2G history above.
+
+~~~text
+AMD_LOCALSERVICE_ACTIVE_SAMPLING_Q2_DESIGN_Q1 = PASS
+Q2_JUSTIFIED = YES
+Q2_DESIGN_READY = YES
+Q2_IS_NEW_EXPERIMENT = YES
+Q2_GATE_INDEPENDENT = YES
+Q2_MAX_RUNS = 1
+Q2_RETRIES = 0
+Q2_LIVE_AUTHORIZED = NO
+REAL_EXECUTION_ALLOWED = false
+Q1_GATE_IMMUTABLE = YES
+Q1_LIVE_RETIRED = YES
+Q1_RERUN_ALLOWED = NO
+Q1_AUTHORIZATION_REUSE = FORBIDDEN
+LOCALSYSTEM_FALLBACK = FORBIDDEN
+PRIVILEGE_EXPANSION_FALLBACK = FORBIDDEN
+REPAIR_AND_RERUN = FORBIDDEN
+PRODUCTION_RUNTIME_CHANGE = NO
+I2G_ATTEMPT4 = NO
+I2H_JUSTIFIED_BEFORE_Q2 = NO
+I2H_RECONSIDERATION_GATE = AFTER_VALID_Q2_RESULT
+AMD_PRODUCTION_ADMISSION = DEFER
+PRODUCTION_ACCOUNT = UNRESOLVED
+PROXY_VERDICT = INSUFFICIENT
+ENUMERATION_AND_SAMPLING_EQUIVALENCE = UNKNOWN
+Q1_GATE_CHANGED = NO
+HISTORICAL_RAW_EVIDENCE_CHANGED = NO
+I2G_REAL_GATE_CHANGED = NO
+AMD_CLI_REAL_INVOCATIONS = 0
+AMD_API_REAL_INVOCATIONS = 0
+POWER_SAMPLING_RUNS = 0
+CURRENT_TASK_SERVICE_MUTATIONS = 0
+CURRENT_TASK_LSA_MUTATIONS = 0
+CURRENT_TASK_TOKEN_MUTATIONS = 0
+CURRENT_TASK_ACL_MUTATIONS = 0
+CURRENT_TASK_DEVICE_MUTATIONS = 0
+CURRENT_TASK_DRIVER_MUTATIONS = 0
+CURRENT_TASK_PLATFORM_SECURITY_MUTATIONS = 0
+SELECTED_NEXT_TASK = HUMAN_REVIEW_Q2_DESIGN
+NEXT_GATE = HUMAN_REVIEW_Q2_DESIGN
+CURRENT_STATE_DOCUMENT =
+  docs/upgrade/amd-localservice-active-sampling-q2-design-q1.md
+~~~
+
+The Q2 design is an independent, one-shot operation-path experiment. Its
+future gate, output base, service name/Service SID, source identity, and
+authorization must be new. The Q2 controller must not inspect or alter the
+Q1 gate, and no Q2 gate is created by this design.
