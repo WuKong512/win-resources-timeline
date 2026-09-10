@@ -62,18 +62,20 @@ The duplicate audit covered:
 | All reachable commit messages and paths | No Q2-equivalent task, gate, or post-Q1 experiment found |
 | Fetched remote heads | No Q2-equivalent head found; the only matching active-sampling head is the merged Q1 harness branch |
 | PR #29 merge history | Confirmed as the merged Q1 predecessor |
-| GitHub API/CLI listing | Not available: gh and the agent-reach executable were unavailable, and the browser pull-request page did not return a stable readable state |
+| GitHub API/CLI listing | Not available: gh and the agent-reach executable were unavailable; no API result is used as evidence |
+| GitHub pull-request list, read-only browser lookup | Search `AMD LocalService` returned 0 open and 4 closed results; PR #29 is the merged Q1 predecessor and no open Q2-equivalent was shown |
 
 Therefore:
 
     Q2_EXISTING_WORK_FOUND = NO
     DUPLICATE_TASK_GATE = PASS
 
-The last limitation is recorded honestly: the result is no equivalent work in
-the fetched repository state and reachable history, not a fabricated claim
-that an unavailable GitHub API returned an empty list. If human review finds
-an authoritative equivalent before implementation, this design must stop and
-the duplicate must be reconciled before any Q2 branch or harness work.
+The API/CLI limitation is recorded honestly: the remote result above is a
+read-only browser observation, not a fabricated claim that an unavailable
+GitHub API returned an empty list. Together with the repository, branch, and
+history audit, it passes the duplicate gate. If human review finds an
+authoritative equivalent before implementation, this design must stop and the
+duplicate must be reconciled before any Q2 harness work.
 
 ## Immutable Q1 predecessor state
 
