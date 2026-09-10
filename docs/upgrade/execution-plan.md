@@ -2496,3 +2496,220 @@ QUALIFICATION_TEST_BLOCKER = PRE_EXISTING_PINNED_RELEASE_ARTIFACT_SHA256_MISMATC
 
 No live AMD operation, privilege experiment, production-account selection,
 I2H run, or Attempt #4 is authorized by this current marker.
+
+## Current-state additive marker: AMD LocalService active-sampling design Q1
+
+This marker is additive. It does not rewrite the historical execution-plan
+blocks above.
+
+~~~text
+AMD_LOCALSERVICE_ACTIVE_SAMPLING_DESIGN_Q1 = COMPLETE
+QUALIFICATION_ARTIFACT_BLOCKER_RELEVANCE = NON_BLOCKING_FOR_NEW_FROZEN_CONTRACT
+LIVE_RUN_DESIGN_READY = YES
+LIVE_RUN_AUTHORIZED = NO
+REAL_EXECUTION_ALLOWED = false
+PROXY_VERDICT = INSUFFICIENT
+ENUMERATION_AND_SAMPLING_EQUIVALENCE = UNKNOWN
+PRODUCTION_ACCOUNT = UNRESOLVED
+AMD_PRODUCTION_ADMISSION = DEFER
+I2H_JUSTIFIED = NO
+ATTEMPT4_AUTHORIZATION = NOT_GRANTED
+SELECTED_NEXT_TASK =
+  AMD-LOCALSERVICE-ACTIVE-SAMPLING-Q1 / PENDING_HUMAN_REVIEW
+NEXT_GATE = HUMAN_AUTHORIZATION_LOCALSERVICE_ACTIVE_SAMPLING
+CURRENT_STATE_DOCUMENT =
+  docs/upgrade/amd-localservice-active-sampling-design-q1.md
+~~~
+
+The future operation remains subject to the document's mandatory preflight
+and explicit human authorization. No AMD operation, service mutation,
+privilege mutation, or live qualification run was performed while creating
+this marker.
+
+## Current-state additive marker: AMD LocalService active-sampling harness I1
+
+This marker records harness readiness only. It does not mark the Q1 live
+qualification as PASS and does not authorize a live run.
+
+~~~text
+AMD_LOCALSERVICE_ACTIVE_SAMPLING_HARNESS_I1 = REVIEW_FIX_R3_COMPLETE
+Q1_LIVE_RUN = HARNESS_READY_PENDING_FINAL_REVIEW
+Q1_LIVE_RUN_AUTHORIZED = NO
+REAL_EXECUTION_ALLOWED = false
+PROXY_VERDICT = INSUFFICIENT
+ENUMERATION_AND_SAMPLING_EQUIVALENCE = UNKNOWN
+PRODUCTION_ACCOUNT = UNRESOLVED
+AMD_PRODUCTION_ADMISSION = DEFER
+SELECTED_NEXT_TASK = HUMAN_REVIEW_PR29_AFTER_R3
+NEXT_GATE = HUMAN_REVIEW_PR29_AFTER_R3
+AMD_CLI_REAL_INVOCATIONS = 0
+AMD_API_REAL_INVOCATIONS = 0
+POWER_SAMPLING_RUNS = 0
+LIVE_SERVICE_MUTATION_SUPPORTED = YES
+LIVE_CONTROL_BASELINE_LSA_MUTATION_SUPPORTED = YES
+LIVE_OUTPUT_ACL_MUTATION_SUPPORTED = YES
+ALLOWED_LSA_RIGHT = SeSystemProfilePrivilege
+ALLOWED_LSA_TARGET = EXACT_Q1_SERVICE_SID_ONLY
+CURRENT_TASK_SERVICE_MUTATIONS = 0
+CURRENT_TASK_LSA_MUTATIONS = 0
+CURRENT_TASK_TOKEN_MUTATIONS = 0
+CURRENT_TASK_ACL_MUTATIONS = 0
+CURRENT_TASK_DEVICE_MUTATIONS = 0
+CURRENT_TASK_DRIVER_MUTATIONS = 0
+CURRENT_TASK_PLATFORM_SECURITY_MUTATIONS = 0
+RUNTIME_CODE_CHANGED = NO
+RUST_RUNTIME_CHANGED = NO
+HISTORICAL_RAW_EVIDENCE_CHANGED = NO
+CURRENT_HARNESS =
+  tools/amd-localservice-active-sampling/run-amd-localservice-active-sampling.ps1
+HARNESS_IDENTITY_PIN =
+  SOURCE_SHA256_PINNED / contract.ps1 + runner + service-host + imported helpers
+LIVE_CONTROL_BASELINE_LSA_MUTATION =
+  SeSystemProfilePrivilege on EXACT_Q1_SERVICE_SID_ONLY, ownership-tracked and rollback-verified
+LSA_RECOVERY_EXPECTED_SID_SOURCE = CONTROLLER_SERVICE_DEFINITION_PLUS_OPTIONAL_SC_SHOWSID_READBACK
+EVIDENCE_SEAL_INDEPENDENT_OF_LSA_CLEANUP = YES
+WRITER_QUIESCENCE_REQUIRED_BEFORE_SEAL = YES
+LAUNCH_FAILURE_SUCCESSOR_VALIDATION = FROZEN_SCHEMA_COMMAND_AND_RUN_PATH
+CURRENT_TASK_LIVE_MUTATIONS = 0
+~~~
+
+The dry-run and offline regression suite passed without creating a service,
+starting an AMD process, consuming a live gate, or modifying historical
+evidence.
+
+## Current-state additive marker: AMD LocalService reviewed preflight fix I1
+
+This marker supersedes the immediately preceding harness-readiness marker for
+current-state handoff. It records a source-bound preflight repair only; it does
+not authorize or perform the Q1 live qualification.
+
+~~~text
+AMD_LOCALSERVICE_ACTIVE_SAMPLING_PREFLIGHT_FIX_I1 = PASS
+HARNESS_PREFLIGHT_DRIVER_ENUMERATION = FIXED
+HOST_PREFLIGHT_MODE = IMPLEMENTED
+HOST_PREFLIGHT_MODE_READ_ONLY = YES
+PREVIOUS_REVIEWED_HEAD = 3ff66c258ffb2f6aafe64790abbd7287b70ddc4e
+PREVIOUS_AUTHORIZATION_REUSABLE = NO
+NEW_HUMAN_REVIEW = REQUIRED
+NEW_LIVE_AUTHORIZATION = REQUIRED
+Q1_GATE_CONSUMED = NO
+LIVE_RUNS_COMPLETED = 0
+Q1_RUN_BUDGET_REMAINING = 1
+FIRST_LIVE_RUN_STILL_AVAILABLE = YES
+SECOND_LIVE_RUN_PERMITTED = NO
+RETRIES = 0
+Q1_LIVE_RUN = PENDING_HUMAN_REVIEW
+Q1_LIVE_RUN_AUTHORIZED = NO
+REAL_EXECUTION_ALLOWED = false
+PROXY_VERDICT = INSUFFICIENT
+ENUMERATION_AND_SAMPLING_EQUIVALENCE = UNKNOWN
+PRODUCTION_ACCOUNT = UNRESOLVED
+AMD_PRODUCTION_ADMISSION = DEFER
+SELECTED_NEXT_TASK = HUMAN_REVIEW_PR29_PREFLIGHT_FIX
+NEXT_GATE = HUMAN_REVIEW_PR29_PREFLIGHT_FIX
+CURRENT_STATE_DOCUMENT =
+  tools/amd-localservice-active-sampling/README.md
+CURRENT_HARNESS_PREFLIGHT =
+  tools/amd-localservice-active-sampling/run-amd-localservice-active-sampling.ps1 -Mode Preflight
+CURRENT_TASK_SERVICE_MUTATIONS = 0
+CURRENT_TASK_LSA_MUTATIONS = 0
+CURRENT_TASK_TOKEN_MUTATIONS = 0
+CURRENT_TASK_ACL_MUTATIONS = 0
+CURRENT_TASK_DEVICE_MUTATIONS = 0
+CURRENT_TASK_DRIVER_MUTATIONS = 0
+CURRENT_TASK_PLATFORM_SECURITY_MUTATIONS = 0
+AMD_CLI_REAL_INVOCATIONS = 0
+AMD_API_REAL_INVOCATIONS = 0
+POWER_SAMPLING_RUNS = 0
+~~~
+
+The previous authorization was bound to the pre-fix source identity and is not
+reusable. The first Q1 live run remains available, but only a new human review
+and new explicit authorization may advance it.
+
+## Current-state additive marker: AMD LocalService Q1 postmortem fix I1
+
+This marker supersedes the earlier preflight-readiness marker for the Q1
+current-state handoff. It records a postmortem harness repair after the single
+historical Q1 attempt. It does not reopen or authorize another run.
+
+~~~text
+AMD_LOCALSERVICE_ACTIVE_SAMPLING_Q1_POSTMORTEM_FIX_I1 = PASS
+PRIMARY_BUG = FIXED
+LSA_IDICTIONARY_VALIDATION = FIXED
+LSA_REAL_SHAPE_REGRESSION = PASS
+SEALED_Q1_LSA_BEFORE_REPLAY = PASS
+SECONDARY_BUG = FIXED
+Q1_GATE_ACCOUNTING = AUTHORITATIVE
+HISTORICAL_Q1_RESULT = BLOCKED_BY_HARNESS_VALIDATION_BUG
+HISTORICAL_Q1_GATE_STATE = CONSUMED
+Q1_GATE_CONSUMED = YES
+Q1_RUN_BUDGET_REMAINING = 0
+Q1_RERUN_ALLOWED = NO
+SCIENTIFIC_RESULT = NOT_OBTAINED
+PROXY_VERDICT = INSUFFICIENT
+ENUMERATION_AND_SAMPLING_EQUIVALENCE = UNKNOWN
+AMD_PRODUCTION_ADMISSION = DEFER
+PRODUCTION_ACCOUNT = UNRESOLVED
+I2H_JUSTIFIED = NO
+REAL_EXECUTION_ALLOWED = false
+AMD_CLI_REAL_INVOCATIONS = 0
+POWER_SAMPLING_RUNS = 0
+CURRENT_TASK_SERVICE_MUTATIONS = 0
+CURRENT_TASK_LSA_MUTATIONS = 0
+CURRENT_TASK_ACL_MUTATIONS = 0
+OLD_AUTHORIZATION_REUSABLE = NO
+NEW_LIVE_AUTHORIZATION_CREATED = NO
+SELECTED_NEXT_TASK = HUMAN_REVIEW_PR29_Q1_POSTMORTEM_FIX
+NEXT_GATE = HUMAN_REVIEW_PR29_Q1_POSTMORTEM_FIX
+CURRENT_STATE_DOCUMENT =
+  docs/upgrade/amd-localservice-active-sampling-q1-postmortem-fix-i1.md
+~~~
+
+The historical gate and run evidence were not modified. The postmortem fix
+corrects dictionary-shaped LSA validation and separates authoritative gate
+accounting from AMD invocation accounting; it makes no scientific claim about
+LocalService sampling. No AMD, service, LSA, ACL, token, driver, device, or
+platform-security operation was performed while creating this marker.
+
+## Current-state additive marker: AMD LocalService Q1 postmortem fix R1
+
+This marker records the narrow review-closure repair. It does not reopen the
+consumed Q1 gate or create a replacement authorization.
+
+~~~text
+AMD_LOCALSERVICE_ACTIVE_SAMPLING_Q1_POSTMORTEM_FIX_R1 = PASS
+REVIEW_BLOCKER_1 = FIXED
+Q1_LIVE_SOURCE_LEVEL_RETIRED = YES
+OLD_AUTHORIZATION_REUSABLE = NO
+NEW_Q1_LIVE_AUTHORIZATION_CREATED = NO
+REVIEW_BLOCKER_2 = FIXED
+PREFLIGHT_GATE_ACCOUNTING = UNAMBIGUOUS
+PREFLIGHT_GATE_CONSUMED_BY_THIS_PREFLIGHT = false
+HISTORICAL_Q1_GATE_STATE = CONSUMED
+HISTORICAL_Q1_RERUN_ALLOWED = NO
+HISTORICAL_Q1_RESULT = BLOCKED_BY_HARNESS_VALIDATION_BUG
+SCIENTIFIC_RESULT = NOT_OBTAINED
+PROXY_VERDICT = INSUFFICIENT
+ENUMERATION_AND_SAMPLING_EQUIVALENCE = UNKNOWN
+AMD_PRODUCTION_ADMISSION = DEFER
+PRODUCTION_ACCOUNT = UNRESOLVED
+I2H_JUSTIFIED = NO
+REAL_EXECUTION_ALLOWED = false
+AMD_CLI_REAL_INVOCATIONS = 0
+POWER_SAMPLING_RUNS = 0
+CURRENT_TASK_SERVICE_MUTATIONS = 0
+CURRENT_TASK_LSA_MUTATIONS = 0
+CURRENT_TASK_ACL_MUTATIONS = 0
+HISTORICAL_RAW_EVIDENCE_CHANGED = NO
+Q1_GATE_FILE_CHANGED = NO
+SELECTED_NEXT_TASK = HUMAN_REVIEW_PR29_Q1_POSTMORTEM_FIX_R1
+NEXT_GATE = HUMAN_REVIEW_PR29_Q1_POSTMORTEM_FIX_R1
+CURRENT_STATE_DOCUMENT =
+  docs/upgrade/amd-localservice-active-sampling-q1-postmortem-fix-i1.md
+~~~
+
+The source-level retirement block is checked before any live authorization or
+gate operation. Preflight continues to inspect the authoritative gate
+read-only and reports its consumed state separately from whether that
+Preflight changed or consumed the file.
