@@ -56,8 +56,12 @@ PROCESS_CANCEL_ALLOWED_FOR_PASS = NO
 SUCCESS_EXIT_CODE_CONTRACT = 0
 NON_CONSTANT_REQUIRED_FOR_PASS = NO
 VARIATION_RECORDED_AS_OBSERVATION = YES
-TEMPORAL_COVERAGE_CONTRACT = PREREGISTERED_BOUNDED_TOLERANCE_FOR_FROZEN_10S_COMMAND
-CADENCE_CONTRACT = PREREGISTERED_BOUNDED_TOLERANCE_FOR_1000MS_REQUEST
+TEMPORAL_COVERAGE_CONTRACT = ROLE_FROZEN; EXACT_TOLERANCE_DEFINED_IN_REVIEWED_HARNESS_IMPLEMENTATION; OFFLINE_TESTED_BEFORE_HARNESS_APPROVAL_AND_LIVE_AUTHORIZATION
+CADENCE_CONTRACT = ROLE_FROZEN; EXACT_TOLERANCE_DEFINED_IN_REVIEWED_HARNESS_IMPLEMENTATION; OFFLINE_TESTED_BEFORE_HARNESS_APPROVAL_AND_LIVE_AUTHORIZATION
+TOLERANCE_DEFINED_DURING_HARNESS_IMPLEMENTATION = YES
+TOLERANCE_OFFLINE_TEST_REQUIRED_BEFORE_HARNESS_APPROVAL = YES
+TOLERANCE_FROZEN_BEFORE_LIVE_AUTHORIZATION = YES
+POST_LIVE_TOLERANCE_CHANGE = FORBIDDEN
 RAW_MANIFEST_AND_POST_SEAL_CLOSURE_SEPARATED = YES
 Q2_DESIGN_READY = YES
 Q2_HARNESS_IMPLEMENTATION_READY = YES
@@ -200,11 +204,14 @@ The frozen output validity contract is:
     PACKAGE_POWER_SIGNAL_CREDIBILITY = PASS
 
 The parser is frozen to the historically validated output shape of the exact
-10-second, 1000-ms, CSV, `power` command. It uses a reasonable bounded
-temporal/cadence tolerance; the exact tolerance registration and offline
-fixtures must exist before implementation and cannot be changed after Live
-output is observed. Exactly 10 rows are not required because vendor startup
-and ending behavior can affect boundary rows.
+10-second, 1000-ms, CSV, `power` command. The design freezes the scientific
+role of a reasonable bounded temporal/cadence tolerance, while the exact
+numeric/algorithmic tolerance is defined as part of the source-reviewed Q2
+harness implementation and covered by offline fixtures/tests. It must be
+frozen before human approval of the harness and before any Live authorization;
+it must never be selected, widened, relaxed, or changed after Live output is
+observed. Exactly 10 rows are not required because vendor startup and ending
+behavior can affect boundary rows.
 
 These are recorded quality facts, not PASS gates:
 
@@ -226,8 +233,9 @@ Equal values alone do not create a scientific failure.
 service/context and semantic token contracts, the exact frozen command,
 `CONFIRMED_ONE` invocation, clean bounded process completion, complete durable
 process evidence, exact-run vendor output, the complete CSV/parser contract,
-and credible package-power evidence under the preregistered temporal,
-cadence, and all-zero rules.
+and credible package-power evidence under the exact temporal/cadence tolerance
+frozen in the source-reviewed harness implementation and the preregistered
+all-zero rules.
 
 ### Scientific FAIL
 

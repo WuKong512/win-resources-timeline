@@ -404,15 +404,24 @@ Machine-readable summary of the frozen Q2 contract:
       process completion; exit code 0; complete stdout/stderr and durable
       process/PID evidence; exact-run vendor output; CSV parse PASS; identified
       package-power field/unit; finite non-negative values; valid timestamp or
-      sample order; preregistered compatible temporal coverage and 1000-ms
-      cadence; credible package-power signal
+      sample order; temporal coverage and cadence compatible with the exact
+      tolerance frozen in the source-reviewed harness implementation; credible
+      package-power signal
     Q2_PACKAGE_POWER_VARIATION = Recorded observation only; YES or NO is not a
       scientific PASS predicate
     Q2_ALL_ZERO_CREDIBILITY = Separate preregistered parser/vendor-semantics
       condition; finite/non-negative values alone do not establish credibility
-    Q2_TEMPORAL_CADENCE_TOLERANCE = Bounded tolerance derived from the
-      historically validated 10-second/1000-ms command shape, registered and
-      offline-tested before implementation; never adjusted after Live output
+    Q2_TEMPORAL_CADENCE_TOLERANCE = Design freezes the scientific role of a
+      bounded tolerance derived from the historically validated
+      10-second/1000-ms command shape; exact numeric/algorithmic tolerance is
+      defined in the source-reviewed Q2 harness implementation, covered by
+      offline fixtures/tests, and frozen before human harness approval and any
+      Live authorization; never selected, widened, relaxed, or changed after
+      Live output is observed
+    TOLERANCE_DEFINED_DURING_HARNESS_IMPLEMENTATION = YES
+    TOLERANCE_OFFLINE_TEST_REQUIRED_BEFORE_HARNESS_APPROVAL = YES
+    TOLERANCE_FROZEN_BEFORE_LIVE_AUTHORIZATION = YES
+    POST_LIVE_TOLERANCE_CHANGE = FORBIDDEN
     Q2_FAIL_CRITERIA = Exact context and CONFIRMED_ONE invocation established,
       trustworthy process/runtime/vendor evidence demonstrates failure of the
       preregistered package-power question
@@ -680,13 +689,17 @@ recorded observations, not invented hard gates:
     NON_CONSTANT_REQUIRED_FOR_PASS = NO
 
 The parser must use the historically validated output shape for the frozen
-10-second/1000-ms CSV command and a bounded temporal/cadence tolerance that is
-registered and covered by offline fixtures before implementation. It must not
-require exactly 10 rows, and the tolerance cannot be selected or widened after
-Live output is seen. Finite/non-negative numeric data is distinct from a
-credible package-power signal: an all-zero series is recorded separately and
-is classified only by the preregistered vendor/output credibility semantics.
-All values being equal, by itself, is not a scientific failure.
+10-second/1000-ms CSV command and a bounded temporal/cadence tolerance. The
+design freezes the scientific role of that tolerance, while its exact
+numeric/algorithmic definition is supplied by the source-reviewed Q2 harness
+implementation and covered by offline fixtures/tests. It must be frozen before
+human approval of the harness and before any Live authorization; it must never
+be selected, widened, relaxed, or changed after Live output is observed. It
+must not require exactly 10 rows. Finite/non-negative numeric data is distinct
+from a credible package-power signal: an all-zero series is recorded
+separately and is classified only by the preregistered vendor/output
+credibility semantics. All values being equal, by itself, is not a scientific
+failure.
 
 The process result, raw output, parser, package-power evidence, writer
 quiescence, ACL seal, raw manifest/hash verification, and post-seal closure
